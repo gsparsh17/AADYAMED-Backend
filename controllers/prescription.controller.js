@@ -1,533 +1,214 @@
 const Prescription = require('../models/Prescription');
-const Vital = require('../models/Vital');
-const multer = require('multer');
-const path = require('path');
-const cloudinary = require('cloudinary').v2;
-const fs = require('fs');
+const Appointment = require('../models/Appointment');
+const PatientProfile = require('../models/PatientProfile');
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-
-
-// Configure Multer for disk storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname)); 
-  }
-});
-
-// The upload endpoint with Multer middleware
-exports.uploadPrescriptionImage = async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No image file provided' });
-    }
-    const result = await cloudinary.uploader.upload(req.file.path, {
-        folder: 'prescriptions',
-        resource_type: 'image'
-    });
-    const fs = require('fs');
-    fs.unlinkSync(req.file.path);
-
-    res.json({ imageUrl: result.secure_url });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Create prescription
 exports.createPrescription = async (req, res) => {
   try {
-    const { 
-      patient_id, 
-      doctor_id, 
-      appointment_id, 
-      diagnosis, 
-      symptoms, 
-      notes, 
-      investigation,
-      items, 
-      prescription_image,
-      validity_days,
-      follow_up_date,
-      is_repeatable,
-      repeat_count 
-    } = req.body;
-
-    // Process items to ensure all fields are included
-    const processedItems = items && Array.isArray(items) 
-      ? items.map(item => ({
-          medicine_name: item.medicine_name || '',
-          dosage: item.dosage || '',
-          medicine_type: item.medicine_type || '',
-          route_of_administration: item.route_of_administration || '',
-          frequency: item.frequency || '',
-          duration: item.duration || '',
-          quantity: item.quantity || 0,
-          instructions: item.instructions || '',
-          generic_name: item.generic_name || '',
-          timing: item.timing || undefined,
-          is_dispensed: item.is_dispensed || false,
-          dispensed_quantity: item.dispensed_quantity || 0
-        }))
-      : [];
-
-    // Create prescription
-    const prescription = new Prescription({ 
-      patient_id, 
-      doctor_id, 
-      appointment_id,
-      diagnosis, 
+    const {
+      appointmentId,
+      diagnosis,
       symptoms,
-      investigation: investigation || null,
-      notes,
-      items: processedItems,
-      prescription_image: prescription_image || null,
-      validity_days: validity_days || 30,
-      follow_up_date: follow_up_date ? new Date(follow_up_date) : null,
-      is_repeatable: is_repeatable || false,
-      repeat_count: repeat_count || 0,
-      created_by: req.user?._id
+      medicines,
+      labTests,
+      advice,
+      followUpDate,
+      exercises
+    } = req.body;
+    
+    const appointment = await Appointment.findById(appointmentId);
+    if (!appointment) {
+      return res.status(404).json({ message: 'Appointment not found' });
+    }
+    
+    // Check authorization
+    if (!canCreatePrescription(req.user, appointment)) {
+      return res.status(403).json({ message: 'Not authorized to create prescription' });
+    }
+    
+    // Check if prescription already exists
+    const existingPrescription = await Prescription.findOne({ appointmentId });
+    if (existingPrescription) {
+      return res.status(400).json({ message: 'Prescription already exists for this appointment' });
+    }
+    
+    const prescription = await Prescription.create({
+      appointmentId,
+      patientId: appointment.patientId,
+      [appointment.professionalType === 'doctor' ? 'doctorId' : 'physioId']: 
+        appointment.professionalType === 'doctor' ? appointment.doctorId : appointment.physioId,
+      professionalType: appointment.professionalType,
+      diagnosis,
+      symptoms,
+      medicines,
+      labTests,
+      advice,
+      followUpDate,
+      exercises: appointment.professionalType === 'physiotherapist' ? exercises : undefined,
+      status: 'issued'
     });
     
-    await prescription.save();
-
-    // Populate the response
-    const populatedPrescription = await Prescription.findById(prescription._id)
-      .populate('patient_id', 'first_name last_name patientId')
-      .populate('doctor_id', 'firstName lastName specialization')
-      .populate('appointment_id', 'appointment_date type')
-      .populate('created_by', 'name');
-
-    res.status(201).json({ 
-      prescription: populatedPrescription,
-      message: 'Prescription created successfully' 
-    });
-  } catch (err) {
-    console.error('Error creating prescription:', err);
-    res.status(400).json({ error: err.message });
+    // Update appointment
+    appointment.prescriptionId = prescription._id;
+    await appointment.save();
+    
+    // Generate PDF (in real implementation)
+    // prescription.prescriptionPdf = await generatePrescriptionPDF(prescription);
+    // await prescription.save();
+    
+    res.status(201).json({ success: true, prescription });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-// // Get all prescriptions (with fix and logging)
-// exports.getAllPrescriptions = async (req, res) => {
-//   try {
-//     let prescriptions = await Prescription.aggregate([
-//       {
-//         $lookup: {
-//           from: 'prescriptionitems', // Collection name for PrescriptionItem model
-//           localField: '_id',
-//           foreignField: 'prescription_id',
-//           as: 'medicines' 
-//         }
-//       },
-//       {
-//         // CORRECTED: Sort by 'created_at' to match your schema
-//         $sort: { created_at: -1 }
-//       }
-//     ]);
-
-//     prescriptions = await Prescription.populate(prescriptions, [
-//         { path: 'patient_id' },
-//         { path: 'doctor_id', model: 'Doctor' }
-//     ]);
-    
-//     // --- DEBUGGING LOG ---
-//     console.log('Final data being sent to frontend:', JSON.stringify(prescriptions, null, 2));
-
-//     res.json(prescriptions);
-//   } catch (err) {
-//     // --- ADDED ERROR LOG ---
-//     console.error("Error in getAllPrescriptions:", err);
-//     res.status(500).json({ error: err.message });
-//   }
-// };
-
-
-
-
-
-// In HIMS_Api/controllers/prescription.controller.js
-
-exports.getAllPrescriptions = async (req, res) => {
+exports.getPrescriptions = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 10, 
-      patient_id, 
-      doctor_id, 
-      appointment_id,
-      status, 
-      startDate, 
-      endDate 
-    } = req.query;
-
+    const { patientId, startDate, endDate, page = 1, limit = 10 } = req.query;
+    
     const filter = {};
-    if (patient_id) filter.patient_id = patient_id;
-    if (doctor_id) filter.doctor_id = doctor_id;
-    if (appointment_id) filter.appointment_id = appointment_id;
-    if (status) filter.status = status;
+    
+    // Role-based filtering
+    if (req.user.role === 'patient') {
+      filter.patientId = req.user.profileId;
+    } else if (['doctor', 'physiotherapist'].includes(req.user.role)) {
+      filter[req.user.role === 'doctor' ? 'doctorId' : 'physioId'] = req.user.profileId;
+      filter.professionalType = req.user.role;
+    } else if (req.user.role === 'admin') {
+      if (patientId) filter.patientId = patientId;
+    } else {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
     
     if (startDate && endDate) {
-      filter.issue_date = {
+      filter.issuedAt = {
         $gte: new Date(startDate),
         $lte: new Date(endDate)
       };
     }
-
+    
     const prescriptions = await Prescription.find(filter)
-      .populate('patient_id', 'first_name last_name patientId')
-      .populate('doctor_id', 'firstName lastName specialization')
-      .populate('appointment_id', 'appointment_date type')
-      .sort({ issue_date: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    // Fetch vitals for each prescription
-    const prescriptionsWithVitals = await Promise.all(prescriptions.map(async (p) => {
-      const vital = await Vital.findOne({ prescription_id: p._id });
-      return {
-        ...p.toObject(),
-        vitals: vital || null
-      };
-    }));
-
+      .sort({ issuedAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .populate('patientId', 'name age gender')
+      .populate('doctorId', 'name specialization')
+      .populate('physioId', 'name specialization')
+      .populate('appointmentId', 'appointmentDate type');
+    
     const total = await Prescription.countDocuments(filter);
-
+    
     res.json({
-      prescriptions: prescriptionsWithVitals,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
+      success: true,
+      prescriptions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
     });
-  } catch (err) {
-    console.error("Error in getAllPrescriptions:", err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-
-
-
-
-// Get a prescription by ID
 exports.getPrescriptionById = async (req, res) => {
   try {
     const prescription = await Prescription.findById(req.params.id)
-      .populate('patient_id', 'first_name last_name patientId phone dob gender')
-      .populate('doctor_id', 'firstName lastName specialization licenseNumber department')
-      .populate('appointment_id', 'appointment_date type priority')
-      .populate('created_by', 'name');
-
+      .populate('patientId')
+      .populate('doctorId')
+      .populate('physioId')
+      .populate('appointmentId');
+    
     if (!prescription) {
-      return res.status(404).json({ error: 'Prescription not found' });
+      return res.status(404).json({ message: 'Prescription not found' });
     }
-
-    // Fetch associated vitals
-    const vitals = await Vital.findOne({ prescription_id: prescription._id });
-
-    // Return prescription converted to object with vitals attached
-    res.json({
-      ...prescription.toObject(),
-      vitals: vitals || null
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    
+    // Check authorization
+    if (!canViewPrescription(req.user, prescription)) {
+      return res.status(403).json({ message: 'Not authorized to view this prescription' });
+    }
+    
+    res.json({ success: true, prescription });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-// Update prescription
 exports.updatePrescription = async (req, res) => {
   try {
-    const { 
-      diagnosis, 
-      symptoms, 
-      notes, 
-      investigation,
-      items, 
-      status,
-      validity_days,
-      follow_up_date,
-      is_repeatable,
-      repeat_count 
-    } = req.body;
-
-    // Process items to ensure all fields are included
-    let processedItems;
-    if (items && Array.isArray(items)) {
-      processedItems = items.map(item => ({
-        medicine_name: item.medicine_name || '',
-        dosage: item.dosage || '',
-        medicine_type: item.medicine_type || '',
-        route_of_administration: item.route_of_administration || '',
-        frequency: item.frequency || '',
-        duration: item.duration || '',
-        quantity: item.quantity || 0,
-        instructions: item.instructions || '',
-        generic_name: item.generic_name || '',
-        timing: item.timing || undefined,
-        is_dispensed: item.is_dispensed || false,
-        dispensed_quantity: item.dispensed_quantity || 0
-      }));
-    }
-
-    const updateData = {
-      diagnosis,
-      symptoms,
-      investigation,
-      notes,
-      status,
-      validity_days,
-      follow_up_date: follow_up_date ? new Date(follow_up_date) : null,
-      is_repeatable,
-      repeat_count
-    };
-
-    // Only update items if provided
-    if (processedItems) {
-      updateData.items = processedItems;
-    }
-
-    const prescription = await Prescription.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
-    )
-    .populate('patient_id', 'first_name last_name patientId')
-    .populate('doctor_id', 'firstName lastName specialization')
-    .populate('appointment_id', 'appointment_date type');
-
+    const prescription = await Prescription.findById(req.params.id);
     if (!prescription) {
-      return res.status(404).json({ error: 'Prescription not found' });
+      return res.status(404).json({ message: 'Prescription not found' });
     }
-
-    // --- HANDLE VITALS UPDATE ---
-    let savedVitals = null;
-    if (req.body.vitals) {
-      const { bp, weight, pulse, spo2, temperature } = req.body.vitals;
-      
-      // Check if vitals already exist for this prescription
-      let vitalRecord = await Vital.findOne({ prescription_id: prescription._id });
-
-      if (vitalRecord) {
-        // Update existing
-        vitalRecord.bp = bp || vitalRecord.bp;
-        vitalRecord.weight = weight || vitalRecord.weight;
-        vitalRecord.pulse = pulse || vitalRecord.pulse;
-        vitalRecord.spo2 = spo2 || vitalRecord.spo2;
-        vitalRecord.temperature = temperature || vitalRecord.temperature;
-        vitalRecord.recorded_at = new Date(); // Update timestamp
-        savedVitals = await vitalRecord.save();
-      } else {
-        // Create new
-        savedVitals = await Vital.create({
-          patient_id: prescription.patient_id._id || prescription.patient_id, // Handle populated vs unpopulated
-          prescription_id: prescription._id,
-          recorded_by: req.user ? req.user._id : null, 
-          bp,
-          weight,
-          pulse,
-          spo2,
-          temperature
-        });
-      }
-    }
-
-    res.json({ 
-      prescription,
-      vitals: savedVitals, // Return vitals too
-      message: 'Prescription updated successfully' 
-    });
-  } catch (err) {
-    console.error('Error updating prescription:', err);
-    res.status(400).json({ error: err.message });
-  }
-};
-
-// Delete prescription
-exports.deletePrescription = async (req, res) => {
-  try {
-    const prescription = await Prescription.findByIdAndDelete(req.params.id);
     
-    if (!prescription) {
-      return res.status(404).json({ error: 'Prescription not found' });
+    if (!canUpdatePrescription(req.user, prescription)) {
+      return res.status(403).json({ message: 'Not authorized to update this prescription' });
     }
-
-    res.json({ message: 'Prescription deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Update prescription item status (dispense medication)
-exports.dispenseMedication = async (req, res) => {
-  try {
-    const { prescriptionId, itemIndex } = req.params;
-    const { dispensed_quantity } = req.body;
-
-    const prescription = await Prescription.findById(prescriptionId);
     
-    if (!prescription) {
-      return res.status(404).json({ error: 'Prescription not found' });
-    }
-
-    if (itemIndex >= prescription.items.length) {
-      return res.status(400).json({ error: 'Invalid item index' });
-    }
-
-    const item = prescription.items[itemIndex];
-    const quantityToDispense = dispensed_quantity || item.quantity;
-
-    if (quantityToDispense > item.quantity) {
-      return res.status(400).json({ error: 'Dispensed quantity cannot exceed prescribed quantity' });
-    }
-
-    // Update item dispense status
-    prescription.items[itemIndex].is_dispensed = true;
-    prescription.items[itemIndex].dispensed_quantity = quantityToDispense;
-    prescription.items[itemIndex].dispensed_date = new Date();
-
-    // Check if all items are dispensed to update prescription status
-    const allDispensed = prescription.items.every(item => item.is_dispensed);
-    if (allDispensed) {
-      prescription.status = 'Completed';
-    }
-
-    await prescription.save();
-
-    const updatedPrescription = await Prescription.findById(prescriptionId)
-      .populate('patient_id', 'first_name last_name patientId')
-      .populate('doctor_id', 'firstName lastName specialization');
-
-    res.json({
-      prescription: updatedPrescription,
-      message: 'Medication dispensed successfully'
-    });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
+    // Create new version
+    const newPrescription = prescription.toObject();
+    delete newPrescription._id;
+    delete newPrescription.prescriptionNumber;
+    
+    newPrescription.previousVersion = prescription._id;
+    newPrescription.version = prescription.version + 1;
+    
+    // Update with new data
+    Object.assign(newPrescription, req.body);
+    
+    const updatedPrescription = await Prescription.create(newPrescription);
+    
+    res.json({ success: true, prescription: updatedPrescription });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-// Get prescriptions by patient ID
-exports.getPrescriptionsByPatientId = async (req, res) => {
-  try {
-    const { patientId } = req.params;
-    const { status, page = 1, limit = 10 } = req.query;
-
-    const filter = { patient_id: patientId };
-    if (status) filter.status = status;
-
-    const prescriptions = await Prescription.find(filter)
-      .populate('doctor_id', 'firstName lastName specialization')
-      .populate('appointment_id', 'appointment_date type')
-      .sort({ issue_date: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    const total = await Prescription.countDocuments(filter);
-
-    res.json({
-      prescriptions,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+// Authorization helpers
+function canCreatePrescription(user, appointment) {
+  if (user.role === 'admin') return true;
+  
+  if (user.role === 'doctor' && 
+      appointment.professionalType === 'doctor' &&
+      appointment.doctorId?.toString() === user.profileId &&
+      appointment.status === 'completed') {
+    return true;
   }
-};
-
-// Get prescriptions by doctor ID
-exports.getPrescriptionsByDoctorId = async (req, res) => {
-  try {
-    const { doctorId } = req.params;
-    const { status, page = 1, limit = 10 } = req.query;
-
-    const filter = { doctor_id: doctorId };
-    if (status) filter.status = status;
-
-    const prescriptions = await Prescription.find(filter)
-      .populate('patient_id', 'first_name last_name patientId')
-      .populate('appointment_id', 'appointment_date type')
-      .sort({ issue_date: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    const total = await Prescription.countDocuments(filter);
-
-    res.json({
-      prescriptions,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  
+  if (user.role === 'physiotherapist' &&
+      appointment.professionalType === 'physiotherapist' &&
+      appointment.physioId?.toString() === user.profileId &&
+      appointment.status === 'completed') {
+    return true;
   }
-};
+  
+  return false;
+}
 
-// Get active prescriptions (not expired and not completed)
-exports.getActivePrescriptions = async (req, res) => {
-  try {
-    const { page = 1, limit = 10 } = req.query;
-
-    const prescriptions = await Prescription.find({
-      status: 'Active',
-      issue_date: { 
-        $gte: new Date(Date.now() - (30 * 24 * 60 * 60 * 1000)) // Last 30 days
-      }
-    })
-    .populate('patient_id', 'first_name last_name patientId')
-    .populate('doctor_id', 'firstName lastName specialization')
-    .sort({ issue_date: -1 })
-    .limit(limit * 1)
-    .skip((page - 1) * limit);
-
-    const total = await Prescription.countDocuments({
-      status: 'Active',
-      issue_date: { 
-        $gte: new Date(Date.now() - (30 * 24 * 60 * 60 * 1000))
-      }
-    });
-
-    res.json({
-      prescriptions,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+function canViewPrescription(user, prescription) {
+  if (user.role === 'admin') return true;
+  
+  if (user.role === 'patient' && 
+      prescription.patientId._id.toString() === user.profileId) {
+    return true;
   }
-};
-
-// Check prescription expiry (can be run as a cron job)
-exports.checkPrescriptionExpiry = async () => {
-  try {
-    const expiredPrescriptions = await Prescription.find({
-      status: 'Active',
-      issue_date: { 
-        $lte: new Date(Date.now() - (30 * 24 * 60 * 60 * 1000)) // Older than 30 days
-      }
-    });
-
-    for (const prescription of expiredPrescriptions) {
-      prescription.status = 'Expired';
-      await prescription.save();
-    }
-
-    return {
-      expiredCount: expiredPrescriptions.length,
-      message: `Marked ${expiredPrescriptions.length} prescriptions as expired`
-    };
-  } catch (err) {
-    console.error('Error checking prescription expiry:', err);
-    throw err;
+  
+  if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId) ||
+      (user.role === 'physiotherapist' && prescription.physioId?._id.toString() === user.profileId)) {
+    return true;
   }
-};
+  
+  return false;
+}
+
+function canUpdatePrescription(user, prescription) {
+  if (user.role === 'admin') return true;
+  
+  if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId) ||
+      (user.role === 'physiotherapist' && prescription.physioId?._id.toString() === user.profileId)) {
+    return true;
+  }
+  
+  return false;
+}

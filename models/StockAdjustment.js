@@ -1,29 +1,63 @@
 const mongoose = require('mongoose');
 
 const stockAdjustmentSchema = new mongoose.Schema({
-  medicine_id: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Medicine', 
-    required: true 
+  medicineId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Medicine',
+    required: true
   },
-  batch_id: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'MedicineBatch' 
+  batchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'MedicineBatch'
   },
-  adjustment_type: { 
-    type: String, 
-    enum: ['Addition', 'Deduction', 'Correction', 'Damage', 'Expiry'], 
-    required: true 
+  
+  // Quantities
+  previousQuantity: {
+    type: Number,
+    required: true
   },
-  quantity: { type: Number, required: true },
-  reason: { type: String, required: true },
-  adjusted_by: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    required: true 
+  adjustmentQuantity: {
+    type: Number,
+    required: true
   },
-  reference: { type: String }, // Link to purchase order, sale, etc.
-  notes: { type: String }
-}, { timestamps: true });
+  newQuantity: {
+    type: Number,
+    required: true
+  },
+  
+  // Adjustment Details
+  adjustmentType: {
+    type: String,
+    enum: ['addition', 'deduction', 'damage', 'expiry', 'theft', 'correction', 'transfer'],
+    required: true
+  },
+  reason: String,
+  
+  // Reference
+  referenceType: {
+    type: String,
+    enum: ['sale', 'purchase', 'prescription', 'return', 'manual', 'other']
+  },
+  referenceId: mongoose.Schema.Types.ObjectId,
+  
+  // Notes
+  notes: String,
+  
+  // Audit
+  adjustedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }
+}, {
+  timestamps: true
+});
+
+stockAdjustmentSchema.index({ medicineId: 1, createdAt: -1 });
+stockAdjustmentSchema.index({ adjustmentType: 1 });
 
 module.exports = mongoose.model('StockAdjustment', stockAdjustmentSchema);

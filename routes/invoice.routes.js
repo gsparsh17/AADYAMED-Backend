@@ -1,32 +1,20 @@
 const express = require('express');
 const router = express.Router();
-const {
-  generateAppointmentInvoice,
-  generatePharmacyInvoice,
-  generatePurchaseInvoice,
-  getAllInvoices,
-  getInvoiceById,
-  updateInvoicePayment,
-  getInvoicesByType,
-  getInvoiceStatistics,
-  exportInvoices,
-  downloadInvoicePDF,
-  getPharmacyInvoices,
-  getPharmacyMonthlyRevenue
-} = require('../controllers/invoice.controller');
+const invoiceController = require('../controllers/invoice.controller');
+const { protect } = require('../middlewares/auth');
 
-// Invoice routes
-router.post('/appointment', generateAppointmentInvoice);
-router.post('/pharmacy', generatePharmacyInvoice);
-router.post('/purchase', generatePurchaseInvoice);
-router.get('/', getAllInvoices);
-router.get('/pharmacy', getPharmacyInvoices);
-router.get('/stats', getInvoiceStatistics);
-router.get('/stats/pharmacy-monthly', getPharmacyMonthlyRevenue);
-router.get('/export', exportInvoices);
-router.get('/type/:type', getInvoicesByType);
-router.get('/:id', getInvoiceById);
-router.get('/:id/download', downloadInvoicePDF);
-router.put('/:id/payment', updateInvoicePayment);
+router.use(protect);
+
+// Create invoices
+router.post('/', invoiceController.createInvoice);
+
+// Get invoices
+router.get('/', invoiceController.getAllInvoices);
+router.get('/stats', invoiceController.getInvoiceStats);
+router.get('/:id', invoiceController.getInvoiceById);
+router.get('/:id/pdf', invoiceController.generateInvoicePDF);
+
+// Update payment
+router.put('/:id/payment', invoiceController.updatePayment);
 
 module.exports = router;

@@ -1,38 +1,31 @@
 const express = require('express');
 const router = express.Router();
 const patientController = require('../controllers/patient.controller');
+const { protect, authorize } = require('../middlewares/auth');
 
-// --- Specific routes first ---
+router.use(protect, authorize('patient'));
 
-// Image Upload
-const multer = require('multer');
-const path = require('path');
+// Profile
+router.get('/profile', patientController.getProfile);
+router.put('/profile', patientController.updateProfile);
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname)); 
-  }
-});
+// Medical History
+router.get('/medical-history', patientController.getMedicalHistory);
+router.post('/medical-history', patientController.addMedicalRecord);
 
-const upload = multer({ storage: storage });
+// Appointments
+router.get('/appointments', patientController.getAppointments);
 
-router.post('/upload', upload.single('image'), patientController.uploadPatientImage);
+// Prescriptions
+router.get('/prescriptions', patientController.getPrescriptions);
 
-router.post('/', patientController.createPatient);
+// Lab Reports
+router.get('/lab-reports', patientController.getLabReports);
 
-// Make sure this line exists and is in the correct place
-router.post('/bulk-add', patientController.bulkCreatePatients); 
+// Invoices
+router.get('/invoices', patientController.getInvoices);
 
-router.get('/', patientController.getAllPatients);
-
-
-// --- General, parameterized routes last ---
-
-router.get('/:id', patientController.getPatientById);
-router.put('/:id', patientController.updatePatient);
-router.delete('/:id', patientController.deletePatient);
+// Dashboard
+router.get('/dashboard', patientController.getDashboardStats);
 
 module.exports = router;

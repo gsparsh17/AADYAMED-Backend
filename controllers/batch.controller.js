@@ -1,91 +1,46 @@
 const MedicineBatch = require('../models/MedicineBatch');
 const Medicine = require('../models/Medicine');
+const StockAdjustment = require('../models/StockAdjustment');
 
-// Add new batch
-exports.addBatch = async (req, res) => {
-  try {
-    const batch = new MedicineBatch(req.body);
-    await batch.save();
-    
-    // Update medicine's stock (optional - can be calculated on demand)
-    await Medicine.findByIdAndUpdate(
-      batch.medicine_id,
-      { $inc: { stock_quantity: batch.quantity } }
-    );
-    
-    res.status(201).json(batch);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-};
-
-// Get all batches with optional filtering
 exports.getAllBatches = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 10,
-      sortBy = 'expiry_date',
-      sortOrder = 'asc',
-      medicineId,
-      supplier,
-      expiryThreshold
+    const { 
+      medicineId, 
+      isExpired, 
+      isActive,
+      page = 1, 
+      limit = 20 
     } = req.query;
     
-    // Build filter object
     const filter = {};
+    if (medicineId) filter.medicineId = medicineId;
+    if (isExpired !== undefined) filter.isExpired = isExpired === 'true';
+    if (isActive !== undefined) filter.isActive = isActive === 'true';
     
-    if (medicineId) {
-      filter.medicine_id = medicineId;
-    }
-    
-    if (supplier) {
-      filter.supplier = { $regex: supplier, $options: 'i' };
-    }
-    
-    if (expiryThreshold) {
-      const thresholdDate = new Date();
-      thresholdDate.setDate(thresholdDate.getDate() + parseInt(expiryThreshold));
-      filter.expiry_date = { $lte: thresholdDate };
-    }
-    
-    // Execute query with pagination
     const batches = await MedicineBatch.find(filter)
-      .populate('medicine_id', 'name brand strength')
-      .sort({ [sortBy]: sortOrder === 'asc' ? 1 : -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .populate('medicineId', 'medicineName genericName')
+      .populate('supplierId', 'name companyName')
+      .sort({ expiryDate: 1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
     
-    // Get total count for pagination
     const total = await MedicineBatch.countDocuments(filter);
     
     res.json({
+      success: true,
       batches,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-// Get batches for medicine
-exports.getBatchesByMedicine = async (req, res) => {
-  try {
-    console.log(req.params.medicineId);
-    const batches = await MedicineBatch.find({ 
-      medicine_id: req.params.medicineId,
-      quantity: { $gt: 0 }
-    }).sort({ expiry_date: 1 });
-    
-    res.json(batches);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Update batch
 exports.updateBatch = async (req, res) => {
   try {
     const batch = await MedicineBatch.findByIdAndUpdate(
@@ -93,29 +48,56 @@ exports.updateBatch = async (req, res) => {
       req.body,
       { new: true, runValidators: true }
     );
-    if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    res.json(batch);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
+    
+    if (!batch) {
+      return res.status(404).json({ message: 'Batch not found' });
+    }
+    
+    res.json({ success: true, batch });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-// Get batches expiring soon (within 30 days)
-exports.getExpiringBatches = async (req, res) => {
+exports.adjustBatchQuantity = async (req, res) => {
   try {
-    const thirtyDaysFromNow = new Date();
-    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+    const { quantity, reason, adjustmentType } = req.body;
     
-    const batches = await MedicineBatch.find({
-      expiry_date: { 
-        $gte: new Date(),
-        $lte: thirtyDaysFromNow 
-      },
-      quantity: { $gt: 0 }
-    }).populate('medicine_id');
+    const batch = await MedicineBatch.findById(req.params.id);
+    if (!batch) {
+      return res.status(404).json({ message: 'Batch not found' });
+    }
     
-    res.json(batches);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const previousQuantity = batch.availableQuantity;
+    batch.availableQuantity += quantity;
+    
+    if (batch.availableQuantity < 0) {
+      return res.status(400).json({ message: 'Insufficient stock' });
+    }
+    
+    await batch.save();
+    
+    // Update medicine total quantity
+    const medicine = await Medicine.findById(batch.medicineId);
+    if (medicine) {
+      medicine.quantity += quantity;
+      await medicine.save();
+    }
+    
+    // Record adjustment
+    await StockAdjustment.create({
+      medicineId: batch.medicineId,
+      batchId: batch._id,
+      previousQuantity,
+      adjustmentQuantity: quantity,
+      newQuantity: batch.availableQuantity,
+      adjustmentType: adjustmentType || 'correction',
+      reason,
+      adjustedBy: req.user.id
+    });
+    
+    res.json({ success: true, batch, medicine });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };

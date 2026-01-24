@@ -1,28 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const doctorController = require('../controllers/doctor.controller');
+const { protect, authorize } = require('../middlewares/auth');
 
-// --- Specific routes first ---
+router.use(protect, authorize('doctor'));
 
-// Create a single doctor
-router.post('/', doctorController.createDoctor);
-
-// Bulk create doctors
-router.post('/bulk-add', doctorController.bulkCreateDoctors);
-
-// Get all doctors
-router.get('/', doctorController.getAllDoctors);
-
-// Get doctors by department (also more specific than just /:id)
-router.get('/department/:departmentId', doctorController.getDoctorsByDepartmentId);
-
-// Get a single doctor by ID
-router.get('/:id', doctorController.getDoctorById);
-
-// Update a single doctor by ID
-router.put('/:id', doctorController.updateDoctor);
-
-// Delete a single doctor by ID
-router.delete('/:id', doctorController.deleteDoctor);
+router.get('/profile', doctorController.getProfile);
+router.put('/profile', doctorController.updateProfile);
+router.put('/availability', doctorController.updateAvailability);
+router.get('/appointments', doctorController.getAppointments);
+router.get('/earnings', doctorController.getEarnings);
 
 module.exports = router;

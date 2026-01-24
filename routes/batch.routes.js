@@ -1,18 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const {
-  addBatch,
-  getBatchesByMedicine,
-  updateBatch,
-  getExpiringBatches,
-  getAllBatches
-} = require('../controllers/batch.controller');
+const batchController = require('../controllers/batch.controller');
+const { protect, authorize } = require('../middlewares/auth');
 
-// Batch routes
-router.post('/', addBatch);
-router.get('/', getAllBatches);
-router.get('/medicine/:medicineId', getBatchesByMedicine);
-router.get('/expiring-soon', getExpiringBatches);
-router.put('/:id', updateBatch);
+router.use(protect);
+router.use(authorize('admin', 'pharmacy'));
+
+router.get('/', batchController.getAllBatches);
+router.put('/:id', batchController.updateBatch);
+router.post('/:id/adjust', batchController.adjustBatchQuantity);
 
 module.exports = router;

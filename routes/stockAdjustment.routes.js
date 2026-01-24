@@ -1,14 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const {
-  createAdjustment,
-  getAdjustmentsByMedicine,
-  getAllAdjustments
-} = require('../controllers/stockAdjustment.controller');
+const stockAdjustmentController = require('../controllers/stockAdjustment.controller');
+const { protect, authorize } = require('../middlewares/auth');
 
-// Stock Adjustment routes
-router.post('/', createAdjustment);
-router.get('/', getAllAdjustments);
-router.get('/medicine/:medicineId', getAdjustmentsByMedicine);
+router.use(protect);
+router.use(authorize('admin', 'pharmacy'));
+
+router.get('/', stockAdjustmentController.getAllAdjustments);
+router.get('/stats', stockAdjustmentController.getAdjustmentStats);
+router.post('/', stockAdjustmentController.createAdjustment);
 
 module.exports = router;

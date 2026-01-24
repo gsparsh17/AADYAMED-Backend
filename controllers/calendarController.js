@@ -1,563 +1,358 @@
-// const Calendar = require('../models/Calendar');
-// const { default: mongoose } = require('mongoose');
-
-// // Book a slot
-// const bookSlot = async (req, res) => {
-//   try {
-//     const { hospitalId, date, doctorId, slot } = req.body;
-//     const calendar = await Calendar.findOne({ hospitalId });
-//     if (!calendar) return res.status(404).json({ message: 'Calendar not found' });
-
-//     const day = calendar.days.find(d => d.date.toISOString().split('T')[0] === date);
-//     if (!day) return res.status(404).json({ message: 'Date not found' });
-
-//     const doctor = day.doctors.find(d => d.doctorId.toString() === doctorId);
-//     if (!doctor) return res.status(404).json({ message: 'Doctor not found' });
-
-//     if (!doctor.availableSlots.includes(slot)) {
-//       return res.status(400).json({ message: 'Slot not available' });
-//     }
-
-//     doctor.availableSlots = doctor.availableSlots.filter(s => s !== slot);
-//     doctor.bookedSlots.push(slot);
-
-//     await calendar.save();
-//     res.json({ message: 'Slot booked successfully' });
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
-// // Cancel a booking
-// const cancelBooking = async (req, res) => {
-//   try {
-//     const { hospitalId, date, doctorId, slot } = req.body;
-//     const calendar = await Calendar.findOne({ hospitalId });
-//     if (!calendar) return res.status(404).json({ message: 'Calendar not found' });
-
-//     const day = calendar.days.find(d => d.date.toISOString().split('T')[0] === date);
-//     if (!day) return res.status(404).json({ message: 'Date not found' });
-
-//     const doctor = day.doctors.find(d => d.doctorId.toString() === doctorId);
-//     if (!doctor) return res.status(404).json({ message: 'Doctor not found' });
-
-//     if (!doctor.bookedSlots.includes(slot)) {
-//       return res.status(400).json({ message: 'Slot not booked' });
-//     }
-
-//     doctor.bookedSlots = doctor.bookedSlots.filter(s => s !== slot);
-//     doctor.availableSlots.push(slot);
-
-//     await calendar.save();
-//     res.json({ message: 'Booking cancelled successfully' });
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
-// // Get full doctor's calendar across all days
-// const getDoctorCalendar = async (req, res) => {
-//   try {
-//     const { doctorId } = req.params;
-
-//     if (!mongoose.Types.ObjectId.isValid(doctorId)) {
-//       return res.status(400).json({ message: 'Invalid doctorId format' });
-//     }
-
-//     const calendars = await Calendar.find({
-//       'days.doctors.doctorId': new mongoose.Types.ObjectId(doctorId)
-//     }).populate('days.doctors.doctorId');
-
-//     if (!calendars.length) {
-//       return res.status(404).json({ message: 'No calendar found for this doctor' });
-//     }
-
-//     const doctorSchedule = calendars.map(calendar => ({
-//       hospitalId: calendar.hospitalId,
-//       days: calendar.days
-//         .map(day => ({
-//           date: day.date,
-//           dayName: day.dayName,
-//           doctor: day.doctors.find(doc => {
-//             const id = doc.doctorId?._id || doc.doctorId;
-//             return id.toString() === doctorId;
-//           }) || null
-//         }))
-//     }));
-
-//     res.json(doctorSchedule);
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
-// // GET all calendar data for a hospital
-// const getHospitalCalendar = async (req, res) => {
-//   try {
-//     const { hospitalId } = req.params;
-//     const calendar = await Calendar.findOne({ hospitalId }).populate('days.doctors.doctorId');
-//     res.json(calendar);
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
-// // GET doctor's data for today at a specific hospital
-// const getTodayDoctorData = async (req, res) => {
-//   try {
-//     const { hospitalId, doctorId } = req.params;
-
-//     const today = new Date().toISOString().split('T')[0];
-//     const calendar = await Calendar.findOne({ hospitalId });
-//     if (!calendar) return res.status(404).json({ message: 'Calendar not found' });
-
-//     const todayData = calendar.days.find(d => d.date.toISOString().split('T')[0] === today);
-//     if (!todayData) return res.status(404).json({ message: 'No data for today' });
-
-//     const doctorData = todayData.doctors.find(d => d.doctorId.toString() === doctorId);
-//     if (!doctorData) return res.status(404).json({ message: 'Doctor not available today' });
-
-//     res.json(doctorData);
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
-// // GET specific day data for a hospital
-// const getDayData = async (req, res) => {
-//   try {
-//     const { hospitalId, date } = req.params;
-//     const calendar = await Calendar.findOne({ hospitalId });
-//     if (!calendar) return res.status(404).json({ message: 'Calendar not found' });
-
-//     const dayData = calendar.days.find(d => d.date.toISOString().split('T')[0] === date);
-//     res.json(dayData || { message: 'No data for this date' });
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
-// module.exports = {
-//   bookSlot,
-//   cancelBooking,
-//   getDoctorCalendar,
-//   getHospitalCalendar,
-//   getTodayDoctorData,
-//   getDayData
-// };
-
 const Calendar = require('../models/Calendar');
 const Appointment = require('../models/Appointment');
-const mongoose = require('mongoose');
+const DoctorProfile = require('../models/DoctorProfile');
+const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 
-function hasTimeConflict(appointments, startTime, endTime, breaks = []) {
-  // check against appointments
-  for (const appt of appointments) {
-    if (
-      (startTime >= appt.startTime && startTime < appt.endTime) ||
-      (endTime > appt.startTime && endTime <= appt.endTime) ||
-      (startTime <= appt.startTime && endTime >= appt.endTime)
-    ) {
-      return true;
+exports.getCalendar = async (req, res) => {
+  try {
+    const { year, month, professionalId, professionalType } = req.query;
+    
+    const targetYear = parseInt(year) || new Date().getFullYear();
+    const targetMonth = parseInt(month) || new Date().getMonth() + 1;
+    
+    let calendar = await Calendar.findOne({ year: targetYear, month: targetMonth });
+    
+    if (!calendar) {
+      calendar = await initializeCalendar(targetYear, targetMonth);
     }
-  }
-
-  // check against breaks
-  for (const brk of breaks) {
-    if (
-      (startTime >= brk.startTime && startTime < brk.endTime) ||
-      (endTime > brk.startTime && endTime <= brk.endTime) ||
-      (startTime <= brk.startTime && endTime >= brk.endTime)
-    ) {
-      return true;
+    
+    // Filter by professional if specified
+    if (professionalId && professionalType) {
+      calendar.days = calendar.days.map(day => ({
+        ...day.toObject(),
+        professionals: day.professionals.filter(prof => 
+          prof.professionalId.toString() === professionalId && 
+          prof.professionalType === professionalType
+        )
+      }));
     }
+    
+    res.json({ success: true, calendar });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
+};
 
-  return false;
+exports.getProfessionalSchedule = async (req, res) => {
+  try {
+    const { professionalId, professionalType, date } = req.query;
+    
+    if (!professionalId || !professionalType) {
+      return res.status(400).json({ message: 'Professional ID and type are required' });
+    }
+    
+    const targetDate = date ? new Date(date) : new Date();
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    
+    let calendar = await Calendar.findOne({ year, month });
+    
+    if (!calendar) {
+      calendar = await initializeCalendar(year, month);
+    }
+    
+    // Find the specific day
+    const day = calendar.days.find(d => 
+      d.date.toDateString() === targetDate.toDateString()
+    );
+    
+    if (!day) {
+      return res.status(404).json({ message: 'Day not found in calendar' });
+    }
+    
+    // Find the professional in this day
+    const professionalSchedule = day.professionals.find(prof => 
+      prof.professionalId.toString() === professionalId && 
+      prof.professionalType === professionalType
+    );
+    
+    res.json({ 
+      success: true, 
+      schedule: professionalSchedule || { bookedSlots: [], breaks: [], isAvailable: true },
+      date: targetDate,
+      dayName: day.dayName
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.updateAvailability = async (req, res) => {
+  try {
+    const { date, isAvailable, breaks } = req.body;
+    
+    const targetDate = new Date(date);
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    
+    let calendar = await Calendar.findOne({ year, month });
+    
+    if (!calendar) {
+      calendar = await initializeCalendar(year, month);
+    }
+    
+    // Find the day
+    const dayIndex = calendar.days.findIndex(d => 
+      d.date.toDateString() === targetDate.toDateString()
+    );
+    
+    if (dayIndex === -1) {
+      return res.status(404).json({ message: 'Day not found in calendar' });
+    }
+    
+    // Find or create professional entry
+    let professionalIndex = calendar.days[dayIndex].professionals.findIndex(prof => 
+      prof.professionalId.toString() === req.user.profileId && 
+      prof.professionalType === req.user.role
+    );
+    
+    if (professionalIndex === -1) {
+      calendar.days[dayIndex].professionals.push({
+        professionalId: req.user.profileId,
+        professionalType: req.user.role,
+        bookedSlots: [],
+        breaks: breaks || [],
+        isAvailable: isAvailable !== undefined ? isAvailable : true
+      });
+    } else {
+      if (isAvailable !== undefined) {
+        calendar.days[dayIndex].professionals[professionalIndex].isAvailable = isAvailable;
+      }
+      if (breaks) {
+        calendar.days[dayIndex].professionals[professionalIndex].breaks = breaks;
+      }
+    }
+    
+    await calendar.save();
+    
+    res.json({ success: true, calendar: calendar.days[dayIndex] });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.addBreak = async (req, res) => {
+  try {
+    const { date, startTime, endTime, reason } = req.body;
+    
+    const targetDate = new Date(date);
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    
+    let calendar = await Calendar.findOne({ year, month });
+    
+    if (!calendar) {
+      calendar = await initializeCalendar(year, month);
+    }
+    
+    const dayIndex = calendar.days.findIndex(d => 
+      d.date.toDateString() === targetDate.toDateString()
+    );
+    
+    if (dayIndex === -1) {
+      return res.status(404).json({ message: 'Day not found in calendar' });
+    }
+    
+    let professionalIndex = calendar.days[dayIndex].professionals.findIndex(prof => 
+      prof.professionalId.toString() === req.user.profileId && 
+      prof.professionalType === req.user.role
+    );
+    
+    if (professionalIndex === -1) {
+      calendar.days[dayIndex].professionals.push({
+        professionalId: req.user.profileId,
+        professionalType: req.user.role,
+        bookedSlots: [],
+        breaks: [{ startTime, endTime, reason }],
+        isAvailable: true
+      });
+    } else {
+      calendar.days[dayIndex].professionals[professionalIndex].breaks.push({
+        startTime, endTime, reason
+      });
+    }
+    
+    await calendar.save();
+    
+    res.json({ success: true, message: 'Break added successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getAvailableSlots = async (req, res) => {
+  try {
+    const { professionalId, professionalType, date } = req.query;
+    
+    if (!professionalId || !professionalType || !date) {
+      return res.status(400).json({ message: 'Professional ID, type, and date are required' });
+    }
+    
+    const targetDate = new Date(date);
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    
+    // Get professional's availability
+    let professional;
+    if (professionalType === 'doctor') {
+      professional = await DoctorProfile.findById(professionalId);
+    } else {
+      professional = await PhysiotherapistProfile.findById(professionalId);
+    }
+    
+    if (!professional) {
+      return res.status(404).json({ message: 'Professional not found' });
+    }
+    
+    // Get calendar for the day
+    let calendar = await Calendar.findOne({ year, month });
+    if (!calendar) {
+      calendar = await initializeCalendar(year, month);
+    }
+    
+    const day = calendar.days.find(d => 
+      d.date.toDateString() === targetDate.toDateString()
+    );
+    
+    if (!day) {
+      return res.status(404).json({ message: 'Day not found' });
+    }
+    
+    // Get professional's schedule for the day
+    const professionalSchedule = day.professionals.find(prof => 
+      prof.professionalId.toString() === professionalId && 
+      prof.professionalType === professionalType
+    );
+    
+    if (!professionalSchedule || !professionalSchedule.isAvailable) {
+      return res.json({ success: true, availableSlots: [] });
+    }
+    
+    // Get professional's regular availability for this day of week
+    const dayName = targetDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    const dayAvailability = professional.availability?.find(a => a.day === dayName);
+    
+    if (!dayAvailability) {
+      return res.json({ success: true, availableSlots: [] });
+    }
+    
+    // Filter out booked slots and breaks
+    const bookedSlots = professionalSchedule.bookedSlots || [];
+    const breaks = professionalSchedule.breaks || [];
+    
+    const availableSlots = dayAvailability.slots.filter(slot => {
+      // Check if slot is booked
+      const isBooked = bookedSlots.some(booked => 
+        booked.startTime === slot.startTime && booked.endTime === slot.endTime
+      );
+      
+      // Check if slot falls within a break
+      const isInBreak = breaks.some(br => {
+        const breakStart = timeToMinutes(br.startTime);
+        const breakEnd = timeToMinutes(br.endTime);
+        const slotStart = timeToMinutes(slot.startTime);
+        const slotEnd = timeToMinutes(slot.endTime);
+        
+        return (slotStart >= breakStart && slotStart < breakEnd) ||
+               (slotEnd > breakStart && slotEnd <= breakEnd);
+      });
+      
+      return !isBooked && !isInBreak && slot.isAvailable !== false;
+    });
+    
+    res.json({ success: true, availableSlots });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.bookSlot = async (req, res) => {
+  try {
+    const { 
+      professionalId, 
+      professionalType, 
+      date, 
+      startTime, 
+      endTime,
+      appointmentId,
+      patientId 
+    } = req.body;
+    
+    const targetDate = new Date(date);
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    
+    let calendar = await Calendar.findOne({ year, month });
+    
+    if (!calendar) {
+      calendar = await initializeCalendar(year, month);
+    }
+    
+    const dayIndex = calendar.days.findIndex(d => 
+      d.date.toDateString() === targetDate.toDateString()
+    );
+    
+    if (dayIndex === -1) {
+      return res.status(404).json({ message: 'Day not found in calendar' });
+    }
+    
+    let professionalIndex = calendar.days[dayIndex].professionals.findIndex(prof => 
+      prof.professionalId.toString() === professionalId && 
+      prof.professionalType === professionalType
+    );
+    
+    if (professionalIndex === -1) {
+      calendar.days[dayIndex].professionals.push({
+        professionalId,
+        professionalType,
+        bookedSlots: [{
+          appointmentId,
+          patientId,
+          startTime,
+          endTime,
+          status: 'booked'
+        }],
+        breaks: [],
+        isAvailable: true
+      });
+    } else {
+      calendar.days[dayIndex].professionals[professionalIndex].bookedSlots.push({
+        appointmentId,
+        patientId,
+        startTime,
+        endTime,
+        status: 'booked'
+      });
+    }
+    
+    await calendar.save();
+    
+    res.json({ success: true, message: 'Slot booked successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Helper functions
+async function initializeCalendar(year, month) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const days = [];
+  
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = new Date(year, month - 1, day);
+    days.push({
+      date,
+      dayName: date.toLocaleDateString('en-US', { weekday: 'long' }),
+      isHoliday: false,
+      professionals: []
+    });
+  }
+  
+  const calendar = await Calendar.create({ year, month, days });
+  return calendar;
 }
 
-// Helper function to adjust subsequent appointments
-const adjustSubsequentAppointments = async (calendar, day, doctor, updatedAppointmentId, timeChange) => {
-  const appointments = doctor.bookedAppointments.sort((a, b) => a.startTime - b.startTime);
-  const updatedIndex = appointments.findIndex(a => a.appointmentId.toString() === updatedAppointmentId.toString());
-  
-  if (updatedIndex === -1 || updatedIndex === appointments.length - 1) return;
-
-  // Update all subsequent appointments
-  for (let i = updatedIndex + 1; i < appointments.length; i++) {
-    const appt = appointments[i];
-    appt.startTime = new Date(appt.startTime.getTime() + timeChange * 60000);
-    appt.endTime = new Date(appt.endTime.getTime() + timeChange * 60000);
-    
-    // Update the corresponding appointment document
-    await Appointment.findByIdAndUpdate(appt.appointmentId, {
-      start_time: appt.startTime,
-      end_time: appt.endTime
-    });
-  }
-
-  await calendar.save();
-};
-
-// Update appointment status with time adjustment
-exports.updateAppointmentStatus = async (req, res) => {
-  try {
-    const { appointmentId, status } = req.body;
-    const appointment = await Appointment.findById(appointmentId);
-    
-    if (!appointment) {
-      return res.status(404).json({ error: 'Appointment not found' });
-    }
-
-    const calendar = await Calendar.findOne({ hospitalId: appointment.hospital_id });
-    if (!calendar) return res.status(404).json({ error: 'Calendar not found' });
-
-    const dateStr = appointment.appointment_date.toISOString().split('T')[0];
-    const day = calendar.days.find(d => d.date.toISOString().split('T')[0] === dateStr);
-    if (!day) return res.status(404).json({ error: 'Day not found in calendar' });
-
-    const doctor = day.doctors.find(d => d.doctorId.toString() === appointment.doctor_id.toString());
-    if (!doctor) return res.status(404).json({ error: 'Doctor not found on this day' });
-
-    const calendarAppointment = doctor.bookedAppointments.find(a => 
-      a.appointmentId.toString() === appointmentId.toString()
-    );
-    
-    if (!calendarAppointment) {
-      return res.status(404).json({ error: 'Appointment not found in calendar' });
-    }
-
-    // Handle status changes
-    if (status === 'InProgress' && calendarAppointment.status === 'Scheduled') {
-      calendarAppointment.status = 'InProgress';
-      appointment.actual_start_time = new Date();
-      appointment.status = 'InProgress';
-    } 
-    else if (status === 'Completed' && calendarAppointment.status === 'InProgress') {
-      calendarAppointment.status = 'Completed';
-      appointment.actual_end_time = new Date();
-      appointment.status = 'Completed';
-      
-      // Calculate actual duration
-      if (appointment.actual_start_time) {
-        appointment.duration = Math.round(
-          (appointment.actual_end_time - appointment.actual_start_time) / 60000
-        );
-        
-        // Calculate time difference from scheduled duration
-        const scheduledDuration = (appointment.end_time - appointment.start_time) / 60000;
-        const timeDifference = appointment.duration - scheduledDuration;
-        
-        // Adjust subsequent appointments if needed
-        if (Math.abs(timeDifference) > 5) { // Only adjust if difference > 5 minutes
-          await adjustSubsequentAppointments(
-            calendar,
-            day,
-            doctor,
-            appointmentId,
-            timeDifference
-          );
-        }
-      }
-    }
-    else if (status === 'Cancelled') {
-      calendarAppointment.status = 'Cancelled';
-      appointment.status = 'Cancelled';
-      
-      // For time-based appointments, adjust subsequent appointments
-      if (appointment.type === 'time-based') {
-        const duration = (appointment.end_time - appointment.start_time) / 60000;
-        await adjustSubsequentAppointments(
-          calendar,
-          day,
-          doctor,
-          appointmentId,
-          -duration
-        );
-      }
-      
-      // Remove from bookedAppointments
-      doctor.bookedAppointments = doctor.bookedAppointments.filter(
-        a => a.appointmentId.toString() !== appointmentId.toString()
-      );
-    }
-
-    await Promise.all([calendar.save(), appointment.save()]);
-    res.json({ message: 'Appointment status updated successfully', appointment });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Add break for a doctor
-exports.addDoctorBreak = async (req, res) => {
-  try {
-    const { doctorId, hospitalId, date, startTime, endTime, reason } = req.body;
-
-    const calendar = await Calendar.findOne({ hospitalId });
-    if (!calendar) return res.status(404).json({ error: 'Calendar not found' });
-
-    const dateStr = new Date(date).toISOString().split('T')[0];
-    const day = calendar.days.find(d => d.date.toISOString().split('T')[0] === dateStr);
-    if (!day) return res.status(404).json({ error: 'Day not found in calendar' });
-
-    const doctor = day.doctors.find(d => d.doctorId.toString() === doctorId.toString());
-    if (!doctor) return res.status(404).json({ error: 'Doctor not found on this day' });
-
-    const breakStart = new Date(startTime);
-    const breakEnd = new Date(endTime);
-    const breakDuration = (breakEnd - breakStart) / 60000;
-
-    // 🚫 Prevent overlapping breaks
-    if (hasTimeConflict([], breakStart, breakEnd, doctor.breaks)) {
-      return res.status(400).json({ error: 'Break overlaps with existing break' });
-    }
-
-    doctor.breaks.push({
-      startTime: breakStart,
-      endTime: breakEnd,
-      reason: reason || 'Break'
-    });
-
-    // ⏱ Handle overlapping appointments
-    const overlappingAppointments = doctor.bookedAppointments.filter(appt =>
-      appt.startTime < breakEnd && appt.endTime > breakStart
-    );
-
-    for (const appt of overlappingAppointments) {
-      // Cancel overlapping appointments
-      appt.status = 'Cancelled';
-      await Appointment.findByIdAndUpdate(appt.appointmentId, { status: 'Cancelled' });
-    }
-
-    // Shift all appointments after the break
-    for (const appt of doctor.bookedAppointments) {
-      if (appt.startTime >= breakEnd) {
-        appt.startTime = new Date(appt.startTime.getTime() + breakDuration * 60000);
-        appt.endTime = new Date(appt.endTime.getTime() + breakDuration * 60000);
-
-        await Appointment.findByIdAndUpdate(appt.appointmentId, {
-          start_time: appt.startTime,
-          end_time: appt.endTime
-        });
-      }
-    }
-
-    await calendar.save();
-    res.json({ message: 'Break added, conflicts cancelled, and appointments shifted successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get doctor's schedule for a specific day
-exports.getDoctorDaySchedule = async (req, res) => {
-  try {
-    const { hospitalId, doctorId, date } = req.params;
-
-    const calendar = await Calendar.findOne({ hospitalId });
-    if (!calendar) return res.status(404).json({ error: 'Calendar not found' });
-
-    const dateStr = new Date(date).toISOString().split('T')[0];
-    const day = calendar.days.find(d => d.date.toISOString().split('T')[0] === dateStr);
-    if (!day) return res.status(404).json({ error: 'Day not found in calendar' });
-
-    const doctor = day.doctors.find(d => d.doctorId.toString() === doctorId.toString());
-    if (!doctor) return res.status(404).json({ error: 'Doctor not found on this day' });
-
-    // Get all appointments for this doctor on this day
-    const appointments = await Appointment.find({
-      doctor_id: doctorId,
-      appointment_date: {
-        $gte: new Date(dateStr + 'T00:00:00.000Z'),
-        $lt: new Date(dateStr + 'T23:59:59.999Z')
-      }
-    }).populate('patient_id');
-
-    // Combine calendar data with appointment details
-    const response = {
-      date: day.date,
-      dayName: day.dayName,
-      doctorId: doctor.doctorId,
-      bookedAppointments: doctor.bookedAppointments.map(appt => {
-        const fullAppointment = appointments.find(a => 
-          a._id.toString() === appt.appointmentId.toString()
-        );
-        return {
-          ...appt.toObject(),
-          patient: fullAppointment ? fullAppointment.patient_id : null,
-          appointmentDetails: fullAppointment || null
-        };
-      }),
-      bookedPatients: doctor.bookedPatients.map(patient => {
-        const fullAppointment = appointments.find(a => 
-          a._id.toString() === patient.appointmentId.toString()
-        );
-        return {
-          ...patient.toObject(),
-          patientDetails: fullAppointment ? fullAppointment.patient_id : null,
-          appointmentDetails: fullAppointment || null
-        };
-      }),
-      breaks: doctor.breaks
-    };
-
-    res.json(response);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get all calendar data for a hospital
-exports.getHospitalCalendar = async (req, res) => {
-  try {
-    const { hospitalId } = req.params;
-    const calendar = await Calendar.findOne({ hospitalId })
-      .populate('days.doctors.doctorId')
-      .populate('days.doctors.bookedAppointments.appointmentId')
-      .populate('days.doctors.bookedPatients.patientId');
-
-    if (!calendar) {
-      return res.status(404).json({ error: 'Calendar not found' });
-    }
-
-    res.json(calendar);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get full doctor's calendar across all days
-exports.getDoctorCalendar = async (req, res) => {
-  try {
-    const { doctorId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(doctorId)) {
-      return res.status(400).json({ error: 'Invalid doctorId format' });
-    }
-
-    const calendars = await Calendar.find({
-      'days.doctors.doctorId': new mongoose.Types.ObjectId(doctorId)
-    })
-    .populate('days.doctors.doctorId')
-    .populate('days.doctors.bookedAppointments.appointmentId')
-    .populate('days.doctors.bookedPatients.patientId');
-
-    if (!calendars.length) {
-      return res.status(404).json({ error: 'No calendar found for this doctor' });
-    }
-
-    // Combine all days from all calendars where this doctor appears
-    const doctorSchedule = [];
-    calendars.forEach(calendar => {
-      calendar.days.forEach(day => {
-        const doctorDay = day.doctors.find(doc => {
-          const id = doc.doctorId?._id || doc.doctorId;
-          return id ? id.toString() === doctorId : false;
-        });
-        
-        if (doctorDay) {
-          doctorSchedule.push({
-            hospitalId: calendar.hospitalId,
-            date: day.date,
-            dayName: day.dayName,
-            doctor: doctorDay
-          });
-        }
-      });
-    });
-
-    // Sort by date
-    doctorSchedule.sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    res.json(doctorSchedule);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get today's data for a specific doctor at a hospital
-exports.getTodayDoctorData = async (req, res) => {
-  try {
-    const { hospitalId, doctorId } = req.params;
-
-    const today = new Date().toISOString().split('T')[0];
-    const calendar = await Calendar.findOne({ hospitalId })
-      .populate('days.doctors.doctorId')
-      .populate('days.doctors.bookedAppointments.appointmentId')
-      .populate('days.doctors.bookedPatients.patientId');
-
-    if (!calendar) return res.status(404).json({ error: 'Calendar not found' });
-
-    const todayData = calendar.days.find(d => d.date.toISOString().split('T')[0] === today);
-    if (!todayData) return res.status(404).json({ error: 'No data for today' });
-
-    const doctorData = todayData.doctors.find(d => d.doctorId.toString() === doctorId.toString());
-    if (!doctorData) return res.status(404).json({ error: 'Doctor not available today' });
-
-    res.json(doctorData);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get specific day data for a hospital
-exports.getDayData = async (req, res) => {
-  try {
-    const { hospitalId, date } = req.params;
-    const calendar = await Calendar.findOne({ hospitalId })
-      .populate('days.doctors.doctorId')
-      .populate('days.doctors.bookedAppointments.appointmentId')
-      .populate('days.doctors.bookedPatients.patientId');
-
-    if (!calendar) return res.status(404).json({ error: 'Calendar not found' });
-
-    const dayData = calendar.days.find(d => d.date.toISOString().split('T')[0] === date);
-    if (!dayData) return res.status(404).json({ error: 'No data for this date' });
-
-    res.json(dayData);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Initialize calendar for a new day
-exports.initializeDay = async (req, res) => {
-  try {
-    const { hospitalId, date } = req.body;
-    
-    const calendar = await Calendar.findOne({ hospitalId });
-    if (!calendar) return res.status(404).json({ error: 'Calendar not found' });
-
-    const dateObj = new Date(date);
-    const dateStr = dateObj.toISOString().split('T')[0];
-    const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-
-    // Check if day already exists
-    const dayExists = calendar.days.some(d => d.date.toISOString().split('T')[0] === dateStr);
-    if (dayExists) {
-      return res.status(400).json({ error: 'Day already exists in calendar' });
-    }
-
-    // Keep only latest 30 days
-    if (calendar.days.length >= 30) {
-      calendar.days.shift();
-    }
-
-    // Add new day with empty doctor schedules
-    calendar.days.push({
-      date: dateObj,
-      dayName,
-      doctors: [] // Doctors will be added when they have appointments
-    });
-
-    await calendar.save();
-    res.json({ message: 'Day initialized successfully', calendar });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-module.exports = exports;
+function timeToMinutes(timeStr) {
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  return hours * 60 + minutes;
+}

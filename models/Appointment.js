@@ -1,68 +1,180 @@
-// const mongoose = require('mongoose');
-
-// const appointmentSchema = new mongoose.Schema({
-//   patient_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
-//   doctor_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Doctor', required: true },
-//   department_id: { type: String, required: true }, // or ObjectId if you're referencing a Department model
-//   appointment_date: { type: Date, required: true },
-//   time_slot: { type: String, required: true },
-//   type: { 
-//     type: String,
-//     enum: ['consultation', 'follow-up', 'checkup', 'procedure', 'surgery', 'emergency'],
-//     required: true
-//   },
-//   priority: {
-//     type: String,
-//     enum: ['Low', 'Normal', 'High', 'Urgent'],
-//     default: 'Normal'
-//   },
-//   notes: { type: String },
-//   status: {
-//     type: String,
-//     enum: ['Scheduled', 'Completed', 'Cancelled'],
-//     default: 'Scheduled'
-//   },
-//   created_at: { type: Date, default: Date.now }
-// });
-
-// module.exports = mongoose.model('Appointment', appointmentSchema);
-
 const mongoose = require('mongoose');
 
 const appointmentSchema = new mongoose.Schema({
-  patient_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
-  doctor_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Doctor', required: true },
-  hospital_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Hospital', required: true },
-  department_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Department', required: true },
-  appointment_date: { type: Date, required: true },
-  start_time: Date, // For time-based appointments
-  end_time: Date,   // For time-based appointments
-  serial_number: Number, // For number-based appointments
-  type: { 
-    type: String,
-    enum: ['time-based', 'number-based'],
+  referralId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Referral'
+  },
+  patientId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PatientProfile',
     required: true
   },
-  appointment_type: {
+  doctorId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'DoctorProfile'
+  },
+  physioId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PhysiotherapistProfile'
+  },
+  professionalType: {
     type: String,
-    enum: ['consultation', 'follow-up', 'checkup', 'procedure', 'surgery', 'emergency'],
+    enum: ['doctor', 'physiotherapist'],
     required: true
   },
-  priority: {
-    type: String,
-    enum: ['Low', 'Normal', 'High', 'Urgent'],
-    default: 'Normal'
+  
+  // Appointment Details
+  appointmentDate: {
+    type: Date,
+    required: true
   },
-  notes: { type: String },
+  startTime: String,
+  endTime: String,
+  duration: Number, // in minutes
+  type: {
+    type: String,
+    enum: ['clinic', 'home'],
+    required: true
+  },
+  
+  // Location
+  address: {
+    type: String,
+    required: function() { return this.type === 'home'; }
+  },
+  location: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number] }
+  },
+  
+  // Symptoms & Reason
+  symptoms: [String],
+  reason: String,
+  notes: String,
+  
+  // Status
   status: {
     type: String,
-    enum: ['Scheduled', 'In Progress', 'Completed', 'Cancelled'],
-    default: 'Scheduled'
+    enum: [
+      'pending',           // Created but not confirmed
+      'confirmed',         // Professional confirmed
+      'accepted',         // Professional accepted
+      'rejected',         // Professional rejected
+      'rescheduled',      // Appointment rescheduled
+      'cancelled',        // Cancelled by patient/doctor
+      'completed',        // Consultation completed
+      'no_show',          // Patient didn't show up
+      'in_progress'       // Consultation in progress
+    ],
+    default: 'pending'
   },
-  created_at: { type: Date, default: Date.now },
-  actual_start_time: Date, // When the appointment actually started
-  actual_end_time: Date,   // When the appointment actually ended
-  duration: Number        // Actual duration in minutes
+  
+  // Payment
+  consultationFee: {
+    type: Number,
+    required: true
+  },
+  homeVisitCharges: {
+    type: Number,
+    default: 0
+  },
+  platformCommission: {
+    type: Number,
+    required: true
+  },
+  professionalEarning: {
+    type: Number,
+    required: true
+  },
+  totalAmount: {
+    type: Number,
+    required: true
+  },
+  
+  paymentStatus: {
+    type: String,
+    enum: ['pending', 'paid', 'failed', 'refunded', 'partially_refunded'],
+    default: 'pending'
+  },
+  paymentId: String,
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  paymentDate: Date,
+  
+  // Rescheduling/Cancellation
+  cancellationReason: String,
+  cancelledBy: {
+    type: String,
+    enum: ['patient', 'professional', 'admin', 'system']
+  },
+  cancellationFee: {
+    type: Number,
+    default: 0
+  },
+  rescheduleCount: {
+    type: Number,
+    default: 0
+  },
+  previousAppointments: [{
+    appointmentId: mongoose.Schema.Types.ObjectId,
+    date: Date,
+    reason: String
+  }],
+  
+  // Follow-up
+  followUpDate: Date,
+  followUpNotes: String,
+  isFollowUp: {
+    type: Boolean,
+    default: false
+  },
+  originalAppointmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Appointment'
+  },
+  
+  // Consultation
+  actualStartTime: Date,
+  actualEndTime: Date,
+  consultationNotes: String,
+  prescriptionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Prescription'
+  },
+  
+  // Notifications
+  remindersSent: [{
+    type: String,
+    enum: ['24h_before', '2h_before', '15min_before'],
+    sentAt: Date
+  }],
+  
+  // Metadata
+  bookedBy: {
+    type: String,
+    enum: ['patient', 'admin', 'assistant'],
+    default: 'patient'
+  },
+  deviceInfo: String,
+  ipAddress: String
+}, {
+  timestamps: true
+});
+
+appointmentSchema.index({ patientId: 1, status: 1 });
+appointmentSchema.index({ professionalId: 1, status: 1 });
+appointmentSchema.index({ appointmentDate: 1, startTime: 1 });
+appointmentSchema.index({ status: 1, paymentStatus: 1 });
+appointmentSchema.index({ 'location': '2dsphere' });
+
+// Calculate professional earning before save
+appointmentSchema.pre('save', function(next) {
+  if (this.isModified('consultationFee') || this.isModified('platformCommission')) {
+    this.professionalEarning = this.consultationFee - this.platformCommission;
+    this.totalAmount = this.consultationFee + (this.homeVisitCharges || 0);
+  }
+  next();
 });
 
 module.exports = mongoose.model('Appointment', appointmentSchema);

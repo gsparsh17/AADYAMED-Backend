@@ -1,35 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const appointmentController = require('../controllers/appointment.controller');
-const calendarController = require('../controllers/calendarController');
+const { protect } = require('../middlewares/auth');
 
-// Create
+router.use(protect);
+
 router.post('/', appointmentController.createAppointment);
-
-// Read
-router.get('/', appointmentController.getAllAppointments);
+router.get('/', appointmentController.getAppointments);
 router.get('/:id', appointmentController.getAppointmentById);
-
-router.put('/:id/complete', appointmentController.completeAppointment)
-// Update
-router.put('/:id', appointmentController.updateAppointment);
-router.put('/:id/vitals', appointmentController.updateVitals); 
-router.get('/:id/vitals', appointmentController.getVitalsByAppointmentId); // New separate fetch route
-router.patch('/:id/status', calendarController.updateAppointmentStatus);
-
-// Delete
-router.delete('/:id', appointmentController.deleteAppointment);
-
-// Filters
-router.get('/doctor/:doctorId', appointmentController.getAppointmentsByDoctorId);
-router.get('/doctor/:doctorId/today', appointmentController.getTodaysAppointmentsByDoctorId);
-router.get('/department/:departmentId', appointmentController.getAppointmentsByDepartmentId);
-router.get('/hospital/:hospitalId', appointmentController.getAppointmentsByHospitalId);
-router.get('/patient/:patientId', appointmentController.getAppointmentsByPatientId);
-
-
-// Add this line in your appointment.route.js
-
-// router.put('/:id/status', appointmentController.updateAppointmentStatus);
+router.put('/:id/status', appointmentController.updateAppointmentStatus);
 
 module.exports = router;

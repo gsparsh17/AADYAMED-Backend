@@ -1,260 +1,355 @@
-const Bill = require('../models/Bill');
-const BillItem = require('../models/BillItem');
-const Invoice = require('../models/Invoice');
 const Appointment = require('../models/Appointment');
+const Invoice = require('../models/Invoice');
+const Commission = require('../models/Commission');
+const CommissionSettings = require('../models/CommissionSettings');
 
-// Create a bill with items
-// exports.createBill = async (req, res) => {
-//   try {
-//     const { patient_id, appointment_id, payment_method, items, status = 'Pending' } = req.body;
-
-//     // Calculate total amount
-//     const total_amount = items.reduce((sum, item) => sum + item.amount, 0);
-
-//     // Create the bill
-//     const bill = new Bill({ 
-//       patient_id, 
-//       appointment_id, 
-//       total_amount, 
-//       payment_method,
-//       status,
-//       details: items // Store the items in the bill document as well
-//     });
-    
-//     await bill.save();
-
-//     // Create bill items and associate them with the bill
-//     const billItems = await Promise.all(
-//       items.map(item => {
-//         const billItem = new BillItem({ 
-//           ...item, 
-//           bill_id: bill._id 
-//         });
-//         return billItem.save();
-//       })
-//     );
-
-//     // Update the bill with the item references if needed
-//     bill.items = billItems.map(item => item._id);
-//     await bill.save();
-
-//     // Populate the response with patient and appointment details
-//     const populatedBill = await Bill.findById(bill._id)
-//       .populate('patient_id', 'first_name last_name patientId')
-//       .populate('appointment_id', 'appointment_date type')
-//       .populate('items');
-
-//     res.status(201).json({ 
-//       message: 'Bill created successfully',
-//       bill: populatedBill,
-//       items: billItems 
-//     });
-//   } catch (err) {
-//     console.error('Error creating bill:', err);
-//     res.status(400).json({ error: err.message });
-//   }
-// };
-
-exports.createBill = async (req, res) => {
-  try {
-    const { patient_id, appointment_id, payment_method, items, status = 'Pending', total_amount } = req.body;
-
-    // Calculate totals
-    const subtotal = items.reduce((sum, item) => sum + (item.amount), 0);
-    const tax = items.reduce((sum, item) => sum + (item.tax_amount || 0), 0);
-    // const total_amount = subtotal + tax;
-
-    // Create the bill
-    const bill = new Bill({ 
-      patient_id, 
-      appointment_id, 
-      total_amount, 
-      payment_method,
-      status,
-      details: items,
-      // created_by: req.user._id
-    });
-    
-    await bill.save();
-
-    // Get appointment details for invoice
-    const appointment = await Appointment.findById(appointment_id)
-      .populate('patient_id')
-      .populate('doctor_id');
-
-    // Create invoice for the bill
-    const invoice = new Invoice({
-      invoice_type: 'Appointment',
-      patient_id: patient_id,
-      customer_type: 'Patient',
-      customer_name: appointment?.patient_id ? 
-        `${appointment.patient_id.first_name} ${appointment.patient_id.last_name}` : 
-        'Patient',
-      customer_phone: appointment?.patient_id?.phone,
-      appointment_id: appointment_id,
-      bill_id: bill._id,
-      issue_date: new Date(),
-      due_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-      service_items: items.map(item => ({
-        description: item.description,
-        // quantity: item.quantity,
-        // unit_price: item.unit_price,
-        total_price: item.amount,
-        // tax_rate: item.tax_rate || 0,
-        // tax_amount: item.tax_amount || 0,
-        service_type: item.service_type || 'Consultation'
-      })),
-      subtotal: subtotal,
-      tax: tax,
-      total: total_amount,
-      status: payment_method !== 'Pending' ? 'Paid' : 'Issued',
-      payment_method: payment_method,
-      amount_paid: payment_method !== 'Pending' ? total_amount : 0,
-      balance_due: payment_method !== 'Pending' ? 0 : total_amount,
-      notes: `Appointment Bill - ${appointment?.appointment_date?.toLocaleDateString() || ''}`,
-      // created_by: req.user._id
-    });
-
-    await invoice.save();
-
-    // Update bill with invoice reference
-    bill.invoice_id = invoice._id;
-    await bill.save();
-
-    const populatedBill = await Bill.findById(bill._id)
-      .populate('patient_id', 'first_name last_name patientId')
-      .populate('appointment_id', 'appointment_date type')
-      // .populate('created_by', 'name');
-
-    res.status(201).json({ 
-      message: 'Bill created successfully',
-      bill: populatedBill,
-      invoice: invoice
-    });
-  } catch (err) {
-    console.error('Error creating bill:', err);
-    res.status(400).json({ error: err.message });
-  }
-};
-
-// Get all bills
-exports.getAllBills = async (req, res) => {
-  try {
-    const bills = await Bill.find()
-      .populate('patient_id')
-      .populate('appointment_id');
-    res.json(bills);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get bill by ID
-exports.getBillById = async (req, res) => {
-  try {
-    const bill = await Bill.findById(req.params.id)
-      .populate('patient_id')
-      .populate('appointment_id');
-    if (!bill) return res.status(404).json({ error: 'Bill not found' });
-
-    const items = await BillItem.find({ bill_id: bill._id });
-    res.json({ bill, items });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Update bill status
-// Update bill status
-exports.updateBillStatus = async (req, res) => {
-  try {
-    const { status } = req.body;
-    
-    // 1. Update the Bill
-    const bill = await Bill.findByIdAndUpdate(
-      req.params.id,
-      { status: status },
-      { new: true }
-    );
-    if (!bill) return res.status(404).json({ error: 'Bill not found' });
-
-    // 2. Sync with Invoice if it exists
-    if (status === 'Paid') {
-      // Find invoice by bill_id (using the bill we just found)
-      // Note: bill.invoice_id might not be populated in older records, so search by bill_id field in Invoice
-      const invoice = await Invoice.findOne({ bill_id: bill._id });
-      
-      if (invoice) {
-        invoice.status = 'Paid';
-        invoice.amount_paid = invoice.total;
-        invoice.balance_due = 0;
-        // Update payment history if needed, but for now just updating status/amounts
-        invoice.payment_history.push({
-          amount: invoice.total,
-          method: bill.payment_method || 'Cash',
-          date: new Date(),
-          status: 'Completed'
-        });
-        await invoice.save();
-      }
-    } else if (status === 'Pending') {
-       // If reverting to pending (unlikely helper, but good for completeness)
-       const invoice = await Invoice.findOne({ bill_id: bill._id });
-       if (invoice) {
-         invoice.status = 'Issued'; // or Overdue depending on date, but Issued is safe
-         invoice.amount_paid = 0;
-         invoice.balance_due = invoice.total;
-         await invoice.save();
-       }
-    }
-
-    res.json(bill);
-  } catch (err) {
-    console.error("Error updating bill status:", err);
-    res.status(400).json({ error: err.message });
-  }
-};
-
-// Delete bill
-exports.deleteBill = async (req, res) => {
-  try {
-    const bill = await Bill.findByIdAndDelete(req.params.id);
-    if (!bill) return res.status(404).json({ error: 'Bill not found' });
-
-    await BillItem.deleteMany({ bill_id: bill._id });
-
-    res.json({ message: 'Bill and items deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Get bill by appointment_id
-exports.getBillByAppointmentId = async (req, res) => {
+exports.generateAppointmentBill = async (req, res) => {
   try {
     const { appointmentId } = req.params;
-
-    // Find the bill for the given appointment_id
-    const bill = await Bill.findOne({ appointment_id: appointmentId })
-      .populate('patient_id', 'first_name last_name patientId')
-      .populate('appointment_id', 'appointment_date type doctor_id department_id')
-      .populate({
-        path: 'appointment_id',
-        populate: [
-          { path: 'doctor_id', select: 'firstName lastName' },
-          { path: 'department_id', select: 'name' }
-        ]
-      });
-
-    if (!bill) {
-      return res.status(404).json({ error: 'Bill not found for this appointment' });
+    
+    const appointment = await Appointment.findById(appointmentId)
+      .populate('patientId', 'name phone email address')
+      .populate('doctorId', 'name specialization consultationFee')
+      .populate('physioId', 'name specialization consultationFee homeVisitFee');
+    
+    if (!appointment) {
+      return res.status(404).json({ message: 'Appointment not found' });
     }
-
-    // Fetch related items
-    // const items = await BillItem.find({ bill_id: bill._id });
-
-    res.json({ bill });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    
+    // Check if invoice already exists
+    const existingInvoice = await Invoice.findOne({ appointmentId });
+    if (existingInvoice) {
+      return res.json({ success: true, invoice: existingInvoice });
+    }
+    
+    const professional = appointment.professionalType === 'doctor' 
+      ? appointment.doctorId 
+      : appointment.physioId;
+    
+    const consultationFee = appointment.consultationFee;
+    const homeVisitCharges = appointment.type === 'home' ? professional.homeVisitFee || 0 : 0;
+    
+    // Get commission settings
+    const settings = await CommissionSettings.getSettings();
+    const commissionRate = appointment.professionalType === 'doctor' 
+      ? settings.defaultDoctorCommission 
+      : settings.defaultPhysioCommission;
+    
+    const platformCommission = (consultationFee * commissionRate) / 100;
+    const professionalEarning = consultationFee - platformCommission;
+    
+    // Create invoice items
+    const items = [
+      {
+        description: `Consultation Fee - ${appointment.professionalType === 'doctor' ? 'Dr.' : ''} ${professional.name}`,
+        quantity: 1,
+        unitPrice: consultationFee,
+        amount: consultationFee,
+        taxRate: settings.taxRate || 0,
+        taxAmount: (consultationFee * (settings.taxRate || 0)) / 100
+      }
+    ];
+    
+    if (homeVisitCharges > 0) {
+      items.push({
+        description: 'Home Visit Charges',
+        quantity: 1,
+        unitPrice: homeVisitCharges,
+        amount: homeVisitCharges,
+        taxRate: settings.taxRate || 0,
+        taxAmount: (homeVisitCharges * (settings.taxRate || 0)) / 100
+      });
+    }
+    
+    const subtotal = items.reduce((sum, item) => sum + item.amount, 0);
+    const tax = items.reduce((sum, item) => sum + item.taxAmount, 0);
+    const totalAmount = subtotal + tax;
+    
+    // Create invoice
+    const invoice = await Invoice.create({
+      invoiceType: 'appointment',
+      appointmentId,
+      patientId: appointment.patientId._id,
+      customerName: appointment.patientId.name,
+      customerPhone: appointment.patientId.phone,
+      customerEmail: appointment.patientId.email,
+      customerAddress: appointment.patientId.address,
+      items,
+      subtotal,
+      tax,
+      totalAmount,
+      amountPaid: appointment.paymentStatus === 'paid' ? totalAmount : 0,
+      balanceDue: appointment.paymentStatus === 'paid' ? 0 : totalAmount,
+      status: appointment.paymentStatus === 'paid' ? 'paid' : 'sent',
+      paymentMethod: appointment.paymentStatus === 'paid' ? appointment.paymentMethod : undefined,
+      commissionIncluded: true,
+      commissionAmount: platformCommission,
+      createdBy: req.user.id
+    });
+    
+    // Update appointment with invoice
+    appointment.invoiceId = invoice._id;
+    await appointment.save();
+    
+    // Create commission record if not exists
+    const existingCommission = await Commission.findOne({ appointmentId });
+    if (!existingCommission) {
+      await Commission.create({
+        appointmentId,
+        professionalId: appointment.professionalType === 'doctor' ? appointment.doctorId : appointment.physioId,
+        professionalType: appointment.professionalType,
+        patientId: appointment.patientId._id,
+        consultationFee,
+        platformCommission,
+        professionalEarning,
+        commissionRate,
+        commissionCycle: {
+          month: new Date().getMonth() + 1,
+          year: new Date().getFullYear(),
+          cycleNumber: `${(new Date().getMonth() + 1).toString().padStart(2, '0')}${new Date().getFullYear()}`
+        }
+      });
+    }
+    
+    res.json({ success: true, invoice });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
+
+exports.generatePharmacyBill = async (req, res) => {
+  try {
+    const { pharmacySaleId } = req.params;
+    
+    const pharmacySale = await PharmacySale.findById(pharmacySaleId)
+      .populate('patientId', 'name phone email address');
+    
+    if (!pharmacySale) {
+      return res.status(404).json({ message: 'Pharmacy sale not found' });
+    }
+    
+    // Check if invoice already exists
+    const existingInvoice = await Invoice.findOne({ pharmacySaleId });
+    if (existingInvoice) {
+      return res.json({ success: true, invoice: existingInvoice });
+    }
+    
+    // Create invoice items from sale items
+    const items = pharmacySale.items.map(item => ({
+      description: item.medicineName,
+      quantity: item.quantity,
+      unitPrice: item.sellingPrice,
+      amount: item.quantity * item.sellingPrice,
+      taxRate: item.taxRate || 0,
+      taxAmount: (item.quantity * item.sellingPrice * (item.taxRate || 0)) / 100
+    }));
+    
+    const subtotal = pharmacySale.subtotal;
+    const tax = pharmacySale.tax;
+    const totalAmount = pharmacySale.totalAmount;
+    
+    const customerDetails = pharmacySale.patientId ? {
+      customerName: pharmacySale.patientId.name,
+      customerPhone: pharmacySale.patientId.phone,
+      customerEmail: pharmacySale.patientId.email,
+      customerAddress: pharmacySale.patientId.address
+    } : {
+      customerName: pharmacySale.customerName,
+      customerPhone: pharmacySale.customerPhone,
+      customerEmail: pharmacySale.customerEmail,
+      customerAddress: pharmacySale.customerAddress
+    };
+    
+    // Create invoice
+    const invoice = await Invoice.create({
+      invoiceType: 'pharmacy',
+      pharmacySaleId,
+      patientId: pharmacySale.patientId?._id,
+      ...customerDetails,
+      items,
+      subtotal,
+      discount: pharmacySale.discount || 0,
+      tax,
+      totalAmount,
+      amountPaid: pharmacySale.paymentStatus === 'paid' ? totalAmount : 0,
+      balanceDue: pharmacySale.paymentStatus === 'paid' ? 0 : totalAmount,
+      status: pharmacySale.paymentStatus === 'paid' ? 'paid' : 'sent',
+      paymentMethod: pharmacySale.paymentStatus === 'paid' ? pharmacySale.paymentMethod : undefined,
+      createdBy: req.user.id
+    });
+    
+    res.json({ success: true, invoice });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.generateLabTestBill = async (req, res) => {
+  try {
+    const { labTestId } = req.params;
+    
+    const labTest = await LabTest.findById(labTestId)
+      .populate('patientId', 'name phone email address')
+      .populate('pathologyId', 'labName');
+    
+    if (!labTest) {
+      return res.status(404).json({ message: 'Lab test not found' });
+    }
+    
+    // Check if invoice already exists
+    const existingInvoice = await Invoice.findOne({ labTestId });
+    if (existingInvoice) {
+      return res.json({ success: true, invoice: existingInvoice });
+    }
+    
+    // Create invoice items from lab tests
+    const items = labTest.tests.map(test => ({
+      description: test.testName,
+      quantity: 1,
+      unitPrice: test.price,
+      amount: test.price,
+      taxRate: 0, // Medical tests might be tax-free
+      taxAmount: 0
+    }));
+    
+    const subtotal = labTest.totalAmount;
+    const totalAmount = labTest.totalAmount;
+    
+    // Create invoice
+    const invoice = await Invoice.create({
+      invoiceType: 'lab_test',
+      labTestId,
+      patientId: labTest.patientId._id,
+      customerName: labTest.patientId.name,
+      customerPhone: labTest.patientId.phone,
+      customerEmail: labTest.patientId.email,
+      customerAddress: labTest.patientId.address,
+      items,
+      subtotal,
+      totalAmount,
+      amountPaid: labTest.paymentStatus === 'paid' ? totalAmount : 0,
+      balanceDue: labTest.paymentStatus === 'paid' ? 0 : totalAmount,
+      status: labTest.paymentStatus === 'paid' ? 'paid' : 'sent',
+      paymentMethod: labTest.paymentStatus === 'paid' ? labTest.paymentMethod : undefined,
+      createdBy: req.user.id
+    });
+    
+    res.json({ success: true, invoice });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getBillingSummary = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    const matchStage = {};
+    if (startDate && endDate) {
+      matchStage.invoiceDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    }
+    
+    // Role-based filtering
+    if (req.user.role === 'patient') {
+      matchStage.patientId = req.user.profileId;
+    }
+    
+    const summary = await Invoice.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$invoiceType',
+          totalInvoices: { $sum: 1 },
+          totalAmount: { $sum: '$totalAmount' },
+          totalPaid: { $sum: '$amountPaid' },
+          totalDue: { $sum: '$balanceDue' },
+          averageInvoice: { $avg: '$totalAmount' }
+        }
+      }
+    ]);
+    
+    // Get daily revenue for chart
+    const dailyRevenue = await Invoice.aggregate([
+      { 
+        $match: { 
+          ...matchStage,
+          status: 'paid'
+        } 
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$invoiceDate' },
+            month: { $month: '$invoiceDate' },
+            day: { $dayOfMonth: '$invoiceDate' }
+          },
+          totalRevenue: { $sum: '$totalAmount' },
+          invoiceCount: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
+      { $limit: 30 }
+    ]);
+    
+    res.json({ 
+      success: true, 
+      summary, 
+      dailyRevenue 
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.processRefund = async (req, res) => {
+  try {
+    const { invoiceId, refundAmount, reason } = req.body;
+    
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    
+    const invoice = await Invoice.findById(invoiceId);
+    if (!invoice) {
+      return res.status(404).json({ message: 'Invoice not found' });
+    }
+    
+    if (refundAmount > invoice.amountPaid) {
+      return res.status(400).json({ message: 'Refund amount exceeds paid amount' });
+    }
+    
+    // Update invoice
+    invoice.amountPaid -= refundAmount;
+    invoice.balanceDue += refundAmount;
+    invoice.status = 'refunded';
+    invoice.notes = `${invoice.notes || ''}\nRefund processed: ${refundAmount} - Reason: ${reason}`;
+    invoice.updatedBy = req.user.id;
+    
+    await invoice.save();
+    
+    // Handle commission reversal if applicable
+    if (invoice.commissionIncluded && invoice.commissionAmount > 0) {
+      await reverseCommission(invoice);
+    }
+    
+    res.json({ success: true, invoice });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Helper function
+async function reverseCommission(invoice) {
+  if (invoice.appointmentId) {
+    const commission = await Commission.findOne({ appointmentId: invoice.appointmentId });
+    if (commission) {
+      // Mark commission as refunded or adjust
+      commission.payoutStatus = 'cancelled';
+      commission.notes = `Commission reversed due to invoice refund: ${invoice.invoiceNumber}`;
+      await commission.save();
+    }
+  }
+}

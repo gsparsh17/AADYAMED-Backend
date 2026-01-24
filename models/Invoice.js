@@ -1,155 +1,179 @@
 const mongoose = require('mongoose');
 
-const paymentSchema = new mongoose.Schema({
-  date: { type: Date, default: Date.now },
-  amount: { type: Number, required: true },
-  method: { 
-    type: String, 
-    enum: ['Cash', 'Card', 'UPI', 'Net Banking', 'Insurance', 'Government Scheme'],
-    required: true 
+const invoiceItemSchema = new mongoose.Schema({
+  description: {
+    type: String,
+    required: true
   },
-  reference: { type: String },
-  status: { type: String, default: 'Completed' },
-  collected_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
-});
-
-const serviceItemSchema = new mongoose.Schema({
-  description: { type: String, required: true },
-  quantity: { type: Number, default: 1 },
-  // unit_price: { type: Number, required: true },
-  total_price: { type: Number, required: true },
-  tax_rate: { type: Number, default: 0 },
-  tax_amount: { type: Number, default: 0 },
-  // For appointment/services
-  service_type: { type: String, enum: ['Consultation', 'Procedure', 'Test', 'Other', 'Purchase'] }
-});
-
-const medicineItemSchema = new mongoose.Schema({
-  medicine_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Medicine' },
-  batch_id: { type: mongoose.Schema.Types.ObjectId, ref: 'MedicineBatch' },
-  medicine_name: { type: String, required: true },
-  batch_number: { type: String },
-  expiry_date: { type: Date },
-  quantity: { type: Number, required: true },
-  unit_price: { type: Number, required: true },
-  total_price: { type: Number, required: true },
-  tax_rate: { type: Number, default: 0 },
-  tax_amount: { type: Number, default: 0 },
-  prescription_required: { type: Boolean, default: false },
-  prescription_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Prescription' }
+  quantity: {
+    type: Number,
+    required: true,
+    min: 1
+  },
+  unitPrice: {
+    type: Number,
+    required: true
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  taxRate: {
+    type: Number,
+    default: 0
+  },
+  taxAmount: {
+    type: Number,
+    default: 0
+  }
 });
 
 const invoiceSchema = new mongoose.Schema({
-  invoice_number: { type: String, unique: true },
-  
-  // Customer Information
-  patient_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient' },
-  customer_type: { 
-    type: String, 
-    enum: ['Patient', 'Walk-in', 'Insurance', 'Corporate', 'Supplier', 'Other'], 
-    required: true 
+  invoiceNumber: {
+    type: String,
+    required: true,
+    unique: true
   },
-  customer_name: { type: String },
-  customer_phone: { type: String },
-  customer_address: { type: String },
+  invoiceType: {
+    type: String,
+    enum: ['appointment', 'pharmacy', 'lab_test', 'package', 'other'],
+    required: true
+  },
   
-  // Reference Links
-  appointment_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment' },
-  bill_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Bill' },
-  sale_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale' },
-  prescription_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Prescription' },
+  // Reference
+  appointmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Appointment'
+  },
+  pharmacySaleId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PharmacySale'
+  },
+  labTestId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'LabTest'
+  },
+  patientId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PatientProfile',
+    required: true
+  },
   
-  // Invoice Type
-  invoice_type: { 
-    type: String, 
-    enum: ['Appointment', 'Pharmacy', 'Mixed', 'Other', 'Purchase'], 
-    required: true 
+  // Customer Details
+  customerName: {
+    type: String,
+    required: true
+  },
+  customerPhone: String,
+  customerEmail: String,
+  customerAddress: String,
+  
+  // Items
+  items: [invoiceItemSchema],
+  
+  // Financials
+  subtotal: {
+    type: Number,
+    required: true
+  },
+  discount: {
+    type: Number,
+    default: 0
+  },
+  tax: {
+    type: Number,
+    default: 0
+  },
+  totalAmount: {
+    type: Number,
+    required: true
+  },
+  amountPaid: {
+    type: Number,
+    default: 0
+  },
+  balanceDue: {
+    type: Number,
+    default: 0
   },
   
   // Dates
-  issue_date: { type: Date, default: Date.now },
-  due_date: { type: Date, required: true },
-  
-  // Items - Can contain both services and medicines
-  service_items: [serviceItemSchema],
-  medicine_items: [medicineItemSchema],
-  
-  // Financial details
-  subtotal: { type: Number, required: true },
-  discount: { type: Number, default: 0 },
-  tax: { type: Number, default: 0 },
-  total: { type: Number, required: true },
-  
-  // Payment tracking
-  amount_paid: { type: Number, default: 0 },
-  balance_due: { type: Number, default: function() { return this.total; } },
-  payment_history: [paymentSchema],
+  invoiceDate: {
+    type: Date,
+    default: Date.now
+  },
+  dueDate: Date,
+  paymentDate: Date,
   
   // Status
-  status: { 
-    type: String, 
-    enum: ['Draft', 'Issued', 'Paid', 'Partial', 'Overdue', 'Cancelled', 'Refunded'],
-    default: 'Draft' 
+  status: {
+    type: String,
+    enum: ['draft', 'sent', 'paid', 'partial', 'overdue', 'cancelled', 'refunded'],
+    default: 'draft'
   },
   
-  // Additional fields
-  notes: { type: String },
-  terms_and_conditions: { type: String },
-  created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  // Payment
+  paymentMethod: {
+    type: String,
+    enum: ['cash', 'card', 'upi', 'online', 'insurance', 'credit']
+  },
+  paymentReference: String,
   
-  // Pharmacy specific
-  is_pharmacy_sale: { type: Boolean, default: false },
-  dispensing_date: { type: Date },
-  dispensed_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
-}, { timestamps: true });
+  // Commission
+  commissionIncluded: {
+    type: Boolean,
+    default: false
+  },
+  commissionAmount: {
+    type: Number,
+    default: 0
+  },
+  
+  // Documents
+  pdfUrl: String,
+  qrCode: String,
+  
+  // Notes
+  notes: String,
+  termsAndConditions: String,
+  
+  // Audit
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  updatedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }
+}, {
+  timestamps: true
+});
+
+invoiceSchema.index({ invoiceNumber: 1 });
+invoiceSchema.index({ patientId: 1, invoiceDate: -1 });
+invoiceSchema.index({ status: 1, dueDate: 1 });
+invoiceSchema.index({ invoiceType: 1 });
 
 // Generate invoice number
 invoiceSchema.pre('save', async function(next) {
-  if (this.isNew && !this.invoice_number) {
+  if (!this.invoiceNumber) {
     const count = await mongoose.model('Invoice').countDocuments();
-    const year = new Date().getFullYear();
-    const prefix = this.invoice_type === 'Pharmacy' ? 'PH-INV' : 'MED-INV';
-    this.invoice_number = `${prefix}-${year}-${(count + 1).toString().padStart(5, '0')}`;
-  }
-  next();
-});
-
-// Update balance due and auto-detect invoice type
-invoiceSchema.pre('save', function(next) {
-  this.balance_due = this.total - this.amount_paid;
-  
-  // Auto-detect invoice type based on items
-  if (this.medicine_items.length > 0 && this.service_items.length > 0) {
-    this.invoice_type = 'Mixed';
-    this.is_pharmacy_sale = true;
-  } else if (this.medicine_items.length > 0) {
-    this.invoice_type = 'Pharmacy';
-    this.is_pharmacy_sale = true;
-  } else if (this.service_items.length > 0) {
-    this.invoice_type = 'Appointment';
-    this.is_pharmacy_sale = false;
+    const date = new Date();
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    this.invoiceNumber = `INV${year}${month}${(count + 1).toString().padStart(4, '0')}`;
   }
   
-  // Auto-update status based on payment
-  if (this.amount_paid >= this.total) {
-    this.status = 'Paid';
-  } else if (this.amount_paid > 0) {
-    this.status = 'Partial';
-  } else if (new Date() > this.due_date && this.status !== 'Paid') {
-    this.status = 'Overdue';
+  // Calculate totals
+  if (this.isModified('items')) {
+    this.subtotal = this.items.reduce((sum, item) => sum + item.amount, 0);
+    this.tax = this.items.reduce((sum, item) => sum + (item.taxAmount || 0), 0);
+    this.totalAmount = this.subtotal + this.tax - this.discount;
+    this.balanceDue = this.totalAmount - this.amountPaid;
   }
   
   next();
-});
-
-// Virtual for total items count
-invoiceSchema.virtual('total_items').get(function() {
-  return this.service_items.length + this.medicine_items.length;
-});
-
-// Virtual for is_fully_paid
-invoiceSchema.virtual('is_fully_paid').get(function() {
-  return this.amount_paid >= this.total;
 });
 
 module.exports = mongoose.model('Invoice', invoiceSchema);

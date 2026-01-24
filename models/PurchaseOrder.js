@@ -1,49 +1,143 @@
 const mongoose = require('mongoose');
 
 const purchaseOrderItemSchema = new mongoose.Schema({
-  medicine_id: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Medicine', 
-    required: true 
+  medicineId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Medicine',
+    required: true
   },
-  quantity: { type: Number, required: true, min: 1 },
-  unit_cost: { type: Number, required: true },
-  total_cost: { type: Number, required: true },
-  batch_number: { type: String },
-  expiry_date: { type: Date },
-  selling_price: { type: Number, default: 0 }
+  medicineName: String,
+  quantity: {
+    type: Number,
+    required: true,
+    min: 1
+  },
+  unit: String,
+  purchasePrice: {
+    type: Number,
+    required: true
+  },
+  sellingPrice: Number,
+  batchNumber: String,
+  expiryDate: Date,
+  
+  // Received
+  receivedQuantity: {
+    type: Number,
+    default: 0
+  },
+  damagedQuantity: {
+    type: Number,
+    default: 0
+  },
+  returnedQuantity: {
+    type: Number,
+    default: 0
+  }
 });
 
 const purchaseOrderSchema = new mongoose.Schema({
-  order_number: { type: String, unique: true },
-  supplier_id: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Supplier', 
-    required: true 
+  orderNumber: {
+    type: String,
+    required: true,
+    unique: true
   },
-  order_date: { type: Date, default: Date.now },
-  expected_delivery: { type: Date },
-  status: { 
-    type: String, 
-    enum: ['Draft', 'Ordered', 'Received', 'Partially Received', 'Cancelled'], 
-    default: 'Draft' 
+  supplierId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Supplier',
+    required: true
   },
+  
+  // Items
   items: [purchaseOrderItemSchema],
-  subtotal: { type: Number, required: true },
-  tax: { type: Number, default: 0 },
-  total_amount: { type: Number, required: true },
-  notes: { type: String },
-  created_by: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User' 
+  
+  // Dates
+  orderDate: {
+    type: Date,
+    default: Date.now
+  },
+  expectedDeliveryDate: Date,
+  receivedDate: Date,
+  
+  // Financials
+  subtotal: {
+    type: Number,
+    required: true
+  },
+  tax: {
+    type: Number,
+    default: 0
+  },
+  discount: {
+    type: Number,
+    default: 0
+  },
+  shippingCharges: {
+    type: Number,
+    default: 0
+  },
+  totalAmount: {
+    type: Number,
+    required: true
+  },
+  paidAmount: {
+    type: Number,
+    default: 0
+  },
+  
+  // Status
+  status: {
+    type: String,
+    enum: ['draft', 'pending', 'approved', 'ordered', 'partially_received', 'received', 'cancelled', 'returned'],
+    default: 'draft'
+  },
+  
+  // Payment
+  paymentStatus: {
+    type: String,
+    enum: ['pending', 'partial', 'paid', 'overdue'],
+    default: 'pending'
+  },
+  paymentMethod: String,
+  paymentDate: Date,
+  
+  // Documents
+  invoiceNumber: String,
+  deliveryChallan: String,
+  
+  // Notes
+  notes: String,
+  termsAndConditions: String,
+  
+  // Audit
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  receivedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
-}, { timestamps: true });
+}, {
+  timestamps: true
+});
 
-// Generate order number before saving
+purchaseOrderSchema.index({ orderNumber: 1 });
+purchaseOrderSchema.index({ supplierId: 1, status: 1 });
+purchaseOrderSchema.index({ orderDate: -1 });
+
+// Generate order number
 purchaseOrderSchema.pre('save', async function(next) {
-  if (this.isNew) {
+  if (!this.orderNumber) {
     const count = await mongoose.model('PurchaseOrder').countDocuments();
-    this.order_number = `PO-${Date.now()}-${count + 1}`;
+    const date = new Date();
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    this.orderNumber = `PO${year}${month}${(count + 1).toString().padStart(4, '0')}`;
   }
   next();
 });

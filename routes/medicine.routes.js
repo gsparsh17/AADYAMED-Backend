@@ -1,24 +1,20 @@
 const express = require('express');
 const router = express.Router();
-const {
-  addMedicine,
-  getAllMedicines,
-  getMedicineById,
-  updateMedicine,
-  deleteMedicine,
-  getExpiredMedicines,
-  getLowStockMedicines,
-  searchMedicines
-} = require('../controllers/medicine.controller');
+const medicineController = require('../controllers/medicine.controller');
+const { protect, authorize } = require('../middlewares/auth');
 
-// Medicine routes
-router.post('/', addMedicine);
-router.get('/', getAllMedicines);
-router.get('/search', searchMedicines);
-router.get('/expired', getExpiredMedicines);
-router.get('/low-stock', getLowStockMedicines);
-router.get('/:id', getMedicineById);
-router.put('/:id', updateMedicine);
-router.delete('/:id', deleteMedicine);
+router.use(protect);
+
+// Admin and Pharmacy staff only
+router.use(authorize('admin', 'pharmacy'));
+
+router.post('/', medicineController.createMedicine);
+router.get('/', medicineController.getAllMedicines);
+router.get('/low-stock', medicineController.getLowStockMedicines);
+router.get('/expiring', medicineController.getExpiringMedicines);
+router.get('/:id', medicineController.getMedicineById);
+router.put('/:id', medicineController.updateMedicine);
+router.delete('/:id', medicineController.deleteMedicine);
+router.post('/:id/stock', medicineController.addStock);
 
 module.exports = router;
