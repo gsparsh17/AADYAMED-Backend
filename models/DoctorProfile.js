@@ -1,20 +1,26 @@
 const mongoose = require('mongoose');
 
+/* ------------------ Shared Availability Sub-Schema ------------------ */
 const availabilitySlotSchema = new mongoose.Schema({
   day: {
     type: String,
-    enum: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'],
+    enum: [
+      'monday', 'tuesday', 'wednesday',
+      'thursday', 'friday', 'saturday', 'sunday'
+    ],
     required: true
   },
   slots: [{
-    startTime: { type: String, required: true }, // Format: "09:00"
+    startTime: { type: String, required: true }, // "09:00"
     endTime: { type: String, required: true },
     type: { type: String, enum: ['clinic', 'home'], default: 'clinic' },
     maxPatients: { type: Number, default: 1 },
     isBooked: { type: Boolean, default: false }
   }]
-});
+}, { _id: false }); 
+// _id false prevents auto-id for each day document
 
+/* ------------------ Doctor Profile Schema ------------------ */
 const doctorProfileSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -22,35 +28,26 @@ const doctorProfileSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  name: {
-    type: String,
-    required: true
-  },
+  name: { type: String, required: true },
   profileImage: String,
-  gender: {
-    type: String,
-    enum: ['male', 'female', 'other']
-  },
+
+  gender: { type: String, enum: ['male', 'female', 'other'] },
   dateOfBirth: Date,
-  specialization: [{
-    type: String,
-    required: true
-  }],
+
+  specialization: [{ type: String, required: true }],
+
   qualifications: [{
     degree: String,
     university: String,
     year: Number,
     certificateUrl: String
   }],
-  experienceYears: {
-    type: Number,
-    default: 0
-  },
-  licenseNumber: {
-    type: String,
-    required: true
-  },
-  licenseDocument: String, // URL to uploaded document
+
+  experienceYears: { type: Number, default: 0 },
+
+  licenseNumber: { type: String, required: true },
+  licenseDocument: String,
+
   clinicAddress: {
     address: String,
     city: String,
@@ -58,24 +55,19 @@ const doctorProfileSchema = new mongoose.Schema({
     pincode: String,
     location: {
       type: { type: String, enum: ['Point'], default: 'Point' },
-      coordinates: { type: [Number], default: [0, 0] } // [longitude, latitude]
+      coordinates: { type: [Number], default: [0, 0] }
     }
   },
-  consultationFee: {
-    type: Number,
-    required: true,
-    min: 0
-  },
-  homeVisitFee: {
-    type: Number,
-    default: 0
-  },
+
+  consultationFee: { type: Number, required: true, min: 0 },
+  homeVisitFee: { type: Number, default: 0 },
+
   availability: [availabilitySlotSchema],
+
   languages: [String],
   about: String,
   services: [String],
-  
-  // Verification
+
   verificationStatus: {
     type: String,
     enum: ['pending', 'approved', 'rejected', 'suspended'],
@@ -83,51 +75,21 @@ const doctorProfileSchema = new mongoose.Schema({
   },
   adminNotes: String,
   verifiedAt: Date,
-  verifiedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  
-  // Stats
-  totalEarnings: {
-    type: Number,
-    default: 0
-  },
-  totalConsultations: {
-    type: Number,
-    default: 0
-  },
-  averageRating: {
-    type: Number,
-    default: 0,
-    min: 0,
-    max: 5
-  },
-  totalReviews: {
-    type: Number,
-    default: 0
-  },
-  
-  // Commission
-  commissionRate: {
-    type: Number,
-    default: 20 // Percentage
-  },
-  pendingCommission: {
-    type: Number,
-    default: 0
-  },
-  paidCommission: {
-    type: Number,
-    default: 0
-  },
-  
-  // Contact
+  verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+
+  totalEarnings: { type: Number, default: 0 },
+  totalConsultations: { type: Number, default: 0 },
+  averageRating: { type: Number, default: 0, min: 0, max: 5 },
+  totalReviews: { type: Number, default: 0 },
+
+  commissionRate: { type: Number, default: 20 },
+  pendingCommission: { type: Number, default: 0 },
+  paidCommission: { type: Number, default: 0 },
+
   contactNumber: String,
   emergencyContact: String,
   email: String,
-  
-  // Bank Details for payouts
+
   bankDetails: {
     accountName: String,
     accountNumber: String,
@@ -135,13 +97,15 @@ const doctorProfileSchema = new mongoose.Schema({
     bankName: String,
     branch: String
   }
-}, {
-  timestamps: true
-});
+}, { timestamps: true });
 
-// Create index for location-based searches
+/* ------------------ Indexes ------------------ */
 doctorProfileSchema.index({ 'clinicAddress.location': '2dsphere' });
 doctorProfileSchema.index({ specialization: 1, verificationStatus: 1 });
 doctorProfileSchema.index({ averageRating: -1 });
 
-module.exports = mongoose.model('DoctorProfile', doctorProfileSchema);
+/* ------------------ Exports ------------------ */
+const DoctorProfile = mongoose.model('DoctorProfile', doctorProfileSchema);
+
+module.exports = DoctorProfile;
+module.exports.availabilitySlotSchema = availabilitySlotSchema;

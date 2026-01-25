@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const availabilitySlotSchema = require('./DoctorProfile').schema.path('availability').caster;
+const { availabilitySlotSchema } = require('./DoctorProfile');
 
 const physiotherapistProfileSchema = new mongoose.Schema({
   userId: {
@@ -8,37 +8,26 @@ const physiotherapistProfileSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  name: {
-    type: String,
-    required: true
-  },
+  name: { type: String, required: true },
   profileImage: String,
-  gender: {
-    type: String,
-    enum: ['male', 'female', 'other']
-  },
+
+  gender: { type: String, enum: ['male', 'female', 'other'] },
   dateOfBirth: Date,
-  specialization: [{
-    type: String,
-    required: true
-  }],
+
+  specialization: [{ type: String, required: true }],
+
   qualifications: [{
     degree: String,
     university: String,
     year: Number,
     certificateUrl: String
   }],
-  experienceYears: {
-    type: Number,
-    default: 0
-  },
-  licenseNumber: {
-    type: String,
-    required: true
-  },
+
+  experienceYears: { type: Number, default: 0 },
+
+  licenseNumber: { type: String, required: true },
   licenseDocument: String,
-  
-  // Address details
+
   clinicAddress: {
     address: String,
     city: String,
@@ -49,32 +38,24 @@ const physiotherapistProfileSchema = new mongoose.Schema({
       coordinates: { type: [Number], default: [0, 0] }
     }
   },
-  servesAreas: [String], // Areas where home service is available
-  
-  consultationFee: {
-    type: Number,
-    required: true,
-    min: 0
-  },
-  homeVisitFee: {
-    type: Number,
-    required: true,
-    min: 0
-  },
-  availability: [availabilitySlotSchema],
-  
-  // Services
+
+  servesAreas: [String],
+
+  consultationFee: { type: Number, required: true, min: 0 },
+  homeVisitFee: { type: Number, required: true, min: 0 },
+
+  availability: [availabilitySlotSchema], // ✅ Shared schema
+
   services: [{
     name: String,
     description: String,
-    duration: Number, // in minutes
+    duration: Number,
     price: Number
   }],
-  
+
   languages: [String],
   about: String,
-  
-  // Verification
+
   verificationStatus: {
     type: String,
     enum: ['pending', 'approved', 'rejected', 'suspended'],
@@ -82,51 +63,21 @@ const physiotherapistProfileSchema = new mongoose.Schema({
   },
   adminNotes: String,
   verifiedAt: Date,
-  verifiedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  
-  // Stats
-  totalEarnings: {
-    type: Number,
-    default: 0
-  },
-  totalConsultations: {
-    type: Number,
-    default: 0
-  },
-  averageRating: {
-    type: Number,
-    default: 0,
-    min: 0,
-    max: 5
-  },
-  totalReviews: {
-    type: Number,
-    default: 0
-  },
-  
-  // Commission
-  commissionRate: {
-    type: Number,
-    default: 20
-  },
-  pendingCommission: {
-    type: Number,
-    default: 0
-  },
-  paidCommission: {
-    type: Number,
-    default: 0
-  },
-  
-  // Contact
+  verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+
+  totalEarnings: { type: Number, default: 0 },
+  totalConsultations: { type: Number, default: 0 },
+  averageRating: { type: Number, default: 0, min: 0, max: 5 },
+  totalReviews: { type: Number, default: 0 },
+
+  commissionRate: { type: Number, default: 20 },
+  pendingCommission: { type: Number, default: 0 },
+  paidCommission: { type: Number, default: 0 },
+
   contactNumber: String,
   emergencyContact: String,
   email: String,
-  
-  // Bank Details
+
   bankDetails: {
     accountName: String,
     accountNumber: String,
@@ -134,10 +85,9 @@ const physiotherapistProfileSchema = new mongoose.Schema({
     bankName: String,
     branch: String
   }
-}, {
-  timestamps: true
-});
+}, { timestamps: true });
 
+/* ------------------ Indexes ------------------ */
 physiotherapistProfileSchema.index({ 'clinicAddress.location': '2dsphere' });
 physiotherapistProfileSchema.index({ servesAreas: 1 });
 physiotherapistProfileSchema.index({ verificationStatus: 1, averageRating: -1 });

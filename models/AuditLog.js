@@ -65,4 +65,4 @@ auditLogSchema.index({ 'location.coordinates': '2dsphere' });
 // Auto-delete logs older than 90 days
 auditLogSchema.index({ timestamp: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
 
-module.exports = mongoose.model('AuditLog', auditLog);
+module.exports = mongoose.model('AuditLog', auditLogSchema);

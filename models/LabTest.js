@@ -146,4 +146,4 @@ labTestSchema.pre('save', async function(next) {
   next();
 });
 
-module.exports = mongoose.model('LabTest', labTest);
+module.exports = mongoose.model('LabTest', labTestSchema);

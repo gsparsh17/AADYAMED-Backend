@@ -8,7 +8,7 @@ router.use(protect);
 router.post('/', feedbackController.submitFeedback);
 router.get('/', feedbackController.getFeedback);
 router.get('/my', feedbackController.getMyFeedback);
-router.put('/:id/status', authorize('admin'), feedbackController.updateFeedbackStatus);
+router.put('/:id/status', feedbackController.updateFeedbackStatus);
 router.put('/:id/response', feedbackController.addProfessionalResponse);
 
 module.exports = router;

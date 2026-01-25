@@ -3,9 +3,10 @@ const router = express.Router();
 const physioController = require('../controllers/physio.controller');
 const { protect, authorize } = require('../middlewares/auth');
 
-router.use(protect, authorize('physiotherapist'));
+// ========== PROTECTED ROUTES (Physio only) ==========
+router.use(protect, authorize('physio'));
 
-// Profile
+// Profile Management
 router.get('/profile', physioController.getProfile);
 router.put('/profile', physioController.updateProfile);
 router.put('/availability', physioController.updateAvailability);
@@ -15,8 +16,12 @@ router.get('/appointments', physioController.getAppointments);
 
 // Earnings
 router.get('/earnings', physioController.getEarnings);
+router.get('/earnings/report', physioController.getEarningsReport);
 
 // Dashboard
 router.get('/dashboard', physioController.getDashboardStats);
+
+// Add break
+router.post('/break', physioController.addBreak);
 
 module.exports = router;
