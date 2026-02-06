@@ -1,113 +1,144 @@
+// controllers/doctor.controller.js (updated to match DoctorProfile schema)
 const DoctorProfile = require('../models/DoctorProfile');
 const User = require('../models/User');
 const Calendar = require('../models/Calendar');
 
 // ========== PUBLIC FUNCTIONS ==========
 
-// ✅ Create a new doctor (Admin only)
+// ✅ Create current doctor's profile (Doctor only)  POST /doctor
 exports.createDoctor = async (req, res) => {
   try {
-    const {
-      name,
-      email,
-      phone,
-      specialization,
-      qualifications,
-      experienceYears,
-      licenseNumber,
-      consultationFee,
-      homeVisitFee,
-      clinicAddress,
-      availability
-    } = req.body;
-
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ 
+    // prevent duplicate profile (userId is unique in schema)
+    const existing = await DoctorProfile.findOne({ userId: req.user.id });
+    if (existing) {
+      return res.status(409).json({
         success: false,
-        error: 'User with this email already exists. Please use a different email.' 
+        error: 'Doctor profile already exists',
+        doctor: existing
       });
     }
 
-    // Create User first
-    const newUser = await User.create({
-      email,
-      password: req.body.password || 'temporary123',
-      role: 'doctor',
-      phone
-    });
+    // normalize incoming fields according to schema
+    const body = req.body || {};
 
-    // Create DoctorProfile
+    const contactNumber = body.contactNumber || body.phone || '';
+    const email = req.user?.email || body.email || '';
+
+    const specialization = Array.isArray(body.specialization)
+      ? body.specialization.filter(Boolean)
+      : typeof body.specialization === 'string'
+        ? body.specialization.split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+
+    const consultationFee = Number(body.consultationFee);
+    const homeVisitFee = body.homeVisitFee !== undefined ? Number(body.homeVisitFee) : 0;
+
+    const experienceYears =
+      body.experienceYears !== undefined ? Number(body.experienceYears)
+      : body.experience !== undefined ? Number(body.experience)
+      : 0;
+
+    // clinicAddress: schema expects { address, city, state, pincode, location }
+    const ca = body.clinicAddress || body.address || {};
+    const clinicAddress = {
+      address: ca.address || ca.street || '',
+      city: ca.city || '',
+      state: ca.state || '',
+      pincode: ca.pincode || '',
+      location: ca.location && Array.isArray(ca.location.coordinates)
+        ? ca.location
+        : { type: 'Point', coordinates: [0, 0] }
+    };
+
+    // validate required schema fields
+    if (!body.name) {
+      return res.status(400).json({ success: false, error: 'name is required' });
+    }
+    if (!specialization.length) {
+      return res.status(400).json({ success: false, error: 'specialization is required' });
+    }
+    if (!body.licenseNumber) {
+      return res.status(400).json({ success: false, error: 'licenseNumber is required' });
+    }
+    if (Number.isNaN(consultationFee)) {
+      return res.status(400).json({ success: false, error: 'consultationFee is required' });
+    }
+
+    // qualifications schema: { degree, university, year, certificateUrl }
+    const qualifications = Array.isArray(body.qualifications)
+      ? body.qualifications.map(q => ({
+          degree: q.degree || '',
+          university: q.university || '',
+          year: q.year !== undefined && q.year !== null && q.year !== '' ? Number(q.year) : undefined,
+          certificateUrl: q.certificateUrl || ''
+        }))
+      : [];
+
+    // availability already matches availabilitySlotSchema in your model
+    const availability = Array.isArray(body.availability) ? body.availability : [];
+
     const newDoctor = await DoctorProfile.create({
-      userId: newUser._id,
-      name,
+      userId: req.user.id,
+      name: body.name,
+      profileImage: body.profileImage,
+
+      gender: body.gender,
+      dateOfBirth: body.dateOfBirth ? new Date(body.dateOfBirth) : undefined,
+
+      specialization,
+      qualifications,
+
+      experienceYears: Number.isNaN(experienceYears) ? 0 : experienceYears,
+
+      licenseNumber: body.licenseNumber,
+      licenseDocument: body.licenseDocument,
+
+      clinicAddress,
+
+      consultationFee,
+      homeVisitFee: Number.isNaN(homeVisitFee) ? 0 : homeVisitFee,
+
+      availability,
+
+      languages: Array.isArray(body.languages) ? body.languages : (body.languages ? [body.languages] : ['English']),
+      about: body.about || '',
+      services: Array.isArray(body.services) ? body.services : [],
+
+      // verificationStatus defaults to 'pending' by schema
+      contactNumber,
+      emergencyContact: body.emergencyContact,
       email,
-      phone,
-      specialization: specialization || [],
-      qualifications: qualifications || [],
-      experienceYears: experienceYears || 0,
-      licenseNumber,
-      licenseDocument: req.body.licenseDocument,
-      clinicAddress: {
-        address: clinicAddress?.address || '',
-        city: clinicAddress?.city || '',
-        state: clinicAddress?.state || '',
-        pincode: clinicAddress?.pincode || '',
-        location: clinicAddress?.location || {
-          type: 'Point',
-          coordinates: [0, 0]
-        }
-      },
-      consultationFee: consultationFee || 0,
-      homeVisitFee: homeVisitFee || 0,
-      availability: availability || [],
-      about: req.body.about || '',
-      services: req.body.services || [],
-      languages: req.body.languages || ['English'],
-      gender: req.body.gender,
-      dateOfBirth: req.body.dateOfBirth ? new Date(req.body.dateOfBirth) : null,
-      bankDetails: {
-        accountName: req.body.bankDetails?.accountName,
-        accountNumber: req.body.bankDetails?.accountNumber,
-        ifscCode: req.body.bankDetails?.ifscCode,
-        bankName: req.body.bankDetails?.bankName,
-        branch: req.body.bankDetails?.branch
-      },
-      commissionRate: req.body.commissionRate || 20
+
+      bankDetails: body.bankDetails ? {
+        accountName: body.bankDetails.accountName,
+        accountNumber: body.bankDetails.accountNumber,
+        ifscCode: body.bankDetails.ifscCode,
+        bankName: body.bankDetails.bankName,
+        branch: body.bankDetails.branch
+      } : undefined,
+
+      commissionRate: body.commissionRate !== undefined ? Number(body.commissionRate) : undefined
     });
 
     // Update calendar with doctor's availability
     try {
-      console.log(`🗓️ Adding new doctor ${name} to calendar...`);
+      console.log(`🗓️ Adding new doctor ${newDoctor.name} to calendar...`);
       await addDoctorToCalendar(newDoctor);
-      console.log(`✅ Calendar updated for Doctor ${name}`);
+      console.log(`✅ Calendar updated for Doctor ${newDoctor.name}`);
     } catch (calendarError) {
       console.error('❌ Failed to update calendar with new doctor:', calendarError);
     }
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: 'Doctor created successfully. Profile pending admin verification.',
-      doctor: newDoctor,
-      user: {
-        id: newUser._id,
-        email: newUser.email,
-        role: newUser.role,
-        isVerified: newUser.isVerified
-      }
+      message: 'Doctor profile created successfully. Pending admin verification.',
+      doctor: newDoctor
     });
   } catch (err) {
-    console.error('Doctor creation error:', err.message);
-    
-    // Clean up user if doctor creation fails
-    if (req.body.email) {
-      await User.findOneAndDelete({ email: req.body.email });
-    }
-    
-    res.status(400).json({ 
+    console.error('Doctor creation error:', err);
+    return res.status(400).json({
       success: false,
-      error: err.message 
+      error: err.message
     });
   }
 };
@@ -115,9 +146,9 @@ exports.createDoctor = async (req, res) => {
 // Get all doctors (public)
 exports.getAllDoctors = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 20, 
+    const {
+      page = 1,
+      limit = 20,
       specialization,
       verificationStatus,
       search,
@@ -128,20 +159,11 @@ exports.getAllDoctors = async (req, res) => {
 
     const filter = {};
 
-    // Filter by specialization
-    if (specialization) {
-      filter.specialization = { $in: [specialization] };
-    }
+    if (specialization) filter.specialization = { $in: [specialization] };
 
-    // Filter by verification status
-    if (verificationStatus) {
-      filter.verificationStatus = verificationStatus;
-    } else {
-      // Default: show only approved doctors for public
-      filter.verificationStatus = 'approved';
-    }
+    // Default: only approved doctors for public
+    filter.verificationStatus = verificationStatus || 'approved';
 
-    // Filter by search term
     if (search) {
       filter.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -150,25 +172,17 @@ exports.getAllDoctors = async (req, res) => {
       ];
     }
 
-    // Filter by minimum rating
-    if (minRating) {
-      filter.averageRating = { $gte: parseFloat(minRating) };
-    }
-
-    // Filter by maximum consultation fee
-    if (maxFee) {
-      filter.consultationFee = { $lte: parseFloat(maxFee) };
-    }
-
-    // Filter by city
-    if (city) {
-      filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
-    }
+    if (minRating) filter.averageRating = { $gte: parseFloat(minRating) };
+    if (maxFee) filter.consultationFee = { $lte: parseFloat(maxFee) };
+    if (city) filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const doctors = await DoctorProfile.find(filter)
-      .select('-password -bankDetails -licenseDocument')
+      // DoctorProfile has no password field; keep public-safe fields
+      .select(
+        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee languages about services verificationStatus averageRating totalReviews totalConsultations'
+      )
       .populate('userId', 'email isVerified')
       .sort({ averageRating: -1, createdAt: -1 })
       .skip(skip)
@@ -176,7 +190,7 @@ exports.getAllDoctors = async (req, res) => {
 
     const total = await DoctorProfile.countDocuments(filter);
 
-    res.json({
+    return res.json({
       success: true,
       doctors,
       pagination: {
@@ -188,9 +202,9 @@ exports.getAllDoctors = async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching doctors:', err.message);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
-      error: 'Failed to fetch doctors' 
+      error: 'Failed to fetch doctors'
     });
   }
 };
@@ -199,17 +213,16 @@ exports.getAllDoctors = async (req, res) => {
 exports.getDoctorById = async (req, res) => {
   try {
     const doctor = await DoctorProfile.findById(req.params.id)
-      .select('-password -bankDetails')
+      .select('-bankDetails -licenseDocument -adminNotes -commissionRate -pendingCommission -paidCommission')
       .populate('userId', 'email isVerified');
 
     if (!doctor) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Doctor not found' 
+        error: 'Doctor not found'
       });
     }
 
-    // Get doctor's upcoming appointments (public view - limited info)
     const Appointment = require('../models/Appointment');
     const upcomingAppointments = await Appointment.find({
       doctorId: doctor._id,
@@ -217,11 +230,11 @@ exports.getDoctorById = async (req, res) => {
       appointmentDate: { $gte: new Date() },
       status: { $in: ['confirmed', 'accepted'] }
     })
-    .select('appointmentDate startTime type')
-    .sort({ appointmentDate: 1 })
-    .limit(5);
+      .select('appointmentDate startTime type')
+      .sort({ appointmentDate: 1 })
+      .limit(5);
 
-    res.json({
+    return res.json({
       success: true,
       doctor: {
         ...doctor.toObject(),
@@ -230,9 +243,9 @@ exports.getDoctorById = async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching doctor:', err.message);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
-      error: 'Failed to fetch doctor details' 
+      error: 'Failed to fetch doctor details'
     });
   }
 };
@@ -244,37 +257,29 @@ exports.getDoctorsBySpecialization = async (req, res) => {
     const { city, minRating, maxFee, page = 1, limit = 20 } = req.query;
 
     const filter = {
-      specialization: { $in: [specialization] },
-      verificationStatus: 'approved',
-      isActive: true
+      verificationStatus: 'approved'
     };
 
-    // Optional city filter
-    if (city) {
-      filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
+    // ✅ Only filter specialization if it's not "all"
+    if (specialization !== 'all') {
+      filter.specialization = { $in: [specialization] };
     }
 
-    // Optional minimum rating filter
-    if (minRating) {
-      filter.averageRating = { $gte: parseFloat(minRating) };
-    }
-
-    // Optional maximum fee filter
-    if (maxFee) {
-      filter.consultationFee = { $lte: parseFloat(maxFee) };
-    }
+    if (city) filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
+    if (minRating) filter.averageRating = { $gte: parseFloat(minRating) };
+    if (maxFee) filter.consultationFee = { $lte: parseFloat(maxFee) };
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const doctors = await DoctorProfile.find(filter)
-      .select('name specialization averageRating consultationFee homeVisitFee clinicAddress availability totalConsultations')
+      .select('name profileImage specialization averageRating consultationFee homeVisitFee clinicAddress availability totalConsultations')
       .sort({ averageRating: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
     const total = await DoctorProfile.countDocuments(filter);
 
-    res.json({
+    return res.json({
       success: true,
       specialization,
       count: doctors.length,
@@ -288,12 +293,13 @@ exports.getDoctorsBySpecialization = async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching doctors by specialization:', err.message);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
-      error: 'Failed to fetch doctors' 
+      error: 'Failed to fetch doctors'
     });
   }
 };
+
 
 // Get doctor's availability (public)
 exports.getDoctorAvailability = async (req, res) => {
@@ -302,28 +308,29 @@ exports.getDoctorAvailability = async (req, res) => {
     const { date } = req.query;
 
     const doctor = await DoctorProfile.findById(id)
-      .select('availability name consultationFee homeVisitFee')
+      .select('availability name consultationFee homeVisitFee verificationStatus')
       .populate('userId', 'isVerified');
 
     if (!doctor) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Doctor not found' 
+        error: 'Doctor not found'
       });
     }
 
-    // Check if doctor is verified
-    if (!doctor.userId?.isVerified) {
+    // Use schema verificationStatus as primary gate for public
+    if (doctor.verificationStatus !== 'approved') {
       return res.status(400).json({
         success: false,
-        error: 'Doctor profile is not verified'
+        error: 'Doctor profile is not approved'
       });
     }
 
     const targetDate = date ? new Date(date) : new Date();
-    const dayName = targetDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    const dayName = targetDate
+      .toLocaleDateString('en-US', { weekday: 'long' })
+      .toLowerCase();
 
-    // Get doctor's availability for this day
     const dayAvailability = doctor.availability?.find(a => a.day === dayName);
 
     if (!dayAvailability) {
@@ -338,7 +345,6 @@ exports.getDoctorAvailability = async (req, res) => {
       });
     }
 
-    // Check calendar for booked slots
     const year = targetDate.getFullYear();
     const month = targetDate.getMonth() + 1;
     const dateStr = targetDate.toISOString().split('T')[0];
@@ -358,12 +364,11 @@ exports.getDoctorAvailability = async (req, res) => {
       }
     }
 
-    // Filter out booked slots
     const availableSlots = dayAvailability.slots.map(slot => {
-      const isBooked = bookedSlots.some(booked => 
-        booked.startTime === slot.startTime && booked.endTime === slot.endTime
+      const isBooked = bookedSlots.some(
+        booked => booked.startTime === slot.startTime && booked.endTime === slot.endTime
       );
-      
+
       return {
         startTime: slot.startTime,
         endTime: slot.endTime,
@@ -371,11 +376,11 @@ exports.getDoctorAvailability = async (req, res) => {
         maxPatients: slot.maxPatients || 1,
         isBooked,
         isAvailable: !isBooked,
-        fee: slot.type === 'home' ? doctor.homeVisitFee : doctor.consultationFee
+        fee: (slot.type || 'clinic') === 'home' ? doctor.homeVisitFee : doctor.consultationFee
       };
     });
 
-    res.json({
+    return res.json({
       success: true,
       date: dateStr,
       dayName: dayName.charAt(0).toUpperCase() + dayName.slice(1),
@@ -387,55 +392,71 @@ exports.getDoctorAvailability = async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching doctor availability:', err.message);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
-      error: 'Failed to fetch availability' 
+      error: 'Failed to fetch availability'
     });
   }
 };
 
 // ========== DOCTOR-ONLY FUNCTIONS ==========
 
-// Get current doctor's profile
+// Get current doctor's profile  GET /doctor/me/profile
 exports.getProfile = async (req, res) => {
   try {
     const doctor = await DoctorProfile.findOne({ userId: req.user.id })
       .populate('userId', 'email isVerified lastLogin');
 
     if (!doctor) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Doctor profile not found' 
+        error: 'Doctor profile not found'
       });
     }
 
-    res.json({
-      success: true,
-      doctor
-    });
+    return res.json({ success: true, doctor });
   } catch (err) {
     console.error('Error fetching doctor profile:', err.message);
-    res.status(500).json({ 
+    return res.status(500).json({
       success: false,
-      error: 'Failed to fetch profile' 
+      error: 'Failed to fetch profile'
     });
   }
 };
 
-// Update current doctor's profile
+// Update current doctor's profile  PUT /doctor/me/profile
 exports.updateProfile = async (req, res) => {
   try {
-    const updates = req.body;
-    
-    // Remove fields that shouldn't be updated directly
+    const updates = { ...(req.body || {}) };
+
+    // Map "phone" -> contactNumber (schema field)
+    if (updates.phone && !updates.contactNumber) {
+      updates.contactNumber = updates.phone;
+      delete updates.phone;
+    }
+
+    // Support address shape from frontend modal: { clinicAddress: { street, city... } }
+    if (updates.clinicAddress?.street && !updates.clinicAddress.address) {
+      updates.clinicAddress.address = updates.clinicAddress.street;
+      delete updates.clinicAddress.street;
+    }
+
+    // Remove fields that shouldn't be updated directly by doctor
+    delete updates.userId;
+
     delete updates.verificationStatus;
+    delete updates.adminNotes;
+    delete updates.verifiedAt;
+    delete updates.verifiedBy;
+
     delete updates.totalEarnings;
     delete updates.totalConsultations;
     delete updates.averageRating;
     delete updates.totalReviews;
+
     delete updates.pendingCommission;
     delete updates.paidCommission;
-    delete updates.userId;
+    delete updates.commissionRate;
 
     const doctor = await DoctorProfile.findOneAndUpdate(
       { userId: req.user.id },
@@ -444,29 +465,27 @@ exports.updateProfile = async (req, res) => {
     ).populate('userId', 'email');
 
     if (!doctor) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Doctor profile not found' 
+        error: 'Doctor profile not found'
       });
     }
 
-    // Update associated user if email changed
+    // If email changed in profile, reflect in User too
     if (updates.email && doctor.userId) {
-      await User.findByIdAndUpdate(doctor.userId, {
-        email: updates.email
-      });
+      await User.findByIdAndUpdate(doctor.userId, { email: updates.email });
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Profile updated successfully',
       doctor
     });
   } catch (err) {
     console.error('Error updating doctor profile:', err.message);
-    res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: err.message 
+      error: err.message
     });
   }
 };
@@ -946,7 +965,7 @@ exports.bulkCreateDoctors = async (req, res) => {
         userId: newUser._id,
         name: doctorData.name,
         email: doctorData.email,
-        phone: doctorData.phone,
+        contactNumber: doctorData.phone,
         specialization: doctorData.specialization || [],
         qualifications: doctorData.qualifications || [],
         experienceYears: doctorData.experienceYears || 0,

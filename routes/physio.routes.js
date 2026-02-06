@@ -7,6 +7,7 @@ const { protect, authorize } = require('../middlewares/auth');
 router.use(protect, authorize('physio'));
 
 // Profile Management
+router.post('/', physioController.createPhysiotherapist);
 router.get('/profile', physioController.getProfile);
 router.put('/profile', physioController.updateProfile);
 router.put('/availability', physioController.updateAvailability);

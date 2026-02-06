@@ -1,170 +1,283 @@
+// controllers/patient.controller.js  (UPDATED to match PatientProfile schema)
 const PatientProfile = require('../models/PatientProfile');
 const Appointment = require('../models/Appointment');
 const Prescription = require('../models/Prescription');
 const LabTest = require('../models/LabTest');
 const Invoice = require('../models/Invoice');
+const User = require('../models/User');
+
+// ---------- helpers ----------
+const safeDate = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const splitName = (fullName = '') => {
+  const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { firstName: '', lastName: '' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: parts[0] }; // fallback
+  return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+};
+
+const normalizePhone = (v) => (v ? String(v).replace(/\D/g, '').slice(-10) : '');
+
+const normalizeAddress = (address = {}) => ({
+  street: address.street || address.address || '',
+  city: address.city || '',
+  state: address.state || '',
+  pincode: address.pincode || '',
+  country: address.country || 'India',
+  location:
+    address.location && Array.isArray(address.location.coordinates)
+      ? address.location
+      : { type: 'Point', coordinates: [0, 0] }
+});
 
 // ========== PATIENT-ONLY FUNCTIONS ==========
 
-// Get current patient's profile
+// GET /patient/profile
 exports.getProfile = async (req, res) => {
   try {
-    const profile = await PatientProfile.findOne({ 
-      userId: req.user.id 
-    }).populate('userId', 'email isVerified lastLogin');
-    
+    const profile = await PatientProfile.findOne({ userId: req.user.id })
+      .populate('userId', 'email isVerified lastLogin');
+
     if (!profile) {
       return res.status(404).json({
         success: false,
         error: 'Profile not found. Please complete your profile.'
       });
     }
-    
-    // Set profileId in user object for other functions
-    req.user.profileId = profile._id;
-    
-    res.json({
-      success: true,
-      profile: {
-        id: profile._id,
-        patientId: profile.patientId,
-        name: profile.name,
-        firstName: profile.firstName,
-        middleName: profile.middleName,
-        lastName: profile.lastName,
-        email: profile.email,
-        phone: profile.phone,
-        gender: profile.gender,
-        dateOfBirth: profile.dateOfBirth,
-        age: profile.age,
-        bloodGroup: profile.bloodGroup,
-        height: profile.height,
-        weight: profile.weight,
-        bmi: profile.bmi,
-        address: profile.address,
-        emergencyContact: profile.emergencyContact,
-        insuranceProvider: profile.insuranceProvider,
-        aadhaarNumber: profile.aadhaarNumber,
-        preferences: profile.preferences,
-        profileImage: profile.profileImage,
-        registeredAt: profile.registeredAt
-      }
-    });
+
+    return res.json({ success: true, profile });
   } catch (error) {
     console.error('Error fetching patient profile:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch profile'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to fetch profile' });
   }
 };
 
-// Update current patient's profile
-exports.updateProfile = async (req, res) => {
+// POST /patient/profile
+exports.createProfile = async (req, res) => {
   try {
-    const updates = req.body;
-    
-    // Get profile first
-    let profile = await PatientProfile.findOne({ userId: req.user.id });
-    if (!profile) {
-      // Create profile if it doesn't exist
-      profile = new PatientProfile({
-        userId: req.user.id,
-        ...updates
-      });
-    } else {
-      // Remove fields that shouldn't be updated directly
-      delete updates.patientId;
-      delete updates.totalAppointments;
-      delete updates.totalPrescriptions;
-      delete updates.totalLabTests;
-      delete updates.userId;
-      delete updates.registeredAt;
-      
-      // Update profile
-      Object.assign(profile, updates);
+    const body = req.body || {};
+
+    // Check user exists
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
     }
-    
-    // Set name from firstName and lastName
-    if (updates.firstName || updates.lastName) {
-      const firstName = updates.firstName || profile.firstName;
-      const lastName = updates.lastName || profile.lastName;
-      if (firstName && lastName) {
-        profile.name = `${firstName} ${lastName}`.trim();
-      }
-    }
-    
-    await profile.save();
-    
-    // Update user email if changed
-    if (updates.email && profile.userId) {
-      const User = require('../models/User');
-      await User.findByIdAndUpdate(profile.userId, {
-        email: updates.email,
-        phone: updates.phone || profile.phone
+
+    // Prevent duplicate (schema unique userId)
+    const existing = await PatientProfile.findOne({ userId: req.user.id });
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        error: 'Patient profile already exists',
+        profile: existing
       });
     }
-    
-    res.json({
+
+    // Name fields are REQUIRED by schema
+    const firstName = (body.firstName || '').trim();
+    const lastName = (body.lastName || '').trim();
+
+    // If frontend sends "name" only, derive firstName/lastName
+    let derived = { firstName, lastName };
+    if ((!firstName || !lastName) && body.name) {
+      derived = splitName(body.name);
+    }
+
+    const finalFirstName = (derived.firstName || '').trim();
+    const finalLastName = (derived.lastName || '').trim();
+
+    const phone = normalizePhone(body.phone || user.phone);
+    const dateOfBirth = safeDate(body.dateOfBirth);
+
+    // Required validations (align with schema)
+    if (!finalFirstName) return res.status(400).json({ success: false, error: 'firstName is required' });
+    // if (!finalLastName) return res.status(400).json({ success: false, error: 'lastName is required' });
+    if (!phone) return res.status(400).json({ success: false, error: 'phone is required (10 digits)' });
+    if (!body.gender) return res.status(400).json({ success: false, error: 'gender is required' });
+    if (!dateOfBirth) return res.status(400).json({ success: false, error: 'dateOfBirth is required' });
+
+    const profile = await PatientProfile.create({
+      userId: req.user.id,
+
+      // Personal
+      firstName: finalFirstName,
+      middleName: body.middleName,
+      lastName: finalLastName,
+      name: body.name ? String(body.name).trim() : `${finalFirstName} ${finalLastName}`.trim(),
+      salutation: body.salutation, // optional, schema default applies if not set
+
+      email: (body.email || user.email || '').toLowerCase().trim(),
+      phone,
+      alternatePhone: normalizePhone(body.alternatePhone),
+
+      // Demographics
+      gender: body.gender,
+      dateOfBirth,
+      // age will be calculated by pre-save if not provided
+      // age: body.age,
+
+      // Address
+      address: normalizeAddress(body.address),
+
+      // Medical
+      bloodGroup: body.bloodGroup ?? 'Unknown',
+      height: body.height !== undefined && body.height !== '' ? Number(body.height) : undefined,
+      weight: body.weight !== undefined && body.weight !== '' ? Number(body.weight) : undefined,
+      // bmi auto-calculated by pre-save if height & weight provided
+
+      // Emergency contact (schema expects object)
+      emergencyContact: body.emergencyContact || undefined,
+
+      // Optional IDs / insurance / prefs
+      aadhaarNumber: body.aadhaarNumber,
+      panNumber: body.panNumber,
+      insuranceProvider: body.insuranceProvider,
+      insurancePolicyNumber: body.insurancePolicyNumber,
+      insuranceValidity: safeDate(body.insuranceValidity),
+      preferences: body.preferences
+    });
+
+    // Update user role if needed
+    if (user.role !== 'patient') {
+      user.role = 'patient';
+      await user.save();
+    }
+
+    return res.status(201).json({
       success: true,
-      message: 'Profile updated successfully',
-      profile: {
-        id: profile._id,
-        patientId: profile.patientId,
-        name: profile.name,
-        email: profile.email,
-        phone: profile.phone,
-        dateOfBirth: profile.dateOfBirth,
-        age: profile.age,
-        bloodGroup: profile.bloodGroup
-      }
+      message: 'Patient profile created successfully',
+      profile
     });
   } catch (error) {
-    console.error('Error updating patient profile:', error.message);
-    
-    // Handle validation errors
+    console.error('Error creating patient profile:', error);
+
     if (error.name === 'ValidationError') {
       const errors = {};
-      Object.keys(error.errors).forEach(key => {
+      Object.keys(error.errors).forEach((key) => {
         errors[key] = error.errors[key].message;
       });
-      
       return res.status(400).json({
         success: false,
         error: 'Validation failed',
         errors
       });
     }
-    
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
+
+    return res.status(400).json({ success: false, error: error.message });
   }
 };
 
-// Get medical history
-exports.getMedicalHistory = async (req, res) => {
+// PUT /patient/profile
+exports.updateProfile = async (req, res) => {
   try {
-    // Get profile ID
+    const updates = { ...(req.body || {}) };
+
     const profile = await PatientProfile.findOne({ userId: req.user.id });
     if (!profile) {
       return res.status(404).json({
         success: false,
-        error: 'Profile not found'
+        error: 'Profile not found. Please create your profile first.'
       });
     }
-    
-    res.json({
+
+    // Do not allow changes to these
+    delete updates.patientId;
+    delete updates.totalAppointments;
+    delete updates.totalPrescriptions;
+    delete updates.totalLabTests;
+    delete updates.userId;
+    delete updates.registeredAt;
+    delete updates.updatedAt;
+    delete updates.createdAt;
+
+    // If name parts changed, keep full name in sync
+    if (updates.firstName || updates.lastName) {
+      const firstName = (updates.firstName || profile.firstName || '').trim();
+      const lastName = (updates.lastName || profile.lastName || '').trim();
+      if (firstName && lastName) updates.name = `${firstName} ${lastName}`.trim();
+    }
+
+    // Normalize dateOfBirth (schema requires a valid Date)
+    if (updates.dateOfBirth) {
+      const dob = safeDate(updates.dateOfBirth);
+      if (!dob) {
+        return res.status(400).json({ success: false, error: 'Invalid dateOfBirth' });
+      }
+      updates.dateOfBirth = dob;
+      // age will be recalculated in pre-save if missing; if you want force update:
+      updates.age = profile.calculateAge ? profile.calculateAge.call({ dateOfBirth: dob }) : undefined;
+    }
+
+    // Normalize phone fields
+    if (updates.phone) updates.phone = normalizePhone(updates.phone);
+    if (updates.alternatePhone) updates.alternatePhone = normalizePhone(updates.alternatePhone);
+
+    // Normalize address
+    if (updates.address) updates.address = normalizeAddress(updates.address);
+
+    // Normalize height/weight numeric
+    if (updates.height !== undefined && updates.height !== '') updates.height = Number(updates.height);
+    if (updates.weight !== undefined && updates.weight !== '') updates.weight = Number(updates.weight);
+
+    // Apply updates
+    Object.keys(updates).forEach((k) => {
+      profile[k] = updates[k];
+    });
+
+    await profile.save(); // triggers pre-save: age/bmi/updatedAt/patientId/name
+
+    // Update user email if changed
+    if (updates.email) {
+      await User.findByIdAndUpdate(profile.userId, { email: updates.email });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      profile
+    });
+  } catch (error) {
+    console.error('Error updating patient profile:', error);
+
+    if (error.name === 'ValidationError') {
+      const errors = {};
+      Object.keys(error.errors).forEach((key) => {
+        errors[key] = error.errors[key].message;
+      });
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        errors
+      });
+    }
+
+    return res.status(400).json({ success: false, error: error.message });
+  }
+};
+
+// GET /patient/medical-history
+exports.getMedicalHistory = async (req, res) => {
+  try {
+    const profile = await PatientProfile.findOne({ userId: req.user.id });
+    if (!profile) {
+      return res.status(404).json({ success: false, error: 'Profile not found' });
+    }
+
+    return res.json({
       success: true,
       medicalHistory: {
-        conditions: profile.medicalHistory || [],
+        // schema arrays
+        medicalHistory: profile.medicalHistory || [],
         allergies: profile.allergies || [],
         currentMedications: profile.currentMedications || [],
         chronicConditions: profile.chronicConditions || []
       },
       summary: {
-        totalConditions: profile.medicalHistory?.length || 0,
+        totalMedicalHistory: profile.medicalHistory?.length || 0,
         totalAllergies: profile.allergies?.length || 0,
         totalMedications: profile.currentMedications?.length || 0,
         totalChronicConditions: profile.chronicConditions?.length || 0
@@ -172,135 +285,157 @@ exports.getMedicalHistory = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching medical history:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch medical history'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to fetch medical history' });
   }
 };
 
-// Add medical record
+// POST /patient/medical-history
 exports.addMedicalRecord = async (req, res) => {
   try {
-    const { 
-      recordType, // 'medicalHistory', 'allergy', 'medication', 'condition'
-      data 
-    } = req.body;
-    
+    const { recordType, data } = req.body || {};
+
     if (!recordType || !data) {
-      return res.status(400).json({
-        success: false,
-        error: 'Record type and data are required'
-      });
+      return res.status(400).json({ success: false, error: 'recordType and data are required' });
     }
-    
-    // Get profile
+
     const profile = await PatientProfile.findOne({ userId: req.user.id });
     if (!profile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Profile not found'
-      });
+      return res.status(404).json({ success: false, error: 'Profile not found' });
     }
-    
-    const recordData = {
-      ...data,
-      addedBy: req.user.id,
-      addedAt: new Date()
-    };
-    
-    let updatedProfile;
-    switch(recordType) {
-      case 'medicalHistory':
+
+    // Map incoming generic "data" to schema-specific shapes:
+    // medicalHistory[] requires: condition (required)
+    // allergies[] requires: allergen (required)
+    // currentMedications[] requires: medicineName (required)
+    // chronicConditions[]: condition optional in schema, but we’ll accept either.
+
+    let record;
+    switch (recordType) {
+      case 'medicalHistory': {
+        if (!data.condition) {
+          return res.status(400).json({ success: false, error: 'data.condition is required for medicalHistory' });
+        }
+        record = {
+          condition: String(data.condition).trim(),
+          diagnosedDate: safeDate(data.diagnosedDate),
+          status: data.status,
+          severity: data.severity,
+          notes: data.notes,
+          addedBy: req.user.id,
+          addedAt: new Date()
+        };
         profile.medicalHistory = profile.medicalHistory || [];
-        profile.medicalHistory.push(recordData);
-        updatedProfile = await profile.save();
+        profile.medicalHistory.push(record);
         break;
-        
-      case 'allergy':
+      }
+
+      case 'allergy': {
+        if (!data.allergen) {
+          return res.status(400).json({ success: false, error: 'data.allergen is required for allergy' });
+        }
+        record = {
+          allergen: String(data.allergen).trim(),
+          reaction: data.reaction,
+          severity: data.severity,
+          firstObserved: safeDate(data.firstObserved),
+          notes: data.notes,
+          addedAt: new Date()
+        };
         profile.allergies = profile.allergies || [];
-        profile.allergies.push(recordData);
-        updatedProfile = await profile.save();
+        profile.allergies.push(record);
         break;
-        
-      case 'medication':
+      }
+
+      case 'medication': {
+        if (!data.medicineName) {
+          return res.status(400).json({ success: false, error: 'data.medicineName is required for medication' });
+        }
+        record = {
+          medicineName: String(data.medicineName).trim(),
+          dosage: data.dosage,
+          frequency: data.frequency,
+          prescribedBy: data.prescribedBy,
+          startDate: safeDate(data.startDate),
+          endDate: safeDate(data.endDate),
+          purpose: data.purpose,
+          notes: data.notes,
+          addedAt: new Date()
+        };
         profile.currentMedications = profile.currentMedications || [];
-        profile.currentMedications.push(recordData);
-        updatedProfile = await profile.save();
+        profile.currentMedications.push(record);
         break;
-        
-      case 'condition':
+      }
+
+      case 'condition': {
+        record = {
+          condition: data.condition ? String(data.condition).trim() : '',
+          diagnosedDate: safeDate(data.diagnosedDate),
+          currentStatus: data.currentStatus,
+          managingDoctor: data.managingDoctor,
+          lastCheckup: safeDate(data.lastCheckup),
+          notes: data.notes,
+          addedAt: new Date()
+        };
         profile.chronicConditions = profile.chronicConditions || [];
-        profile.chronicConditions.push(recordData);
-        updatedProfile = await profile.save();
+        profile.chronicConditions.push(record);
         break;
-        
+      }
+
       default:
         return res.status(400).json({
           success: false,
-          error: 'Invalid record type. Must be: medicalHistory, allergy, medication, or condition'
+          error: 'Invalid recordType. Must be: medicalHistory, allergy, medication, condition'
         });
     }
-    
-    res.json({
+
+    await profile.save();
+
+    return res.json({
       success: true,
       message: 'Medical record added successfully',
       recordType,
-      record: recordData
+      record
     });
   } catch (error) {
     console.error('Error adding medical record:', error.message);
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
+    return res.status(400).json({ success: false, error: error.message });
   }
 };
 
-// Get appointments
+// ✅ Everything below can mostly stay the same because it uses patientId = profile._id,
+// but I cleaned a couple of inconsistent names.
+
+// GET /patient/appointments
 exports.getAppointments = async (req, res) => {
   try {
-    const { 
-      status, 
+    const {
+      status,
       type,
       professionalType,
       startDate,
       endDate,
       page = 1,
-      limit = 20 
+      limit = 20
     } = req.query;
-    
-    // Get profile ID
+
     const profile = await PatientProfile.findOne({ userId: req.user.id });
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Profile not found'
-      });
-    }
-    
-    const filter = { 
-      patientId: profile._id
-    };
-    
+    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+
+    const filter = { patientId: profile._id };
     if (status) filter.status = status;
     if (type) filter.type = type;
     if (professionalType) filter.professionalType = professionalType;
-    
+
     if (startDate && endDate) {
       const start = new Date(startDate);
       start.setHours(0, 0, 0, 0);
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-      
-      filter.appointmentDate = {
-        $gte: start,
-        $lte: end
-      };
+      filter.appointmentDate = { $gte: start, $lte: end };
     }
-    
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     const appointments = await Appointment.find(filter)
       .populate('doctorId', 'name specialization consultationFee clinicAddress')
       .populate('physioId', 'name services consultationFee clinicAddress')
@@ -308,40 +443,33 @@ exports.getAppointments = async (req, res) => {
       .sort({ appointmentDate: -1 })
       .skip(skip)
       .limit(parseInt(limit));
-    
+
     const total = await Appointment.countDocuments(filter);
-    
-    // Get upcoming appointments
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
+
     const upcomingAppointments = await Appointment.find({
       patientId: profile._id,
       appointmentDate: { $gte: today },
       status: { $in: ['pending', 'confirmed', 'accepted'] }
     })
-    .populate('doctorId', 'name specialization')
-    .populate('physioId', 'name services')
-    .sort({ appointmentDate: 1 })
-    .limit(5);
-    
-    // Get appointment statistics
+      .populate('doctorId', 'name specialization')
+      .populate('physioId', 'name services')
+      .sort({ appointmentDate: 1 })
+      .limit(5);
+
     const stats = await Appointment.aggregate([
       { $match: { patientId: profile._id } },
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
+      { $group: { _id: '$status', count: { $sum: 1 } } }
     ]);
-    
-    res.json({
+
+    return res.json({
       success: true,
       appointments,
       upcomingAppointments,
-      stats: stats.reduce((acc, stat) => {
-        acc[stat._id] = stat.count;
+      stats: stats.reduce((acc, s) => {
+        acc[s._id] = s.count;
         return acc;
       }, {}),
       pagination: {
@@ -353,68 +481,45 @@ exports.getAppointments = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching appointments:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch appointments'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to fetch appointments' });
   }
 };
 
-// Get prescriptions
+// GET /patient/prescriptions
 exports.getPrescriptions = async (req, res) => {
   try {
-    const { 
-      status,
-      recent = false,
-      page = 1,
-      limit = 20 
-    } = req.query;
-    
-    // Get profile ID
+    const { status, recent = false, page = 1, limit = 20 } = req.query;
+
     const profile = await PatientProfile.findOne({ userId: req.user.id });
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Profile not found'
-      });
-    }
-    
-    const filter = { 
-      patientId: profile._id
-    };
-    
+    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+
+    const filter = { patientId: profile._id };
     if (status) filter.pharmacyStatus = status;
-    
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     let query = Prescription.find(filter)
       .populate('doctorId', 'name specialization clinicAddress')
       .populate('physioId', 'name services clinicAddress')
       .populate('appointmentId', 'appointmentDate type')
       .sort({ issuedAt: -1 })
       .skip(skip);
-    
-    if (!recent) {
-      query = query.limit(parseInt(limit));
-    } else {
-      query = query.limit(5);
-    }
-    
+
+    query = query.limit(recent ? 5 : parseInt(limit));
+
     const prescriptions = await query;
-    
     const total = await Prescription.countDocuments(filter);
-    
-    // Get active prescriptions (last 30 days)
+
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
+
     const activePrescriptions = await Prescription.countDocuments({
       patientId: profile._id,
       issuedAt: { $gte: thirtyDaysAgo },
       pharmacyStatus: { $in: ['not_dispensed', 'partially_dispensed'] }
     });
-    
-    res.json({
+
+    return res.json({
       success: true,
       prescriptions,
       stats: {
@@ -422,64 +527,38 @@ exports.getPrescriptions = async (req, res) => {
         activePrescriptions,
         lastPrescriptionDate: prescriptions[0]?.issuedAt || null
       },
-      pagination: recent ? null : {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: recent
+        ? null
+        : { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) }
     });
   } catch (error) {
     console.error('Error fetching prescriptions:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch prescriptions'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to fetch prescriptions' });
   }
 };
 
-// Get lab reports
+// GET /patient/lab-reports
 exports.getLabReports = async (req, res) => {
   try {
-    const { 
-      status,
-      pathologyId,
-      startDate,
-      endDate,
-      page = 1,
-      limit = 20 
-    } = req.query;
-    
-    // Get profile ID
+    const { status, pathologyId, startDate, endDate, page = 1, limit = 20 } = req.query;
+
     const profile = await PatientProfile.findOne({ userId: req.user.id });
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Profile not found'
-      });
-    }
-    
-    const filter = { 
-      patientId: profile._id
-    };
-    
+    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+
+    const filter = { patientId: profile._id };
     if (status) filter.status = status;
     if (pathologyId) filter.pathologyId = pathologyId;
-    
+
     if (startDate && endDate) {
       const start = new Date(startDate);
       start.setHours(0, 0, 0, 0);
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-      
-      filter.scheduledDate = {
-        $gte: start,
-        $lte: end
-      };
+      filter.scheduledDate = { $gte: start, $lte: end };
     }
-    
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     const labTests = await LabTest.find(filter)
       .populate('pathologyId', 'labName address phone')
       .populate('doctorId', 'name specialization')
@@ -487,81 +566,48 @@ exports.getLabReports = async (req, res) => {
       .sort({ scheduledDate: -1 })
       .skip(skip)
       .limit(parseInt(limit));
-    
+
     const total = await LabTest.countDocuments(filter);
-    
-    // Get pending tests
+
     const pendingTests = await LabTest.countDocuments({
       patientId: profile._id,
       status: { $in: ['requested', 'scheduled', 'sample_collected', 'processing'] }
     });
-    
-    res.json({
+
+    return res.json({
       success: true,
       labTests,
-      stats: {
-        total,
-        pendingTests,
-        completedTests: total - pendingTests
-      },
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
+      stats: { total, pendingTests, completedTests: total - pendingTests },
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) }
     });
   } catch (error) {
     console.error('Error fetching lab reports:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch lab reports'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to fetch lab reports' });
   }
 };
 
-// Get invoices
+// GET /patient/invoices
 exports.getInvoices = async (req, res) => {
   try {
-    const { 
-      status,
-      type,
-      startDate,
-      endDate,
-      page = 1,
-      limit = 20 
-    } = req.query;
-    
-    // Get profile ID
+    const { status, type, startDate, endDate, page = 1, limit = 20 } = req.query;
+
     const profile = await PatientProfile.findOne({ userId: req.user.id });
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Profile not found'
-      });
-    }
-    
-    const filter = { 
-      patientId: profile._id
-    };
-    
+    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+
+    const filter = { patientId: profile._id };
     if (status) filter.status = status;
     if (type) filter.invoiceType = type;
-    
+
     if (startDate && endDate) {
       const start = new Date(startDate);
       start.setHours(0, 0, 0, 0);
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-      
-      filter.invoiceDate = {
-        $gte: start,
-        $lte: end
-      };
+      filter.invoiceDate = { $gte: start, $lte: end };
     }
-    
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     const invoices = await Invoice.find(filter)
       .populate('appointmentId', 'appointmentDate')
       .populate('pharmacySaleId', 'saleNumber')
@@ -569,16 +615,11 @@ exports.getInvoices = async (req, res) => {
       .sort({ invoiceDate: -1 })
       .skip(skip)
       .limit(parseInt(limit));
-    
+
     const total = await Invoice.countDocuments(filter);
-    
-    // Get financial summary
+
     const financialSummary = await Invoice.aggregate([
-      {
-        $match: {
-          patientId: profile._id
-        }
-      },
+      { $match: { patientId: profile._id } },
       {
         $group: {
           _id: null,
@@ -586,26 +627,23 @@ exports.getInvoices = async (req, res) => {
           totalPaid: { $sum: '$amountPaid' },
           totalDue: { $sum: '$balanceDue' },
           totalInvoices: { $sum: 1 },
-          paidInvoices: {
-            $sum: { $cond: [{ $eq: ['$status', 'paid'] }, 1, 0] }
-          },
+          paidInvoices: { $sum: { $cond: [{ $eq: ['$status', 'paid'] }, 1, 0] } },
           pendingInvoices: {
             $sum: { $cond: [{ $in: ['$status', ['sent', 'partial', 'overdue']] }, 1, 0] }
           }
         }
       }
     ]);
-    
-    // Get recent payments
+
     const recentPayments = await Invoice.find({
       patientId: profile._id,
       status: 'paid'
     })
-    .sort({ paidAt: -1 })
-    .limit(5)
-    .select('invoiceNumber totalAmount paidAt paymentMethod');
-    
-    res.json({
+      .sort({ paidAt: -1 })
+      .limit(5)
+      .select('invoiceNumber totalAmount paidAt paymentMethod');
+
+    return res.json({
       success: true,
       invoices,
       financialSummary: financialSummary[0] || {
@@ -617,68 +655,40 @@ exports.getInvoices = async (req, res) => {
         pendingInvoices: 0
       },
       recentPayments,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) }
     });
   } catch (error) {
     console.error('Error fetching invoices:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch invoices'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to fetch invoices' });
   }
 };
 
-// Get dashboard stats
+// GET /patient/dashboard
 exports.getDashboardStats = async (req, res) => {
   try {
-    // Get profile
     const profile = await PatientProfile.findOne({ userId: req.user.id });
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Profile not found'
-      });
-    }
-    
+    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+
     const today = new Date();
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(today.getDate() - 30);
-    
-    // Appointment statistics
+
     const appointmentStats = await Appointment.aggregate([
-      {
-        $match: {
-          patientId: profile._id,
-          createdAt: { $gte: thirtyDaysAgo }
-        }
-      },
+      { $match: { patientId: profile._id, createdAt: { $gte: thirtyDaysAgo } } },
       {
         $group: {
           _id: null,
           totalAppointments: { $sum: 1 },
-          completedAppointments: {
-            $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] }
-          },
+          completedAppointments: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
           upcomingAppointments: {
             $sum: { $cond: [{ $in: ['$status', ['pending', 'confirmed', 'accepted']] }, 1, 0] }
           }
         }
       }
     ]);
-    
-    // Prescription statistics
+
     const prescriptionStats = await Prescription.aggregate([
-      {
-        $match: {
-          patientId: profile._id,
-          issuedAt: { $gte: thirtyDaysAgo }
-        }
-      },
+      { $match: { patientId: profile._id, issuedAt: { $gte: thirtyDaysAgo } } },
       {
         $group: {
           _id: null,
@@ -689,15 +699,9 @@ exports.getDashboardStats = async (req, res) => {
         }
       }
     ]);
-    
-    // Lab test statistics
+
     const labTestStats = await LabTest.aggregate([
-      {
-        $match: {
-          patientId: profile._id,
-          createdAt: { $gte: thirtyDaysAgo }
-        }
-      },
+      { $match: { patientId: profile._id, createdAt: { $gte: thirtyDaysAgo } } },
       {
         $group: {
           _id: null,
@@ -708,15 +712,9 @@ exports.getDashboardStats = async (req, res) => {
         }
       }
     ]);
-    
-    // Financial statistics
+
     const financialStats = await Invoice.aggregate([
-      {
-        $match: {
-          patientId: profile._id,
-          invoiceDate: { $gte: thirtyDaysAgo }
-        }
-      },
+      { $match: { patientId: profile._id, invoiceDate: { $gte: thirtyDaysAgo } } },
       {
         $group: {
           _id: null,
@@ -727,27 +725,22 @@ exports.getDashboardStats = async (req, res) => {
         }
       }
     ]);
-    
-    // Get upcoming appointments
+
     const upcomingAppointments = await Appointment.find({
       patientId: profile._id,
       appointmentDate: { $gte: today },
       status: { $in: ['pending', 'confirmed', 'accepted'] }
     })
-    .populate('doctorId', 'name specialization')
-    .populate('physioId', 'name services')
-    .sort({ appointmentDate: 1 })
-    .limit(5);
-    
-    // Get recent prescriptions
-    const recentPrescriptions = await Prescription.find({
-      patientId: profile._id
-    })
-    .populate('doctorId', 'name specialization')
-    .sort({ issuedAt: -1 })
-    .limit(3);
-    
-    // Get health summary
+      .populate('doctorId', 'name specialization')
+      .populate('physioId', 'name services')
+      .sort({ appointmentDate: 1 })
+      .limit(5);
+
+    const recentPrescriptions = await Prescription.find({ patientId: profile._id })
+      .populate('doctorId', 'name specialization')
+      .sort({ issuedAt: -1 })
+      .limit(3);
+
     const healthSummary = {
       age: profile.age,
       bloodGroup: profile.bloodGroup,
@@ -756,27 +749,14 @@ exports.getDashboardStats = async (req, res) => {
       allergies: profile.allergies?.length || 0,
       lastConsultation: profile.lastConsultation
     };
-    
-    res.json({
+
+    return res.json({
       success: true,
       stats: {
-        appointments: appointmentStats[0] || {
-          totalAppointments: 0,
-          completedAppointments: 0,
-          upcomingAppointments: 0
-        },
-        prescriptions: prescriptionStats[0] || {
-          totalPrescriptions: 0,
-          activePrescriptions: 0
-        },
-        labTests: labTestStats[0] || {
-          totalLabTests: 0,
-          pendingTests: 0
-        },
-        financial: financialStats[0] || {
-          totalSpent: 0,
-          pendingPayment: 0
-        }
+        appointments: appointmentStats[0] || { totalAppointments: 0, completedAppointments: 0, upcomingAppointments: 0 },
+        prescriptions: prescriptionStats[0] || { totalPrescriptions: 0, activePrescriptions: 0 },
+        labTests: labTestStats[0] || { totalLabTests: 0, pendingTests: 0 },
+        financial: financialStats[0] || { totalSpent: 0, pendingPayment: 0 }
       },
       upcomingAppointments,
       recentPrescriptions,
@@ -789,9 +769,67 @@ exports.getDashboardStats = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching dashboard stats:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch dashboard data'
+    return res.status(500).json({ success: false, error: 'Failed to fetch dashboard data' });
+  }
+};
+
+// NOTE: Your bookAppointment() uses Appointment schema fields like timeSlot.
+// In your other code you were using startTime/endTime. I didn't change this,
+// because I don't have your Appointment schema here. If you paste it, I’ll align it too.
+exports.bookAppointment = async (req, res) => {
+  try {
+    const { doctorId, physioId, appointmentDate, timeSlot, type, symptoms, notes } = req.body;
+
+    const profile = await PatientProfile.findOne({ userId: req.user.id });
+    if (!profile) {
+      return res.status(404).json({ success: false, error: 'Profile not found' });
+    }
+
+    if (!appointmentDate || !timeSlot || !type) {
+      return res.status(400).json({
+        success: false,
+        error: 'Appointment date, time slot, and type are required'
+      });
+    }
+
+    if (!doctorId && !physioId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Either doctor or physiotherapist must be selected'
+      });
+    }
+
+    // Generate appointmentId (kept same as your logic)
+    const lastAppointment = await Appointment.findOne().sort({ appointmentId: -1 });
+    let appointmentIdNumber = 1;
+    if (lastAppointment?.appointmentId) {
+      const lastId = parseInt(String(lastAppointment.appointmentId).replace('APT', ''), 10);
+      appointmentIdNumber = Number.isNaN(lastId) ? 1 : lastId + 1;
+    }
+    const appointmentId = `APT${String(appointmentIdNumber).padStart(5, '0')}`;
+
+    const appointment = await Appointment.create({
+      appointmentId,
+      patientId: profile._id,
+      doctorId: doctorId || null,
+      physioId: physioId || null,
+      professionalType: doctorId ? 'doctor' : 'physiotherapist',
+      appointmentDate: new Date(appointmentDate),
+      timeSlot,
+      type,
+      symptoms,
+      notes,
+      status: 'pending',
+      bookedBy: req.user.id
     });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Appointment booked successfully',
+      appointment
+    });
+  } catch (error) {
+    console.error('Error booking appointment:', error.message);
+    return res.status(400).json({ success: false, error: error.message });
   }
 };

@@ -5,7 +5,7 @@ const { protect, authorize } = require('../middlewares/auth');
 
 router.use(protect, authorize('patient'));
 
-// Profile
+router.post('/profile', patientController.createProfile);
 router.get('/profile', patientController.getProfile);
 router.put('/profile', patientController.updateProfile);
 
