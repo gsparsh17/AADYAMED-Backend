@@ -326,27 +326,79 @@ exports.resendVerification = async (req, res) => {
  * @route   POST /api/auth/login
  * @access  Public
  */
+// ===== Helper: resolve profile by userId (even if user.profileId is missing) =====
+async function resolveProfileForUser(user) {
+  // If already linked properly, use it
+  if (user.profileId && user.profileModel) {
+    try {
+      const doc = await mongoose.model(user.profileModel).findById(user.profileId);
+      return doc ? { profile: doc, profileId: doc._id, profileModel: user.profileModel } : null;
+    } catch (e) {
+      // fall through to scanning collections
+      console.error('resolveProfileForUser: linked profile fetch failed:', e);
+    }
+  }
+
+  const userId = user._id;
+
+  // Role-first lookup (fast path)
+  const roleToModel = {
+    doctor: { Model: DoctorProfile, modelName: 'DoctorProfile' },
+    physiotherapist: { Model: PhysiotherapistProfile, modelName: 'PhysiotherapistProfile' },
+    patient: { Model: PatientProfile, modelName: 'PatientProfile' },
+    pathology: { Model: PathologyProfile, modelName: 'PathologyProfile' },
+    // pharmacy is required lazily because you required it elsewhere too
+    pharmacy: { Model: require('../models/Pharmacy'), modelName: 'Pharmacy' }
+  };
+
+  const primary = roleToModel[user.role];
+  if (primary?.Model) {
+    const found = await primary.Model.findOne({ userId });
+    if (found) return { profile: found, profileId: found._id, profileModel: primary.modelName };
+  }
+
+  // Fallback scan (covers mismatched role data / migrated users)
+  const scanModels = [
+    { Model: DoctorProfile, modelName: 'DoctorProfile' },
+    { Model: PhysiotherapistProfile, modelName: 'PhysiotherapistProfile' },
+    { Model: PatientProfile, modelName: 'PatientProfile' },
+    { Model: PathologyProfile, modelName: 'PathologyProfile' },
+    { Model: require('../models/Pharmacy'), modelName: 'Pharmacy' }
+  ];
+
+  for (const m of scanModels) {
+    try {
+      const found = await m.Model.findOne({ userId });
+      if (found) return { profile: found, profileId: found._id, profileModel: m.modelName };
+    } catch (e) {
+      console.error(`resolveProfileForUser: scan failed for ${m.modelName}:`, e);
+    }
+  }
+
+  return null;
+}
+
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
-    
+
     if (!email || !password) {
       return res.status(400).json({
         success: false,
         error: 'Please provide email and password'
       });
     }
-    
+
     // Find user with password
     const user = await User.findByEmail(email, true);
-    
+
     if (!user) {
       return res.status(401).json({
         success: false,
         error: 'Invalid email or password'
       });
     }
-    
+
     // Check password
     const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
@@ -355,7 +407,7 @@ exports.login = async (req, res) => {
         error: 'Invalid email or password'
       });
     }
-    
+
     // Check if user is active
     if (!user.isActive) {
       return res.status(403).json({
@@ -363,34 +415,44 @@ exports.login = async (req, res) => {
         error: 'Your account has been deactivated. Please contact support.'
       });
     }
-    
-    // Check if email is verified
-    // if (!user.isVerified) {
-    //   return res.status(403).json({
-    //     success: false,
-    //     error: 'Please verify your email before logging in.',
-    //     requiresVerification: true,
-    //     email: user.email
-    //   });
-    // }
-    
+
     // Update last login
     const clientIp = getClientIp(req);
     await user.updateLastLogin(clientIp);
-    
+
     // Generate JWT token
     const token = generateToken(user._id);
-    
-    // Get profile if exists
-    let profile = null;
-    if (user.profileCompleted && user.profileId && user.profileModel) {
-      try {
-        profile = await mongoose.model(user.profileModel).findById(user.profileId);
-      } catch (profileError) {
-        console.error('Error fetching profile:', profileError);
+
+    // ===== NEW: Resolve profileId/profileModel by userId if missing =====
+    let resolvedProfile = null;
+    let resolvedProfileId = user.profileId || null;
+    let resolvedProfileModel = user.profileModel || null;
+
+    resolvedProfile = await resolveProfileForUser(user);
+
+    if (resolvedProfile) {
+      resolvedProfileId = resolvedProfile.profileId;
+      resolvedProfileModel = resolvedProfile.profileModel;
+
+      // Optional but recommended: sync User doc if not already linked
+      const needsSync =
+        !user.profileId ||
+        !user.profileModel ||
+        String(user.profileId) !== String(resolvedProfileId) ||
+        user.profileModel !== resolvedProfileModel ||
+        user.profileCompleted !== true;
+
+      if (needsSync) {
+        user.profileId = resolvedProfileId;
+        user.profileModel = resolvedProfileModel;
+        user.profileCompleted = true;
+        await user.save();
       }
     }
-    
+
+    // Return profile payload as before (now includes resolved profile even if profileCompleted was false)
+    const profile = resolvedProfile?.profile || null;
+
     res.json({
       success: true,
       token,
@@ -401,15 +463,19 @@ exports.login = async (req, res) => {
         role: user.role,
         phone: user.phone,
         isVerified: user.isVerified,
-        profileCompleted: user.profileCompleted,
-        profileId: user.profileId,
+
+        // IMPORTANT: these are now always resolved if profile exists
+        profileCompleted: !!resolvedProfileId,
+        profileId: resolvedProfileId,
+        profileModel: resolvedProfileModel,
+
         status: user.status,
         preferences: user.preferences
       },
       profile,
-      nextStep: user.profileCompleted ? null : 'complete-profile'
+      nextStep: resolvedProfileId ? null : 'complete-profile'
     });
-    
+
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({

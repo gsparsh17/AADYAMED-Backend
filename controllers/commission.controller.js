@@ -6,12 +6,54 @@ const PathologyProfile = require('../models/PathologyProfile');
 const Appointment = require('../models/Appointment');
 const Payout = require('../models/Payout');
 
-// ========== COMMISSION FUNCTIONS ==========
+const mongoose = require('mongoose');
+
+function normalizeRole(role) {
+  const r = (role || '').toLowerCase().trim();
+  if (r === 'physio') return 'physiotherapist';
+  return r;
+}
+
+function normalizeProfessionalType(t) {
+  const x = (t || '').toLowerCase().trim();
+  if (x === 'physio') return 'physiotherapist';
+  return x;
+}
+
+function mapUserRoleToProfessionalType(userRole) {
+  const r = normalizeRole(userRole);
+  const roleMap = {
+    doctor: 'doctor',
+    physiotherapist: 'physiotherapist',
+    pathology: 'pathology'
+  };
+  return roleMap[r] || r;
+}
+
+async function getProfessionalProfileId(user) {
+  try {
+    const role = normalizeRole(user.role);
+    let profile = null;
+
+    if (role === 'doctor') {
+      profile = await DoctorProfile.findOne({ userId: user.id }).select('_id');
+    } else if (role === 'physiotherapist') {
+      profile = await PhysiotherapistProfile.findOne({ userId: user.id }).select('_id');
+    } else if (role === 'pathology') {
+      profile = await PathologyProfile.findOne({ userId: user.id }).select('_id');
+    }
+
+    return profile ? profile._id : null;
+  } catch (error) {
+    console.error('Error getting professional profile ID:', error);
+    return null;
+  }
+}
 
 // Get commissions (role-based)
 exports.getCommissions = async (req, res) => {
   try {
-    const { 
+    const {
       professionalId,
       professionalType,
       payoutStatus,
@@ -19,65 +61,62 @@ exports.getCommissions = async (req, res) => {
       startDate,
       endDate,
       page = 1,
-      limit = 20 
+      limit = 20
     } = req.query;
-    
+
     const filter = {};
-    
-    // Admin can view all, professionals can view their own
-    if (req.user.role === 'admin') {
-      if (professionalId) filter.professionalId = professionalId;
-      if (professionalType) filter.professionalType = professionalType;
-    } else if (['doctor', 'physio', 'pathology'].includes(req.user.role)) {
-      // Get professional profile ID
+    const normalizedRole = normalizeRole(req.user.role);
+
+    // ---- role based scope ----
+    if (normalizedRole === 'admin') {
+      if (professionalId) {
+        if (!mongoose.Types.ObjectId.isValid(professionalId)) {
+          return res.status(400).json({ success: false, error: 'Invalid professionalId' });
+        }
+        filter.professionalId = professionalId;
+      }
+      if (professionalType) filter.professionalType = normalizeProfessionalType(professionalType);
+    } else if (['doctor', 'physiotherapist', 'pathology'].includes(normalizedRole)) {
       const profileId = await getProfessionalProfileId(req.user);
       if (!profileId) {
-        return res.status(404).json({
-          success: false,
-          error: 'Professional profile not found'
-        });
+        return res.status(404).json({ success: false, error: 'Professional profile not found' });
       }
-      
       filter.professionalId = profileId;
-      filter.professionalType = mapUserRoleToProfessionalType(req.user.role);
+      filter.professionalType = mapUserRoleToProfessionalType(normalizedRole);
     } else {
-      return res.status(403).json({
-        success: false,
-        error: 'Not authorized to view commissions'
-      });
+      return res.status(403).json({ success: false, error: 'Not authorized to view commissions' });
     }
-    
-    // Apply filters
+
+    // ---- additional filters ----
     if (payoutStatus) filter.payoutStatus = payoutStatus;
     if (cycle) filter['commissionCycle.cycleNumber'] = cycle;
-    
+
     if (startDate && endDate) {
       const start = new Date(startDate);
-      start.setHours(0, 0, 0, 0);
+      start.setUTCHours(0, 0, 0, 0);
       const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      
-      filter.createdAt = {
-        $gte: start,
-        $lte: end
-      };
+      end.setUTCHours(23, 59, 59, 999);
+      filter.createdAt = { $gte: start, $lte: end };
     }
-    
-    // Calculate pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limNum = Math.min(1000, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limNum;
+
+    // ---- query ----
     const commissions = await Commission.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(parseInt(limit))
+      .limit(limNum)
       .populate('appointmentId', 'appointmentDate type consultationFee patientId')
       .populate('patientId', 'name phone')
-      .populate('professionalId', 'name');
-    
+      // IMPORTANT: professionalId is refPath => needs professionalType present in doc
+      .populate({ path: 'professionalId', select: 'name labName' });
+
     const total = await Commission.countDocuments(filter);
-    
-    // Calculate totals
-    const totals = await Commission.aggregate([
+
+    // ---- totals ----
+    const totalsAgg = await Commission.aggregate([
       { $match: filter },
       {
         $group: {
@@ -85,43 +124,25 @@ exports.getCommissions = async (req, res) => {
           totalCommission: { $sum: '$platformCommission' },
           totalProfessionalEarnings: { $sum: '$professionalEarning' },
           totalConsultationFees: { $sum: '$consultationFee' },
-          totalPaid: { 
-            $sum: {
-              $cond: [{ $eq: ['$payoutStatus', 'paid'] }, '$platformCommission', 0]
-            }
-          },
-          totalProcessing: {
-            $sum: {
-              $cond: [{ $eq: ['$payoutStatus', 'processing'] }, '$platformCommission', 0]
-            }
-          },
-          totalPending: {
-            $sum: {
-              $cond: [{ $eq: ['$payoutStatus', 'pending'] }, '$platformCommission', 0]
-            }
-          },
+          totalPaid: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, '$platformCommission', 0] } },
+          totalProcessing: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'processing'] }, '$platformCommission', 0] } },
+          totalPending: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'pending'] }, '$platformCommission', 0] } },
           count: { $sum: 1 },
-          paidCount: {
-            $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, 1, 0] }
-          },
-          pendingCount: {
-            $sum: { $cond: [{ $eq: ['$payoutStatus', 'pending'] }, 1, 0] }
-          }
+          paidCount: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, 1, 0] } },
+          pendingCount: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'pending'] }, 1, 0] } }
         }
       }
     ]);
-    
-    // Get commission settings
+
     const settings = await CommissionSettings.findOne();
-    
-    // Get current cycle
+
     const currentDate = new Date();
-    const currentCycle = `${(currentDate.getMonth() + 1).toString().padStart(2, '0')}${currentDate.getFullYear()}`;
-    
+    const currentCycle = `${String(currentDate.getUTCMonth() + 1).padStart(2, '0')}${currentDate.getUTCFullYear()}`;
+
     res.json({
       success: true,
       commissions,
-      totals: totals[0] || {
+      totals: totalsAgg[0] || {
         totalCommission: 0,
         totalProfessionalEarnings: 0,
         totalConsultationFees: 0,
@@ -141,18 +162,15 @@ exports.getCommissions = async (req, res) => {
       } : null,
       currentCycle,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limNum,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / limNum)
       }
     });
   } catch (error) {
-    console.error('Error fetching commissions:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch commissions'
-    });
+    console.error('Error fetching commissions (detailed):', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to fetch commissions' });
   }
 };
 

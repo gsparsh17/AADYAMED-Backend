@@ -2,6 +2,8 @@
 const DoctorProfile = require('../models/DoctorProfile');
 const User = require('../models/User');
 const Calendar = require('../models/Calendar');
+const { initializeCalendarForMonth, updateDoctorInCalendar } = require('../jobs/calendarJob');
+const Appointment = require('../models/Appointment');
 
 // ========== PUBLIC FUNCTIONS ==========
 
@@ -304,39 +306,147 @@ exports.getDoctorsBySpecialization = async (req, res) => {
 // Get doctor's availability (public)
 exports.getDoctorAvailability = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { date } = req.query;
+    const { id } = req.params;     // doctor profile id
+    const { date } = req.query;    // YYYY-MM-DD
 
+    // ---- Helpers ----
+    const dateKeyLocal = (d) => {
+      const x = new Date(d);
+      const y = x.getFullYear();
+      const m = String(x.getMonth() + 1).padStart(2, '0');
+      const dd = String(x.getDate()).padStart(2, '0');
+      return `${y}-${m}-${dd}`;
+    };
+
+    const timeToMinutes = (t) => {
+      const [hh, mm] = String(t || "00:00").split(":").map(Number);
+      return hh * 60 + mm;
+    };
+
+    const minutesToHHMM = (mins) => {
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      return `${hh}:${mm}`;
+    };
+
+    const overlaps = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && aEnd > bStart;
+
+    const clampInterval = (s, e, min, max) => ({
+      start: Math.max(min, s),
+      end: Math.min(max, e)
+    });
+
+    const isValidInterval = (iv) => iv && Number.isFinite(iv.start) && Number.isFinite(iv.end) && iv.end > iv.start;
+
+    // Merge overlapping/adjacent intervals
+    const mergeIntervals = (intervals) => {
+      const arr = (intervals || []).filter(isValidInterval).sort((a, b) => a.start - b.start);
+      if (!arr.length) return [];
+      const out = [arr[0]];
+      for (let i = 1; i < arr.length; i++) {
+        const prev = out[out.length - 1];
+        const cur = arr[i];
+        if (cur.start <= prev.end) {
+          prev.end = Math.max(prev.end, cur.end);
+        } else {
+          out.push({ ...cur });
+        }
+      }
+      return out;
+    };
+
+    // Subtract busy intervals from a [start,end) base interval
+    const subtractIntervals = (baseStart, baseEnd, busyMerged) => {
+      let cursor = baseStart;
+      const free = [];
+      for (const b of busyMerged) {
+        if (b.end <= cursor) continue;
+        if (b.start >= baseEnd) break;
+
+        const bs = Math.max(b.start, baseStart);
+        const be = Math.min(b.end, baseEnd);
+
+        if (bs > cursor) free.push({ start: cursor, end: bs });
+        cursor = Math.max(cursor, be);
+      }
+      if (cursor < baseEnd) free.push({ start: cursor, end: baseEnd });
+      return free;
+    };
+
+    const sumMinutes = (intervals) => (intervals || []).reduce((acc, iv) => acc + (iv.end - iv.start), 0);
+
+    // ---- Validate target date ----
+    const targetDate = date ? new Date(date) : new Date();
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid date format' });
+    }
+
+    const targetDayStart = new Date(targetDate);
+    targetDayStart.setHours(0, 0, 0, 0);
+
+    const targetDayEnd = new Date(targetDate);
+    targetDayEnd.setHours(23, 59, 59, 999);
+
+    const year = targetDayStart.getFullYear();
+    const month = targetDayStart.getMonth() + 1;
+    const targetKey = dateKeyLocal(targetDayStart);
+
+    // ---- Fetch doctor profile ----
     const doctor = await DoctorProfile.findById(id)
-      .select('availability name consultationFee homeVisitFee verificationStatus')
-      .populate('userId', 'isVerified');
+      .select('name consultationFee homeVisitFee verificationStatus userId')
+      .populate('userId', 'isVerified isActive');
 
     if (!doctor) {
-      return res.status(404).json({
-        success: false,
-        error: 'Doctor not found'
-      });
+      return res.status(404).json({ success: false, error: 'Doctor not found' });
     }
 
-    // Use schema verificationStatus as primary gate for public
     if (doctor.verificationStatus !== 'approved') {
+      return res.status(400).json({ success: false, error: 'Doctor profile is not approved' });
+    }
+
+    // Optional extra gating
+    if (!doctor.userId?.isVerified || doctor.userId?.isActive === false) {
       return res.status(400).json({
         success: false,
-        error: 'Doctor profile is not approved'
+        error: 'Doctor is not available for appointments'
       });
     }
 
-    const targetDate = date ? new Date(date) : new Date();
-    const dayName = targetDate
-      .toLocaleDateString('en-US', { weekday: 'long' })
-      .toLowerCase();
+    // ---- Calendar lookup (source of truth) ----
+    let calendar = await Calendar.findOne({ year, month });
+    if (!calendar && typeof initializeCalendarForMonth === "function") {
+      calendar = await initializeCalendarForMonth(year, month);
+    }
 
-    const dayAvailability = doctor.availability?.find(a => a.day === dayName);
+    const emptyResponse = (dayName) => res.json({
+      success: true,
+      date: targetKey,
+      dayName,
+      isAvailable: false,
+      slots: [],
+      doctorName: doctor.name,
+      consultationFee: doctor.consultationFee,
+      homeVisitFee: doctor.homeVisitFee
+    });
 
-    if (!dayAvailability) {
+    if (!calendar || !Array.isArray(calendar.days)) {
+      return emptyResponse(targetDayStart.toLocaleDateString('en-US', { weekday: 'long' }));
+    }
+
+    const day = calendar.days.find(d => dateKeyLocal(d.date) === targetKey);
+    if (!day) {
+      return emptyResponse(targetDayStart.toLocaleDateString('en-US', { weekday: 'long' }));
+    }
+
+    const professionalSchedule = (day.professionals || []).find(p =>
+      String(p.professionalId) === String(id) && p.professionalType === 'doctor'
+    );
+
+    if (!professionalSchedule || !professionalSchedule.isAvailable) {
       return res.json({
         success: true,
-        date: targetDate.toISOString().split('T')[0],
+        date: targetKey,
+        dayName: day.dayName,
         isAvailable: false,
         slots: [],
         doctorName: doctor.name,
@@ -345,47 +455,120 @@ exports.getDoctorAvailability = async (req, res) => {
       });
     }
 
-    const year = targetDate.getFullYear();
-    const month = targetDate.getMonth() + 1;
-    const dateStr = targetDate.toISOString().split('T')[0];
+    const workingHours = professionalSchedule.workingHours || [];
+    const breaks = professionalSchedule.breaks || [];
+    const bookedSlots = professionalSchedule.bookedSlots || [];
 
-    const calendar = await Calendar.findOne({ year, month });
-    let bookedSlots = [];
-
-    if (calendar) {
-      const day = calendar.days.find(d => d.date.toISOString().split('T')[0] === dateStr);
-      if (day) {
-        const professional = day.professionals.find(
-          p => p.professionalId.toString() === id && p.professionalType === 'doctor'
-        );
-        if (professional) {
-          bookedSlots = professional.bookedSlots.filter(slot => slot.isBooked);
-        }
-      }
+    if (!workingHours.length) {
+      return res.json({
+        success: true,
+        date: targetKey,
+        dayName: day.dayName,
+        isAvailable: false,
+        slots: [],
+        doctorName: doctor.name,
+        consultationFee: doctor.consultationFee,
+        homeVisitFee: doctor.homeVisitFee
+      });
     }
 
-    const availableSlots = dayAvailability.slots.map(slot => {
-      const isBooked = bookedSlots.some(
-        booked => booked.startTime === slot.startTime && booked.endTime === slot.endTime
-      );
+    // ---- Appointment truth (avoid stale calendar) ----
+    const existingAppointments = await Appointment.find({
+      doctorId: id,
+      appointmentDate: { $gte: targetDayStart, $lte: targetDayEnd },
+      status: { $in: ['pending', 'confirmed', 'accepted'] }
+    }).select('startTime endTime status');
+
+    // ---- Build busy intervals (global for the day) ----
+    const busyRaw = [];
+
+    // Breaks
+    for (const br of breaks) {
+      const s = timeToMinutes(br.startTime);
+      const e = timeToMinutes(br.endTime);
+      if (e > s) busyRaw.push({ start: s, end: e, source: 'break' });
+    }
+
+    // Calendar bookedSlots (ignore cancelled)
+    for (const b of bookedSlots) {
+      if ((b.status || 'booked') === 'cancelled') continue;
+      const s = timeToMinutes(b.startTime);
+      const e = b.endTime ? timeToMinutes(b.endTime) : (s + 30); // fallback
+      if (e > s) busyRaw.push({ start: s, end: e, source: 'calendar' });
+    }
+
+    // Real appointments
+    for (const a of existingAppointments) {
+      const s = timeToMinutes(a.startTime);
+      const e = timeToMinutes(a.endTime);
+      if (e > s) busyRaw.push({ start: s, end: e, source: 'appointment' });
+    }
+
+    // We merge by time (drop source at merge-level, but keep if you want detail)
+    const busyMerged = mergeIntervals(busyRaw.map(({ start, end }) => ({ start, end })));
+
+    // ---- Build working hour blocks with free/busy ----
+    const slotBlocks = workingHours.map((wh) => {
+      const whStart = timeToMinutes(wh.startTime);
+      const whEnd = timeToMinutes(wh.endTime);
+
+      if (whEnd <= whStart) return null;
+
+      // Busy intervals limited to this working block
+      const busyInBlock = busyMerged
+        .map((b) => clampInterval(b.start, b.end, whStart, whEnd))
+        .filter(isValidInterval);
+
+      const busyInBlockMerged = mergeIntervals(busyInBlock);
+
+      // Free intervals within the block
+      const freeInBlock = subtractIntervals(whStart, whEnd, busyInBlockMerged);
+      const freeInBlockMerged = mergeIntervals(freeInBlock);
+
+      const busyMinutes = sumMinutes(busyInBlockMerged);
+      const freeMinutes = sumMinutes(freeInBlockMerged);
+
+      const hasFree = freeMinutes > 0;
+
+      // Keep response structure similar + add free/busy
+      const slotType = wh.type || "clinic"; // if you store type per WH, keep it; else default clinic
+      const fee = slotType === "home" ? doctor.homeVisitFee : doctor.consultationFee;
 
       return {
-        startTime: slot.startTime,
-        endTime: slot.endTime,
-        type: slot.type || 'clinic',
-        maxPatients: slot.maxPatients || 1,
-        isBooked,
-        isAvailable: !isBooked,
-        fee: (slot.type || 'clinic') === 'home' ? doctor.homeVisitFee : doctor.consultationFee
+        startTime: wh.startTime,
+        endTime: wh.endTime,
+        type: slotType,
+        maxPatients: Number.isFinite(wh.maxPatients) ? wh.maxPatients : 1,
+
+        // IMPORTANT: block is "booked" only if fully covered (no free time)
+        isBooked: !hasFree,
+        isAvailable: hasFree,
+
+        fee,
+
+        // NEW: for UI + debugging
+        busyMinutes,
+        freeMinutes,
+        busyIntervals: busyInBlockMerged.map(iv => ({
+          startTime: minutesToHHMM(iv.start),
+          endTime: minutesToHHMM(iv.end)
+        })),
+        freeIntervals: freeInBlockMerged.map(iv => ({
+          startTime: minutesToHHMM(iv.start),
+          endTime: minutesToHHMM(iv.end)
+        }))
       };
-    });
+    }).filter(Boolean);
 
     return res.json({
       success: true,
-      date: dateStr,
-      dayName: dayName.charAt(0).toUpperCase() + dayName.slice(1),
-      isAvailable: availableSlots.some(slot => slot.isAvailable),
-      slots: availableSlots,
+      date: targetKey,
+      dayName: day.dayName,
+
+      // day is available if ANY block has any free time
+      isAvailable: slotBlocks.some(s => s.isAvailable),
+
+      slots: slotBlocks,
       doctorName: doctor.name,
       consultationFee: doctor.consultationFee,
       homeVisitFee: doctor.homeVisitFee
@@ -399,7 +582,7 @@ exports.getDoctorAvailability = async (req, res) => {
   }
 };
 
-// ========== DOCTOR-ONLY FUNCTIONS ==========
+
 
 // Get current doctor's profile  GET /doctor/me/profile
 exports.getProfile = async (req, res) => {
@@ -443,20 +626,26 @@ exports.updateProfile = async (req, res) => {
 
     // Remove fields that shouldn't be updated directly by doctor
     delete updates.userId;
-
     delete updates.verificationStatus;
     delete updates.adminNotes;
     delete updates.verifiedAt;
     delete updates.verifiedBy;
-
     delete updates.totalEarnings;
     delete updates.totalConsultations;
     delete updates.averageRating;
     delete updates.totalReviews;
-
     delete updates.pendingCommission;
     delete updates.paidCommission;
     delete updates.commissionRate;
+
+    // Get current doctor first to check if availability is changing
+    const currentDoctor = await DoctorProfile.findOne({ userId: req.user.id });
+    if (!currentDoctor) {
+      return res.status(404).json({
+        success: false,
+        error: 'Doctor profile not found'
+      });
+    }
 
     const doctor = await DoctorProfile.findOneAndUpdate(
       { userId: req.user.id },
@@ -474,6 +663,25 @@ exports.updateProfile = async (req, res) => {
     // If email changed in profile, reflect in User too
     if (updates.email && doctor.userId) {
       await User.findByIdAndUpdate(doctor.userId, { email: updates.email });
+    }
+
+    // Check if availability was updated and trigger immediate calendar sync
+    if (updates.availability && 
+        JSON.stringify(currentDoctor.availability) !== JSON.stringify(updates.availability)) {
+      try {
+        console.log('🔄 Availability changed, triggering immediate calendar sync...');
+        // Trigger immediate calendar update in background
+        setTimeout(async () => {
+          try {
+            await updateDoctorInCalendar(doctor._id, doctor);
+            console.log('✅ Calendar synced immediately after availability update');
+          } catch (syncError) {
+            console.error('❌ Immediate calendar sync failed:', syncError);
+          }
+        }, 1000); // 1 second delay
+      } catch (error) {
+        console.error('Error triggering immediate calendar sync:', error);
+      }
     }
 
     return res.json({
@@ -503,14 +711,30 @@ exports.updateAvailability = async (req, res) => {
       });
     }
 
+    // Store old availability for comparison
+    const oldAvailability = doctor.availability;
+    
     doctor.availability = availability;
     await doctor.save();
 
-    // Update calendar with new availability
-    try {
-      await updateDoctorInCalendar(doctor._id, doctor);
-    } catch (calendarError) {
-      console.error('Error updating doctor in calendar:', calendarError);
+    // Update calendar with new availability - ONLY if availability actually changed
+    if (JSON.stringify(oldAvailability) !== JSON.stringify(availability)) {
+      try {
+        console.log('🔄 Availability changed, updating calendar immediately...');
+        
+        // Trigger immediate update
+        const result = await updateDoctorInCalendar(doctor._id, doctor);
+        
+        if (result.success) {
+          console.log(`✅ Calendar updated immediately for ${doctor.name}`);
+        } else {
+          console.error('❌ Immediate calendar update failed:', result.error);
+          // Don't fail the request, just log error
+        }
+      } catch (calendarError) {
+        console.error('❌ Error updating doctor in calendar:', calendarError);
+        // Don't fail the request, just log the error
+      }
     }
 
     res.json({
@@ -523,6 +747,43 @@ exports.updateAvailability = async (req, res) => {
     res.status(400).json({ 
       success: false,
       error: err.message 
+    });
+  }
+};
+
+// Add manual calendar sync endpoint for doctors
+exports.syncCalendar = async (req, res) => {
+  try {
+    const doctor = await DoctorProfile.findOne({ userId: req.user.id });
+    if (!doctor) {
+      return res.status(404).json({
+        success: false,
+        error: 'Doctor profile not found'
+      });
+    }
+
+    console.log(`🔄 Manual calendar sync requested by Doctor: ${doctor.name}`);
+    
+    const result = await updateDoctorInCalendar(doctor._id, doctor);
+    
+    if (result.success) {
+      return res.json({
+        success: true,
+        message: 'Calendar synced successfully',
+        updates: result.totalUpdates,
+        doctorName: doctor.name
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: result.error || 'Failed to sync calendar'
+      });
+    }
+  } catch (error) {
+    console.error('Manual calendar sync error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to sync calendar'
     });
   }
 };
@@ -1127,89 +1388,6 @@ async function addDoctorToCalendar(doctor) {
     // Sort days chronologically
     calendar.days.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    await calendar.save();
-  }
-}
-
-// Helper function to update doctor in calendar
-async function updateDoctorInCalendar(doctorId, updatedDoctor) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  // Update next 30 days
-  const datesToUpdate = [];
-  for (let i = 0; i <= 30; i++) {
-    const date = new Date(today);
-    date.setDate(today.getDate() + i);
-    date.setHours(0, 0, 0, 0);
-    datesToUpdate.push(date);
-  }
-
-  // Get current month/year for calendar
-  const targetDate = new Date();
-  const year = targetDate.getFullYear();
-  const month = targetDate.getMonth() + 1;
-
-  let calendar = await Calendar.findOne({ year, month });
-  if (!calendar) return;
-
-  let updated = false;
-
-  for (const targetDate of datesToUpdate) {
-    const dateStr = targetDate.toISOString().split('T')[0];
-    const dayName = targetDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-    
-    const dayAvailability = updatedDoctor.availability?.find(a => a.day === dayName);
-
-    const existingDayIndex = calendar.days.findIndex(
-      d => d.date.toISOString().split('T')[0] === dateStr
-    );
-
-    if (existingDayIndex !== -1) {
-      const existingDay = calendar.days[existingDayIndex];
-      const professionalIndex = existingDay.professionals.findIndex(
-        p => p.professionalId.toString() === doctorId.toString() && 
-             p.professionalType === 'doctor'
-      );
-
-      if (professionalIndex !== -1) {
-        if (!dayAvailability) {
-          existingDay.professionals.splice(professionalIndex, 1);
-          updated = true;
-        } else {
-          const bookedSlots = dayAvailability.slots.map(slot => ({
-            startTime: slot.startTime,
-            endTime: slot.endTime,
-            isBooked: false,
-            type: slot.type || 'clinic'
-          }));
-
-          existingDay.professionals[professionalIndex].bookedSlots = bookedSlots;
-          updated = true;
-        }
-      } else if (dayAvailability) {
-        const bookedSlots = dayAvailability.slots.map(slot => ({
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          isBooked: false,
-          type: slot.type || 'clinic'
-        }));
-
-        existingDay.professionals.push({
-          professionalId: updatedDoctor._id,
-          professionalType: 'doctor',
-          bookedSlots: bookedSlots,
-          breaks: [],
-          isAvailable: true
-        });
-        updated = true;
-      }
-    }
-  }
-
-  if (updated) {
-    calendar.days = calendar.days.filter(day => day.professionals.length > 0);
-    calendar.days.sort((a, b) => new Date(a.date) - new Date(b.date));
     await calendar.save();
   }
 }

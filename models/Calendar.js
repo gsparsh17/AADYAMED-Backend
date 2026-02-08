@@ -41,11 +41,13 @@ const CalendarSchema = new mongoose.Schema({
       bookedSlots: [{
         appointmentId: {
           type: mongoose.Schema.Types.ObjectId,
-          ref: 'Appointment'
+          ref: 'Appointment',
+          required: true
         },
         patientId: {
           type: mongoose.Schema.Types.ObjectId,
-          ref: 'PatientProfile'
+          ref: 'PatientProfile',
+          required: true
         },
         startTime: String,
         endTime: String,

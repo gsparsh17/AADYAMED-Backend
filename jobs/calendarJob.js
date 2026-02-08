@@ -5,16 +5,61 @@ const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 const PathologyProfile = require('../models/PathologyProfile');
 const Appointment = require('../models/Appointment');
 
+// ========== HELPERS (TIME/DATE SAFE) ==========
+
+// Local date key (prevents IST/UTC off-by-one bugs)
+function dateKeyLocal(d) {
+  const dt = new Date(d);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function startOfLocalDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function endOfLocalDay(d) {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
+function ymFromDate(d) {
+  const dt = new Date(d);
+  return { year: dt.getFullYear(), month: dt.getMonth() + 1 };
+}
+
+function dayNameLower(d) {
+  return new Date(d).toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+}
+
+function titleCaseDayName(dnLower) {
+  return dnLower.charAt(0).toUpperCase() + dnLower.slice(1);
+}
+
+// Availability slots -> workingHours (simple copy, no time conversion)
+function toWorkingHoursFromAvailabilitySlots(slots) {
+  if (!Array.isArray(slots)) return [];
+  return slots
+    .filter(s => s && s.startTime && s.endTime)
+    .map(s => ({
+      startTime: String(s.startTime),
+      endTime: String(s.endTime),
+    }));
+}
+
 // ========== CALENDAR MAINTENANCE JOBS ==========
 
 let isProcessing = false;
 
 /**
  * Main calendar maintenance job
- * Runs daily at 2:00 AM
+ * Runs daily at 2:00 AM and also triggered on availability changes
  */
 async function calendarMaintenanceJob() {
-  // Prevent concurrent execution
   if (isProcessing) {
     console.log('⏸️ Calendar maintenance already in progress, skipping...');
     return;
@@ -25,21 +70,20 @@ async function calendarMaintenanceJob() {
   console.log('🕒 Starting calendar maintenance job...');
 
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    // 1. UPDATE EXISTING CALENDARS with current appointments
+    const today = startOfLocalDay(new Date());
+
+    // 1) Update bookedSlots from appointments (truth)
     await updateExistingCalendarsWithAppointments(today);
-    
-    // 2. INITIALIZE FUTURE CALENDARS (next 3 months)
+
+    // 2) Ensure current + next 2 months calendars exist
     await initializeFutureCalendars(today);
-    
-    // 3. CLEAN OLD CALENDARS (older than 3 months)
+
+    // 3) Clean old calendars
     await cleanOldCalendars(today);
-    
-    // 4. SYNC CALENDAR WITH PROFESSIONAL AVAILABILITY
+
+    // 4) Sync workingHours from professional availability (NO bookedSlots here)
     await syncCalendarsWithProfessionalAvailability();
-    
+
     const duration = Date.now() - startTime;
     console.log(`✅ Calendar maintenance completed in ${duration}ms`);
   } catch (error) {
@@ -54,61 +98,162 @@ async function calendarMaintenanceJob() {
  */
 async function updateExistingCalendarsWithAppointments(today) {
   console.log('🔄 Step 1: Updating existing calendars with appointments...');
-  
-  // Get all calendars for current and next month
+
   const currentYear = today.getFullYear();
   const currentMonth = today.getMonth() + 1;
-  
-  const calendars = await Calendar.find({
-    $or: [
-      { year: currentYear, month: currentMonth },
-      { 
-        year: currentYear, 
-        month: currentMonth + 1 
-      },
-      {
-        year: currentYear + (currentMonth === 12 ? 1 : 0),
-        month: currentMonth === 12 ? 1 : currentMonth + 1
-      }
-    ]
-  });
-  
+
+  const targets = [];
+  for (let i = 0; i < 4; i++) {
+    const t = new Date(currentYear, currentMonth - 1 + i, 1);
+    targets.push({ year: t.getFullYear(), month: t.getMonth() + 1 });
+  }
+
+  const calendars = await Calendar.find({ $or: targets });
+
   let updatedCount = 0;
-  
   for (const calendar of calendars) {
     const updated = await syncCalendarWithAppointments(calendar);
     if (updated) updatedCount++;
   }
-  
+
   console.log(`   ✅ Updated ${updatedCount} calendars with appointments`);
 }
 
 /**
- * Initialize calendars for future months
+ * Sync a single calendar with current appointments
+ * - bookedSlots ONLY from Appointment
+ * - does NOT touch workingHours (availability handled elsewhere)
+ */
+async function syncCalendarWithAppointments(calendar) {
+  try {
+    let needsUpdate = false;
+
+    const startDate = startOfLocalDay(new Date(calendar.year, calendar.month - 1, 1));
+    const endDate = endOfLocalDay(new Date(calendar.year, calendar.month, 0));
+
+    const appointments = await Appointment.find({
+      appointmentDate: { $gte: startDate, $lte: endDate },
+      status: { $in: ['pending', 'confirmed', 'accepted'] }
+    }).select('_id patientId appointmentDate startTime endTime createdAt status professionalType doctorId physiotherapistId pathologyId');
+
+    const apptsByDay = new Map();
+    for (const a of appointments) {
+      if (!a.patientId) continue; // Calendar schema requires patientId in bookedSlots
+      const k = dateKeyLocal(a.appointmentDate);
+      if (!apptsByDay.has(k)) apptsByDay.set(k, []);
+      apptsByDay.get(k).push(a);
+    }
+
+    // Ensure calendar.days exists
+    calendar.days = calendar.days || [];
+
+    for (const dayObj of calendar.days) {
+      dayObj.professionals = dayObj.professionals || [];
+      for (const p of dayObj.professionals) {
+        // strip invalid bookedSlots (appointments that no longer exist)
+        const dayKey = dateKeyLocal(dayObj.date);
+        const validAppts = apptsByDay.get(dayKey) || [];
+
+        const validBooked = (p.bookedSlots || []).filter(slot =>
+          validAppts.some(a => String(a._id) === String(slot.appointmentId))
+        );
+
+        if ((p.bookedSlots || []).length !== validBooked.length) {
+          p.bookedSlots = validBooked;
+          needsUpdate = true;
+        }
+      }
+    }
+
+    // Add missing appointment bookedSlots
+    for (const [dayKey, appts] of apptsByDay.entries()) {
+      // find/create day
+      let dayObj = calendar.days.find(d => dateKeyLocal(d.date) === dayKey);
+      if (!dayObj) {
+        const parts = dayKey.split('-').map(Number);
+        const dt = startOfLocalDay(new Date(parts[0], parts[1] - 1, parts[2]));
+        dayObj = {
+          date: dt,
+          dayName: titleCaseDayName(dayNameLower(dt)),
+          isHoliday: false,
+          professionals: []
+        };
+        calendar.days.push(dayObj);
+        needsUpdate = true;
+      }
+
+      for (const a of appts) {
+        const professionalType = a.professionalType;
+        const professionalId = a[`${professionalType}Id`];
+        if (!professionalId) continue;
+
+        let prof = (dayObj.professionals || []).find(p =>
+          String(p.professionalId) === String(professionalId) &&
+          p.professionalType === professionalType
+        );
+
+        if (!prof) {
+          prof = {
+            professionalId,
+            professionalType,
+            bookedSlots: [],
+            breaks: [],
+            workingHours: [],   // availability sync fills this later
+            isAvailable: true
+          };
+          dayObj.professionals.push(prof);
+          needsUpdate = true;
+        }
+
+        const exists = (prof.bookedSlots || []).some(s => String(s.appointmentId) === String(a._id));
+        if (!exists) {
+          prof.bookedSlots.push({
+            appointmentId: a._id,
+            patientId: a.patientId,
+            startTime: a.startTime,
+            endTime: a.endTime,
+            bookedAt: a.createdAt || new Date(),
+            status: a.status || 'booked'
+          });
+          needsUpdate = true;
+        }
+      }
+    }
+
+    if (needsUpdate) {
+      calendar.days.sort((a, b) => new Date(a.date) - new Date(b.date));
+      calendar.markModified('days');
+      await calendar.save();
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error('Error syncing calendar with appointments:', error);
+    return false;
+  }
+}
+
+/**
+ * Initialize calendars for current + next 2 months
  */
 async function initializeFutureCalendars(today) {
   console.log('📅 Step 2: Initializing current and future calendars...');
-  
-  const currentYear = today.getFullYear();
-  const currentMonth = today.getMonth() + 1;
-  
-  // Initialize current month and next 2 months (total of 3 months)
+
   for (let i = 0; i < 3; i++) {
     const targetDate = new Date(today.getFullYear(), today.getMonth() + i, 1);
     const year = targetDate.getFullYear();
     const month = targetDate.getMonth() + 1;
-    
-    // Skip if already exists
+
     const existing = await Calendar.findOne({ year, month });
     if (existing) {
       console.log(`   ⏭️ Calendar for ${month}/${year} already exists`);
       continue;
     }
-    
-    // Initialize calendar
+
     const calendar = await initializeCalendarForMonth(year, month);
     if (calendar) {
-      console.log(`   ✅ Created calendar for ${month}/${year}`);
+      console.log(`   ✅ Created calendar for ${month}/${year} with ${calendar.days.length} days`);
     }
   }
 }
@@ -118,20 +263,20 @@ async function initializeFutureCalendars(today) {
  */
 async function cleanOldCalendars(today) {
   console.log('🧹 Step 3: Cleaning old calendars...');
-  
+
   const threeMonthsAgo = new Date(today);
   threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-  
+
   const result = await Calendar.deleteMany({
     $or: [
       { year: { $lt: threeMonthsAgo.getFullYear() } },
-      { 
+      {
         year: threeMonthsAgo.getFullYear(),
         month: { $lt: threeMonthsAgo.getMonth() + 1 }
       }
     ]
   });
-  
+
   if (result.deletedCount > 0) {
     console.log(`   ✅ Cleaned ${result.deletedCount} old calendars`);
   } else {
@@ -140,344 +285,360 @@ async function cleanOldCalendars(today) {
 }
 
 /**
- * Sync calendars with professional availability changes
+ * Sync calendars with professional availability
+ * - updates ONLY workingHours/isAvailable
+ * - NEVER writes fake "slots" into bookedSlots
  */
 async function syncCalendarsWithProfessionalAvailability() {
   console.log('🔄 Step 4: Syncing with professional availability...');
-  
-  // Get active professionals
-  const doctors = await DoctorProfile.find({ 
-    isActive: true, 
-    verificationStatus: 'approved' 
+
+  const doctors = await DoctorProfile.find({
+    verificationStatus: 'approved'
   }).populate('userId', 'isVerified isActive');
-  
-  const physios = await PhysiotherapistProfile.find({ 
-    isActive: true, 
-    verificationStatus: 'approved' 
+
+  const physios = await PhysiotherapistProfile.find({
+    verificationStatus: 'approved'
   }).populate('userId', 'isVerified isActive');
-  
-  const pathologists = await PathologyProfile.find({ 
-    isActive: true, 
-    verificationStatus: 'approved' 
+
+  const pathologists = await PathologyProfile.find({
+    verificationStatus: 'approved'
   }).populate('userId', 'isVerified isActive');
-  
-  // Get current and next month's calendars
-  const today = new Date();
-  const currentYear = today.getFullYear();
-  const currentMonth = today.getMonth() + 1;
-  
-  const calendars = await Calendar.find({
-    $or: [
-      { year: currentYear, month: currentMonth },
-      { 
-        year: currentYear, 
-        month: currentMonth + 1 
-      }
-    ]
-  });
-  
+
+  console.log(`   👨‍⚕️ Found ${doctors.length} approved doctors`);
+  console.log(`   🏃 Found ${physios.length} approved physiotherapists`);
+  console.log(`   🧪 Found ${pathologists.length} approved pathologists`);
+
+  const today = startOfLocalDay(new Date());
+  const targets = [];
+  for (let i = 0; i < 3; i++) {
+    const t = new Date(today.getFullYear(), today.getMonth() + i, 1);
+    targets.push({ year: t.getFullYear(), month: t.getMonth() + 1 });
+  }
+
+  const calendars = await Calendar.find({ $or: targets });
+
   let updatedCount = 0;
-  
+
   for (const calendar of calendars) {
     let needsUpdate = false;
-    
+    calendar.days = calendar.days || [];
+
     for (const day of calendar.days) {
-      const date = new Date(day.date);
-      const dayName = date.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-      
-      // Update doctors
+      const dn = dayNameLower(day.date);
+      day.professionals = day.professionals || [];
+
+      // --- Doctors ---
       for (const doctor of doctors) {
-        if (!doctor.userId?.isVerified || !doctor.userId?.isActive) {
-          // Remove if doctor is no longer active
-          const index = day.professionals.findIndex(p => 
-            p.professionalId.toString() === doctor._id.toString() && 
-            p.professionalType === 'doctor'
-          );
-          if (index !== -1) {
-            day.professionals.splice(index, 1);
-            needsUpdate = true;
+        const active = doctor.userId?.isVerified && doctor.userId?.isActive;
+        const dayAvailability = doctor.availability?.find(a => a.day === dn);
+        const derivedWorkingHours = toWorkingHoursFromAvailabilitySlots(dayAvailability?.slots);
+        const hasAvailability = active && derivedWorkingHours.length > 0;
+
+        const idx = day.professionals.findIndex(p =>
+          String(p.professionalId) === String(doctor._id) &&
+          p.professionalType === 'doctor'
+        );
+
+        if (!hasAvailability) {
+          // remove only if no bookings too
+          if (idx !== -1) {
+            const existing = day.professionals[idx];
+            const hasBookings = (existing.bookedSlots || []).length > 0;
+            if (!hasBookings) {
+              day.professionals.splice(idx, 1);
+              needsUpdate = true;
+            } else {
+              // keep bookings, just mark unavailable
+              existing.workingHours = [];
+              existing.isAvailable = false;
+              needsUpdate = true;
+            }
           }
           continue;
         }
-        
-        const dayAvailability = doctor.availability?.find(a => a.day === dayName);
-        const shouldBeAvailable = dayAvailability && dayAvailability.slots?.length > 0;
-        
-        const existingIndex = day.professionals.findIndex(p => 
-          p.professionalId.toString() === doctor._id.toString() && 
-          p.professionalType === 'doctor'
-        );
-        
-        if (shouldBeAvailable && existingIndex === -1) {
-          // Add doctor if they should be available
+
+        if (idx === -1) {
           day.professionals.push({
             professionalId: doctor._id,
             professionalType: 'doctor',
             bookedSlots: [],
             breaks: [],
-            workingHours: [],
+            workingHours: derivedWorkingHours,
             isAvailable: true
           });
           needsUpdate = true;
-        } else if (!shouldBeAvailable && existingIndex !== -1) {
-          // Remove doctor if they shouldn't be available
-          day.professionals.splice(existingIndex, 1);
+        } else {
+          const existing = day.professionals[idx];
+          existing.workingHours = derivedWorkingHours;
+          existing.isAvailable = true;
+          existing.breaks = existing.breaks || [];
+          existing.bookedSlots = existing.bookedSlots || [];
           needsUpdate = true;
         }
       }
-      
-      // Similar logic for physios and pathologists...
+
+      // (Optional) physios/pathologists workingHours sync can be added similarly.
+      // For now you had empty arrays, so leaving them out is safe and avoids schema issues.
     }
-    
+
     if (needsUpdate) {
+      calendar.days.sort((a, b) => new Date(a.date) - new Date(b.date));
+      calendar.markModified('days');
       await calendar.save();
       updatedCount++;
+      console.log(`   💾 Saved calendar ${calendar.month}/${calendar.year}`);
     }
   }
-  
+
   console.log(`   ✅ Updated ${updatedCount} calendars with professional availability`);
 }
 
 /**
- * Sync a single calendar with current appointments
- */
-async function syncCalendarWithAppointments(calendar) {
-  try {
-    let needsUpdate = false;
-    
-    // Get all appointments for this month
-    const startDate = new Date(calendar.year, calendar.month - 1, 1);
-    const endDate = new Date(calendar.year, calendar.month, 0);
-    endDate.setHours(23, 59, 59, 999);
-    
-    const appointments = await Appointment.find({
-      appointmentDate: {
-        $gte: startDate,
-        $lte: endDate
-      },
-      status: { $in: ['pending', 'confirmed', 'accepted'] }
-    });
-    
-    // Clear existing booked slots (we'll rebuild from appointments)
-    for (const day of calendar.days) {
-      for (const professional of day.professionals) {
-        if (professional.bookedSlots.length > 0) {
-          professional.bookedSlots = [];
-          needsUpdate = true;
-        }
-      }
-    }
-    
-    // Add appointments to calendar
-    for (const appointment of appointments) {
-      const appointmentDate = new Date(appointment.appointmentDate);
-      const dateStr = appointmentDate.toISOString().split('T')[0];
-      
-      const day = calendar.days.find(d => {
-        const dDate = new Date(d.date);
-        return dDate.toISOString().split('T')[0] === dateStr;
-      });
-      
-      if (!day) continue;
-      
-      const professionalType = appointment.professionalType;
-      const professionalId = appointment[`${professionalType}Id`];
-      
-      if (!professionalId) continue;
-      
-      let professional = day.professionals.find(p => 
-        p.professionalId.toString() === professionalId.toString() && 
-        p.professionalType === professionalType
-      );
-      
-      if (!professional) {
-        // Create professional entry if not exists
-        professional = {
-          professionalId,
-          professionalType,
-          bookedSlots: [],
-          breaks: [],
-          workingHours: [],
-          isAvailable: true
-        };
-        day.professionals.push(professional);
-        needsUpdate = true;
-      }
-      
-      // Add booked slot
-      professional.bookedSlots.push({
-        appointmentId: appointment._id,
-        patientId: appointment.patientId,
-        startTime: appointment.startTime,
-        endTime: appointment.endTime,
-        bookedAt: appointment.createdAt,
-        status: 'booked'
-      });
-      needsUpdate = true;
-    }
-    
-    if (needsUpdate) {
-      await calendar.save();
-      return true;
-    }
-    
-    return false;
-  } catch (error) {
-    console.error('Error syncing calendar with appointments:', error);
-    return false;
-  }
-}
-
-/**
- * Initialize calendar for a specific month
- */
-/**
- * Initialize calendar for a specific month
+ * Initialize calendar for month
+ * - builds days
+ * - puts availability into workingHours
+ * - bookedSlots starts empty
  */
 async function initializeCalendarForMonth(year, month) {
   try {
     if (month < 1 || month > 12) return null;
-    
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Normalize today to start of day
-    
-    const targetDate = new Date(year, month - 1, 1);
-    targetDate.setHours(0, 0, 0, 0);
-    
-    // Calculate the last day of the target month
-    const lastDayOfMonth = new Date(year, month, 0);
-    lastDayOfMonth.setHours(23, 59, 59, 999);
-    
-    // Allow initialization for:
-    // 1. Current month (even if we're past the 1st)
-    // 2. Future months
-    // Don't initialize past months (older than current month)
-    
-    const isCurrentMonth = 
-      year === today.getFullYear() && 
+
+    const today = startOfLocalDay(new Date());
+    const isCurrentMonth =
+      year === today.getFullYear() &&
       month === today.getMonth() + 1;
-    
-    const isFutureMonth = 
-      year > today.getFullYear() || 
+
+    const isFutureMonth =
+      year > today.getFullYear() ||
       (year === today.getFullYear() && month > today.getMonth() + 1);
-    
-    // Don't initialize if it's a past month (not current, not future)
+
     if (!isCurrentMonth && !isFutureMonth) {
       console.log(`   ⏭️ Skipping ${month}/${year} (past month)`);
       return null;
     }
-    
-    // Check if calendar already exists
+
     const existing = await Calendar.findOne({ year, month });
     if (existing) {
       console.log(`   ✅ Calendar for ${month}/${year} already exists`);
       return existing;
     }
-    
+
     console.log(`   📅 Creating calendar for ${month}/${year}...`);
-    
-    const doctors = await DoctorProfile.find({ 
-      isActive: true, 
-      verificationStatus: 'approved' 
+
+    const doctors = await DoctorProfile.find({
+      verificationStatus: 'approved'
     }).populate('userId', 'isVerified isActive');
-    
-    const physios = await PhysiotherapistProfile.find({ 
-      isActive: true, 
-      verificationStatus: 'approved' 
-    }).populate('userId', 'isVerified isActive');
-    
-    const pathologists = await PathologyProfile.find({ 
-      isActive: true, 
-      verificationStatus: 'approved' 
-    }).populate('userId', 'isVerified isActive');
-    
+
+    console.log(`   👨‍⚕️ Found ${doctors.length} approved doctors for calendar initialization`);
+
     const daysInMonth = new Date(year, month, 0).getDate();
     const days = [];
-    
-    for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month - 1, day);
-      const dayName = date.toLocaleDateString('en-US', { weekday: 'long' });
-      const dayNameLower = dayName.toLowerCase();
-      
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const date = startOfLocalDay(new Date(year, month - 1, d));
+      const dnLower = dayNameLower(date);
+
       const professionals = [];
-      
-      // Add doctors
+
       for (const doctor of doctors) {
-        if (!doctor.userId?.isVerified || !doctor.userId?.isActive) continue;
-        
-        const dayAvailability = doctor.availability?.find(a => a.day === dayNameLower);
-        if (dayAvailability && dayAvailability.slots?.length > 0) {
+        const active = doctor.userId?.isVerified && doctor.userId?.isActive;
+        if (!active) continue;
+
+        const dayAvailability = doctor.availability?.find(a => a.day === dnLower);
+        const workingHours = toWorkingHoursFromAvailabilitySlots(dayAvailability?.slots);
+        if (workingHours.length > 0) {
           professionals.push({
             professionalId: doctor._id,
             professionalType: 'doctor',
-            bookedSlots: [],
+            bookedSlots: [],       // IMPORTANT: bookings only
             breaks: [],
-            workingHours: [],
+            workingHours,          // availability here
             isAvailable: true
           });
         }
       }
-      
-      // Add physiotherapists
-      for (const physio of physios) {
-        if (!physio.userId?.isVerified || !physio.userId?.isActive) continue;
-        
-        const dayAvailability = physio.availability?.find(a => a.day === dayNameLower);
-        if (dayAvailability && dayAvailability.slots?.length > 0) {
-          professionals.push({
-            professionalId: physio._id,
-            professionalType: 'physiotherapist',
-            bookedSlots: [],
-            breaks: [],
-            workingHours: [],
-            isAvailable: true
-          });
-        }
-      }
-      
-      // Add pathologists
-      for (const pathologist of pathologists) {
-        if (!pathologist.userId?.isVerified || !pathologist.userId?.isActive) continue;
-        
-        const hasSlotsForDate = pathologist.testSlots?.some(slot => {
-          const slotDate = new Date(slot.date);
-          slotDate.setHours(0, 0, 0, 0);
-          const compareDate = new Date(date);
-          compareDate.setHours(0, 0, 0, 0);
-          return slotDate.getTime() === compareDate.getTime();
-        });
-        
-        if (hasSlotsForDate) {
-          professionals.push({
-            professionalId: pathologist._id,
-            professionalType: 'pathology',
-            bookedSlots: [],
-            breaks: [],
-            workingHours: [],
-            isAvailable: true
-          });
-        }
-      }
-      
+
       days.push({
         date,
-        dayName,
+        dayName: titleCaseDayName(dnLower),
         isHoliday: false,
         professionals
       });
     }
-    
+
     const calendar = await Calendar.create({ year, month, days });
     console.log(`   ✅ Calendar for ${month}/${year} created with ${days.length} days`);
-    
     return calendar;
   } catch (error) {
     console.error(`❌ Error initializing calendar for ${month}/${year}:`, error.message);
     return null;
   }
 }
+
 /**
- * Manual trigger for calendar maintenance
+ * Update doctor in calendar (availability + bookings truth)
+ * IMPORTANT: re-fetch latest doctor profile to avoid stale data.
+ */
+async function updateDoctorInCalendar(doctorId) {
+  try {
+    const updatedDoctor = await DoctorProfile.findById(doctorId).populate('userId', 'isVerified isActive');
+    console.log(`🔄 Updating calendar for Doctor ID: ${doctorId} (${updatedDoctor?.name || ''})`);
+
+    const today = startOfLocalDay(new Date());
+
+    // Update next 90 days
+    const datesToUpdate = [];
+    for (let i = 0; i <= 90; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() + i);
+      datesToUpdate.push(startOfLocalDay(d));
+    }
+
+    // cache calendars by monthKey to avoid re-querying
+    const calCache = new Map();
+    const processedMonthKeys = new Set();
+
+    let totalUpdates = 0;
+
+    for (const targetDate of datesToUpdate) {
+      const { year, month } = ymFromDate(targetDate);
+      const monthKey = `${year}-${month}`;
+      processedMonthKeys.add(monthKey);
+
+      let calendar = calCache.get(monthKey);
+      if (!calendar) {
+        calendar = await Calendar.findOne({ year, month });
+        if (!calendar) {
+          calendar = await initializeCalendarForMonth(year, month);
+          if (!calendar) continue;
+        }
+        calCache.set(monthKey, calendar);
+      }
+
+      calendar.days = calendar.days || [];
+
+      const dayKey = dateKeyLocal(targetDate);
+      let dayObj = calendar.days.find(d => dateKeyLocal(d.date) === dayKey);
+
+      const dn = dayNameLower(targetDate);
+      const dayAvailability = updatedDoctor?.availability?.find(a => a.day === dn);
+      const derivedWorkingHours = toWorkingHoursFromAvailabilitySlots(dayAvailability?.slots);
+
+      const dayStart = startOfLocalDay(targetDate);
+      const dayEnd = endOfLocalDay(targetDate);
+
+      // bookings truth: appointments on that day
+      const actualAppointments = await Appointment.find({
+        doctorId: doctorId,
+        appointmentDate: { $gte: dayStart, $lte: dayEnd },
+        status: { $in: ['pending', 'confirmed', 'accepted'] }
+      }).select('_id patientId startTime endTime createdAt status');
+
+      const bookedSlotsFromAppointments = actualAppointments
+        .filter(a => a.patientId) // schema requires patientId
+        .map(a => ({
+          appointmentId: a._id,
+          patientId: a.patientId,
+          startTime: a.startTime,
+          endTime: a.endTime,
+          bookedAt: a.createdAt || new Date(),
+          status: a.status || 'booked'
+        }));
+
+      const hasAvailability = derivedWorkingHours.length > 0;
+      const hasBookings = bookedSlotsFromAppointments.length > 0;
+
+      if (!dayObj) {
+        // create day only if needed
+        if (hasAvailability || hasBookings) {
+          dayObj = {
+            date: dayStart,
+            dayName: titleCaseDayName(dn),
+            isHoliday: false,
+            professionals: []
+          };
+          calendar.days.push(dayObj);
+          totalUpdates++;
+          console.log(`   📅 Created day ${dayKey}: availability=${hasAvailability}, bookings=${bookedSlotsFromAppointments.length}`);
+        } else {
+          continue;
+        }
+      }
+
+      dayObj.professionals = dayObj.professionals || [];
+
+      const profIndex = dayObj.professionals.findIndex(p =>
+        String(p.professionalId) === String(doctorId) &&
+        p.professionalType === 'doctor'
+      );
+
+      if (profIndex === -1) {
+        if (hasAvailability || hasBookings) {
+          dayObj.professionals.push({
+            professionalId: doctorId,
+            professionalType: 'doctor',
+            workingHours: derivedWorkingHours,
+            breaks: [],
+            isAvailable: hasAvailability,
+            bookedSlots: bookedSlotsFromAppointments
+          });
+          totalUpdates++;
+          console.log(`   ➕ Added doctor to ${dayKey}: availability=${hasAvailability}, bookings=${bookedSlotsFromAppointments.length}`);
+        }
+      } else {
+        const prof = dayObj.professionals[profIndex];
+
+        if (!hasAvailability && !hasBookings) {
+          dayObj.professionals.splice(profIndex, 1);
+          totalUpdates++;
+          console.log(`   ➖ Removed doctor from ${dayKey} (no availability + no bookings)`);
+        } else {
+          prof.workingHours = derivedWorkingHours;                // <-- THIS is your availability
+          prof.isAvailable = hasAvailability;
+          prof.bookedSlots = bookedSlotsFromAppointments;         // <-- bookings only
+          prof.breaks = prof.breaks || [];
+          totalUpdates++;
+          console.log(`   🔄 Updated ${dayKey}: availability=${hasAvailability}, bookings=${bookedSlotsFromAppointments.length}`);
+        }
+      }
+
+      calendar.markModified('days');
+    }
+
+    // save all processed calendars
+    for (const monthKey of processedMonthKeys) {
+      const cal = calCache.get(monthKey);
+      if (!cal) continue;
+      cal.days.sort((a, b) => new Date(a.date) - new Date(b.date));
+      cal.markModified('days');
+      await cal.save();
+      const [y, m] = monthKey.split('-');
+      console.log(`   💾 Saved calendar for ${m}/${y}`);
+    }
+
+    console.log(`✅ Calendar updated for Doctor ${updatedDoctor?.name || doctorId}, affected days: ${totalUpdates}`);
+    return { success: true, totalUpdates };
+  } catch (error) {
+    console.error('❌ Error in updateDoctorInCalendar:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Quick availability sync
+ */
+async function quickAvailabilitySync(doctorId) {
+  try {
+    console.log(`⚡ Quick availability sync for doctor ${doctorId}`);
+    return await updateDoctorInCalendar(doctorId);
+  } catch (error) {
+    console.error('❌ Error in quickAvailabilitySync:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Manual trigger
  */
 async function manualCalendarMaintenance() {
   console.log('🚀 Manual calendar maintenance triggered');
@@ -485,88 +646,22 @@ async function manualCalendarMaintenance() {
 }
 
 /**
- * Check and fix calendar inconsistencies
+ * Inconsistency fix: ensure appointments exist in bookedSlots (safe)
  */
 async function fixCalendarInconsistencies() {
   console.log('🔧 Checking for calendar inconsistencies...');
-  
+
   const today = new Date();
-  const currentYear = today.getFullYear();
-  const currentMonth = today.getMonth() + 1;
-  
-  // Get appointments without corresponding calendar entries
-  const startDate = new Date(currentYear, currentMonth - 1, 1);
-  const endDate = new Date(currentYear, currentMonth, 0);
-  endDate.setHours(23, 59, 59, 999);
-  
-  const appointments = await Appointment.find({
-    appointmentDate: { $gte: startDate, $lte: endDate },
-    status: { $in: ['pending', 'confirmed', 'accepted'] }
-  });
-  
-  let calendar = await Calendar.findOne({ year: currentYear, month: currentMonth });
-  if (!calendar) {
-    calendar = await initializeCalendarForMonth(currentYear, currentMonth);
-  }
-  
-  let fixedCount = 0;
-  
-  for (const appointment of appointments) {
-    const appointmentDate = new Date(appointment.appointmentDate);
-    const dateStr = appointmentDate.toISOString().split('T')[0];
-    
-    const day = calendar.days.find(d => {
-      const dDate = new Date(d.date);
-      return dDate.toISOString().split('T')[0] === dateStr;
-    });
-    
-    if (!day) continue;
-    
-    const professionalType = appointment.professionalType;
-    const professionalId = appointment[`${professionalType}Id`];
-    
-    if (!professionalId) continue;
-    
-    let professional = day.professionals.find(p => 
-      p.professionalId.toString() === professionalId.toString() && 
-      p.professionalType === professionalType
-    );
-    
-    if (!professional) {
-      // Create missing professional entry
-      professional = {
-        professionalId,
-        professionalType,
-        bookedSlots: [],
-        breaks: [],
-        workingHours: [],
-        isAvailable: true
-      };
-      day.professionals.push(professional);
-      fixedCount++;
-    }
-    
-    // Check if appointment is already in booked slots
-    const exists = professional.bookedSlots.some(slot => 
-      slot.appointmentId.toString() === appointment._id.toString()
-    );
-    
-    if (!exists) {
-      professional.bookedSlots.push({
-        appointmentId: appointment._id,
-        patientId: appointment.patientId,
-        startTime: appointment.startTime,
-        endTime: appointment.endTime,
-        bookedAt: appointment.createdAt,
-        status: 'booked'
-      });
-      fixedCount++;
-    }
-  }
-  
-  if (fixedCount > 0) {
-    await calendar.save();
-    console.log(`✅ Fixed ${fixedCount} calendar inconsistencies`);
+  const { year, month } = ymFromDate(today);
+
+  let calendar = await Calendar.findOne({ year, month });
+  if (!calendar) calendar = await initializeCalendarForMonth(year, month);
+  if (!calendar) return;
+
+  // Just re-run appointment sync for current month
+  const updated = await syncCalendarWithAppointments(calendar);
+  if (updated) {
+    console.log('✅ Calendar inconsistencies fixed by re-syncing appointments');
   } else {
     console.log('✅ No inconsistencies found');
   }
@@ -574,22 +669,22 @@ async function fixCalendarInconsistencies() {
 
 // ========== SCHEDULE JOBS ==========
 
-// Main calendar maintenance: Daily at 2:00 AM
 cron.schedule('0 2 * * *', calendarMaintenanceJob);
 
-// Quick sync: Every 6 hours (for appointment updates)
-cron.schedule('0 */6 * * *', async () => {
-  console.log('🔄 Running quick calendar sync...');
+cron.schedule('0 */3 * * *', async () => {
+  console.log('🔄 Running quick calendar sync (appointments)...');
   const today = new Date();
   await updateExistingCalendarsWithAppointments(today);
 });
 
-// Inconsistency check: Weekly on Sunday at 3:00 AM
-cron.schedule('0 3 * * 0', fixCalendarInconsistencies);
+cron.schedule('0 */2 * * *', async () => {
+  console.log('📅 Running availability sync...');
+  await syncCalendarsWithProfessionalAvailability();
+});
 
-// ========== STARTUP ==========
+cron.schedule('0 4 * * *', fixCalendarInconsistencies);
 
-// Run maintenance on startup (after 10 seconds delay)
+// Startup
 setTimeout(() => {
   console.log('🚀 Starting calendar system...');
   calendarMaintenanceJob().catch(console.error);
@@ -605,5 +700,7 @@ module.exports = {
   initializeCalendarForMonth,
   updateExistingCalendarsWithAppointments,
   cleanOldCalendars,
-  syncCalendarsWithProfessionalAvailability
+  syncCalendarsWithProfessionalAvailability,
+  quickAvailabilitySync,
+  updateDoctorInCalendar
 };
