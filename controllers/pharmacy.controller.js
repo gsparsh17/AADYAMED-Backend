@@ -69,6 +69,10 @@ exports.createPharmacy = async (req, res) => {
       });
     }
 
+    const user = await User.findById(req.user.id);
+    user.profileId=pharmacy._id;
+    user.save();
+
     return res.status(201).json({
       success: true,
       message: 'Pharmacy created',

@@ -127,6 +127,9 @@ exports.createPhysiotherapist = async (req, res) => {
       // totals default in schema
     });
 
+    user.profileId=physioProfile._id;
+    user.save();
+
     // Handle file uploads (kept same)
     if (req.files) {
       const update = {};

@@ -53,16 +53,16 @@ const userSchema = new mongoose.Schema({
     default: false
   },
   
-  // Profile Reference
-  // profileId: {
-  //   type: mongoose.Schema.Types.ObjectId,
-  //   refPath: 'profileModel'
-  // },
-  // profileModel: {
-  //   type: String,
-  //   enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PatientProfile', 'PathologyProfile', 'Pharmacy'],
-  //   default: null
-  // },
+  profileId: {
+    type: mongoose.Schema.Types.ObjectId,
+    refPath: 'profileModel'
+
+  },
+  profileModel: {
+    type: String,
+    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PatientProfile', 'PathologyProfile', 'Pharmacy', null],
+    default: null
+  },
   
   // Verification Tokens
   emailVerificationToken: String,

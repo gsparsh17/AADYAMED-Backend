@@ -49,6 +49,7 @@ exports.createPrescription = async (req, res) => {
     
     // Update appointment
     appointment.prescriptionId = prescription._id;
+    appointment.status = 'completed';
     await appointment.save();
     
     // Generate PDF (in real implementation)
@@ -66,7 +67,6 @@ exports.getPrescriptions = async (req, res) => {
     const { patientId, startDate, endDate, page = 1, limit = 10 } = req.query;
     
     const filter = {};
-    
     // Role-based filtering
     if (req.user.role === 'patient') {
       filter.patientId = req.user.profileId;
@@ -168,18 +168,18 @@ exports.updatePrescription = async (req, res) => {
 // Authorization helpers
 function canCreatePrescription(user, appointment) {
   if (user.role === 'admin') return true;
-  
+  console.log(appointment, user.role)
   if (user.role === 'doctor' && 
       appointment.professionalType === 'doctor' &&
-      appointment.doctorId?.toString() === user.profileId &&
-      appointment.status === 'completed') {
+      // appointment.doctorId?.toString() === user.profileId &&
+      appointment.status === 'confirmed') {
     return true;
   }
   
   if (user.role === 'physiotherapist' &&
       appointment.professionalType === 'physiotherapist' &&
-      appointment.physioId?.toString() === user.profileId &&
-      appointment.status === 'completed') {
+      // appointment.physioId?.toString() === user.profileId &&
+      appointment.status === 'confirmed') {
     return true;
   }
   
@@ -188,14 +188,13 @@ function canCreatePrescription(user, appointment) {
 
 function canViewPrescription(user, prescription) {
   if (user.role === 'admin') return true;
-  
   if (user.role === 'patient' && 
-      prescription.patientId._id.toString() === user.profileId) {
+      prescription.patientId._id.toString() === user.profileId.toString()) {
     return true;
   }
   
-  if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId) ||
-      (user.role === 'physiotherapist' && prescription.physioId?._id.toString() === user.profileId)) {
+  if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId.toString()) ||
+      (user.role === 'physiotherapist' && prescription.physioId?._id.toString() === user.profileId.toString())) {
     return true;
   }
   

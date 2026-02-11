@@ -20,6 +20,8 @@ exports.createDoctor = async (req, res) => {
       });
     }
 
+    const user = await User.findById(req.user.id);
+
     // normalize incoming fields according to schema
     const body = req.body || {};
 
@@ -106,7 +108,6 @@ exports.createDoctor = async (req, res) => {
       about: body.about || '',
       services: Array.isArray(body.services) ? body.services : [],
 
-      // verificationStatus defaults to 'pending' by schema
       contactNumber,
       emergencyContact: body.emergencyContact,
       email,
@@ -122,7 +123,9 @@ exports.createDoctor = async (req, res) => {
       commissionRate: body.commissionRate !== undefined ? Number(body.commissionRate) : undefined
     });
 
-    // Update calendar with doctor's availability
+    user.profileId=newDoctor._id;
+    user.save();
+
     try {
       console.log(`🗓️ Adding new doctor ${newDoctor.name} to calendar...`);
       await addDoctorToCalendar(newDoctor);

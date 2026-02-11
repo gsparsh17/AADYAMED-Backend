@@ -1,5 +1,6 @@
 const PathologyProfile = require('../models/PathologyProfile');
 const LabTest = require('../models/LabTest');
+const User = require('../models/User');
 
 const normalizeEmail = (v) => (v ? String(v).trim().toLowerCase() : '');
 const normalizePhone = (v) => (v ? String(v).replace(/\D/g, '').slice(-10) : '');
@@ -53,6 +54,8 @@ exports.createProfile = async (req, res) => {
       return res.status(400).json({ success: false, error: 'phone is required' });
     }
 
+    const user = await User.findById(req.user.id);
+
     const existing = await PathologyProfile.findOne({ userId: req.user.id });
     if (existing) {
       return res.status(400).json({
@@ -86,6 +89,9 @@ exports.createProfile = async (req, res) => {
     }
 
     await profile.save();
+
+    user.profileId=profile._id;
+    user.save();
 
     return res.status(201).json({
       success: true,

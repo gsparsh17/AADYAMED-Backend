@@ -147,6 +147,9 @@ exports.createProfile = async (req, res) => {
       await user.save();
     }
 
+    user.profileId=profile._id;
+    user.save();
+
     return res.status(201).json({
       success: true,
       message: 'Patient profile created successfully',
