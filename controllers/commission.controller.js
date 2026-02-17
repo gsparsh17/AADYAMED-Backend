@@ -10,13 +10,13 @@ const mongoose = require('mongoose');
 
 function normalizeRole(role) {
   const r = (role || '').toLowerCase().trim();
-  if (r === 'physio') return 'physiotherapist';
+  if (r === 'physio') return 'physio';
   return r;
 }
 
 function normalizeProfessionalType(t) {
   const x = (t || '').toLowerCase().trim();
-  if (x === 'physio') return 'physiotherapist';
+  if (x === 'physio') return 'physio';
   return x;
 }
 
@@ -24,7 +24,7 @@ function mapUserRoleToProfessionalType(userRole) {
   const r = normalizeRole(userRole);
   const roleMap = {
     doctor: 'doctor',
-    physiotherapist: 'physiotherapist',
+    physiotherapist: 'physio',
     pathology: 'pathology'
   };
   return roleMap[r] || r;
@@ -37,7 +37,7 @@ async function getProfessionalProfileId(user) {
 
     if (role === 'doctor') {
       profile = await DoctorProfile.findOne({ userId: user.id }).select('_id');
-    } else if (role === 'physiotherapist') {
+    } else if (role === 'physio') {
       profile = await PhysiotherapistProfile.findOne({ userId: user.id }).select('_id');
     } else if (role === 'pathology') {
       profile = await PathologyProfile.findOne({ userId: user.id }).select('_id');
@@ -76,7 +76,7 @@ exports.getCommissions = async (req, res) => {
         filter.professionalId = professionalId;
       }
       if (professionalType) filter.professionalType = normalizeProfessionalType(professionalType);
-    } else if (['doctor', 'physiotherapist', 'pathology'].includes(normalizedRole)) {
+    } else if (['doctor', 'physio', 'pathology'].includes(normalizedRole)) {
       const profileId = await getProfessionalProfileId(req.user);
       if (!profileId) {
         return res.status(404).json({ success: false, error: 'Professional profile not found' });
@@ -297,7 +297,7 @@ exports.getCommissionReport = async (req, res) => {
         if (item._id.professionalType === 'doctor') {
           professional = await DoctorProfile.findById(item._id.professionalId)
             .select('name specialization consultationFee totalEarnings');
-        } else if (item._id.professionalType === 'physiotherapist') {
+        } else if (item._id.professionalType === 'physio') {
           professional = await PhysiotherapistProfile.findById(item._id.professionalId)
             .select('name services consultationFee totalEarnings');
         } else if (item._id.professionalType === 'pathology') {
@@ -482,7 +482,7 @@ exports.getCommissionSummary = async (req, res) => {
       if (professional._id.professionalType === 'doctor') {
         profile = await DoctorProfile.findById(professional._id.professionalId)
           .select('name specialization');
-      } else if (professional._id.professionalType === 'physiotherapist') {
+      } else if (professional._id.professionalType === 'physio') {
         profile = await PhysiotherapistProfile.findById(professional._id.professionalId)
           .select('name services');
       } else if (professional._id.professionalType === 'pathology') {
@@ -755,7 +755,7 @@ exports.generatePayoutReport = async (req, res) => {
           const doctor = await DoctorProfile.findById(professionalData.professionalId)
             .select('bankDetails');
           bankDetails = doctor?.bankDetails;
-        } else if (professionalData.professionalType === 'physiotherapist') {
+        } else if (professionalData.professionalType === 'physio') {
           const physio = await PhysiotherapistProfile.findById(professionalData.professionalId)
             .select('bankDetails');
           bankDetails = physio?.bankDetails;
@@ -905,7 +905,7 @@ async function getProfessionalProfileId(user) {
 function mapUserRoleToProfessionalType(userRole) {
   const roleMap = {
     'doctor': 'doctor',
-    'physio': 'physiotherapist',
+    'physio': 'physio',
     'pathology': 'pathology'
   };
   
@@ -936,7 +936,7 @@ async function updateProfessionalCommissionAfterPayout(professionalType, profess
     
     if (professionalType === 'doctor') {
       await DoctorProfile.findByIdAndUpdate(professionalId, updateFields);
-    } else if (professionalType === 'physiotherapist') {
+    } else if (professionalType === 'physio') {
       await PhysiotherapistProfile.findByIdAndUpdate(professionalId, updateFields);
     } else if (professionalType === 'pathology') {
       await PathologyProfile.findByIdAndUpdate(professionalId, updateFields);

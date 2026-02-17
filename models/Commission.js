@@ -24,7 +24,7 @@ const commissionSchema = new mongoose.Schema({
   // ✅ keep your existing business type
   professionalType: {
     type: String,
-    enum: ['doctor', 'physiotherapist', 'pathology'],
+    enum: ['doctor', 'physio', 'pathology'],
     required: true
   },
 

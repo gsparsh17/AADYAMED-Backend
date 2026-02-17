@@ -105,7 +105,7 @@ exports.getLabTests = async (req, res) => {
         filter.pathologyId = req.user.profileId;
         break;
       case 'doctor':
-      case 'physiotherapist':
+      case 'physio':
         filter.doctorId = req.user.profileId;
         break;
       case 'admin':

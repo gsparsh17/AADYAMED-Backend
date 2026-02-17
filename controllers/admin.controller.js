@@ -119,7 +119,7 @@ exports.verifyProfessional = async (req, res) => {
       case 'doctor':
         ProfessionalModel = DoctorProfile;
         break;
-      case 'physiotherapist':
+      case 'physio':
         ProfessionalModel = PhysiotherapistProfile;
         break;
       case 'pathology':
@@ -179,7 +179,7 @@ exports.getProfessionals = async (req, res) => {
       case 'doctor':
         Model = DoctorProfile;
         break;
-      case 'physiotherapist':
+      case 'physio':
         Model = PhysiotherapistProfile;
         break;
       case 'pathology':

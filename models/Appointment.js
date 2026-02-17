@@ -25,7 +25,7 @@ const appointmentSchema = new mongoose.Schema(
 
     professionalType: {
       type: String,
-      enum: ['doctor', 'physiotherapist'],
+      enum: ['doctor', 'physio'],
       required: true,
     },
 

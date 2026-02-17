@@ -22,7 +22,7 @@ const userSchema = new mongoose.Schema({
   // Role Management
   role: {
     type: String,
-    enum: ['admin', 'doctor', 'physiotherapist', 'patient', 'pathology', 'pharmacy'],
+    enum: ['admin', 'doctor', 'physio', 'patient', 'pathology', 'pharmacy'],
     required: [true, 'Role is required'],
     default: 'patient'
   },

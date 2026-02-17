@@ -309,7 +309,7 @@ exports.updateAvailability = async (req, res) => {
     // Check for existing appointments
     if (isAvailable === false) {
       const existingAppointments = await Appointment.find({
-        [professionalType === 'doctor' ? 'doctorId' : professionalType === 'physiotherapist' ? 'physioId' : 'pathologyId']: profileId,
+        [professionalType === 'doctor' ? 'doctorId' : professionalType === 'physio' ? 'physioId' : 'pathologyId']: profileId,
         appointmentDate: {
           $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
           $lt: new Date(targetDate.setHours(23, 59, 59, 999))
@@ -458,7 +458,7 @@ exports.addBreak = async (req, res) => {
 
     // Check for appointment conflicts
     const existingAppointments = await Appointment.find({
-      [professionalType === 'doctor' ? 'doctorId' : professionalType === 'physiotherapist' ? 'physioId' : 'pathologyId']: profileId,
+      [professionalType === 'doctor' ? 'doctorId' : professionalType === 'physio' ? 'physioId' : 'pathologyId']: profileId,
       appointmentDate: {
         $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
         $lt: new Date(targetDate.setHours(23, 59, 59, 999))
@@ -832,7 +832,7 @@ exports.getAvailableSlots = async (req, res) => {
     // Fetch real appointments (truth)
     const idField =
       professionalType === 'doctor' ? 'doctorId' :
-      professionalType === 'physiotherapist' ? 'physiotherapistId' :
+      professionalType === 'physio' ? 'physiotherapistId' :
       'pathologyId';
 
     const existingAppointments = await Appointment.find({
@@ -928,7 +928,7 @@ exports.bookSlot = async (req, res) => {
   try {
     const {
       professionalId,
-      professionalType, // 'doctor' | 'physiotherapist' | 'pathology'
+      professionalType, // 'doctor' | 'physio' | 'pathology'
       date,            // 'YYYY-MM-DD' or ISO
       startTime,       // 'HH:mm'
       endTime,         // 'HH:mm'
@@ -999,7 +999,7 @@ exports.bookSlot = async (req, res) => {
     const profKey =
       professionalType === 'doctor'
         ? 'doctorId'
-        : professionalType === 'physiotherapist'
+        : professionalType === 'physio'
           ? 'physioId'
           : 'pathologyId';
 
@@ -1325,7 +1325,7 @@ async function generatePastCalendarForProfessional(professionalId, professionalT
     const month = targetDate.getMonth() + 1;
 
     const appointments = await Appointment.find({
-      [professionalType === 'doctor' ? 'doctorId' : professionalType === 'physiotherapist' ? 'physioId' : 'pathologyId']: professionalId,
+      [professionalType === 'doctor' ? 'doctorId' : professionalType === 'physio' ? 'physioId' : 'pathologyId']: professionalId,
       appointmentDate: {
         $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
         $lt: new Date(targetDate.setHours(23, 59, 59, 999))
@@ -1388,7 +1388,7 @@ async function getProfessionalProfileId(user) {
 function mapUserRoleToProfessionalType(userRole) {
   const roleMap = {
     'doctor': 'doctor',
-    'physio': 'physiotherapist',
+    'physio': 'physio',
     'pathology': 'pathology'
   };
   return roleMap[userRole] || userRole;
@@ -1400,7 +1400,7 @@ async function getProfessionalDetails(professionalId, professionalType) {
   if (professionalType === 'doctor') {
     professional = await DoctorProfile.findById(professionalId)
       .populate('userId', 'isVerified isActive');
-  } else if (professionalType === 'physiotherapist') {
+  } else if (professionalType === 'physio') {
     professional = await PhysiotherapistProfile.findById(professionalId)
       .populate('userId', 'isVerified isActive');
   } else if (professionalType === 'pathology') {

@@ -21,8 +21,8 @@ const generateToken = (userId, role = null) => {
     process.env.JWT_SECRET,
     {
       expiresIn: process.env.JWT_EXPIRE || '30d',
-      issuer: 'aadyamed-api',
-      audience: 'aadyamed-users'
+      issuer: 'AadyaPlus-api',
+      audience: 'AadyaPlus-users'
     }
   );
 };

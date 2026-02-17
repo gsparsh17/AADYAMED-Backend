@@ -382,11 +382,11 @@ exports.getAppointments = async (req, res) => {
     if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
 
     // IMPORTANT FIX:
-    // Your Appointment professionalType values elsewhere are: 'doctor' and 'physiotherapist'
-    // Keep it consistent: use 'physiotherapist' here.
+    // Your Appointment professionalType values elsewhere are: 'doctor' and 'physio'
+    // Keep it consistent: use 'physio' here.
     const filter = {
       physioId: profile._id,
-      professionalType: 'physiotherapist'
+      professionalType: 'physio'
     };
 
     if (status) filter.status = status;
@@ -413,14 +413,14 @@ exports.getAppointments = async (req, res) => {
 
     const todaysAppointments = await Appointment.countDocuments({
       physioId: profile._id,
-      professionalType: 'physiotherapist',
+      professionalType: 'physio',
       appointmentDate: { $gte: today, $lt: tomorrow },
       status: { $in: ['confirmed', 'accepted', 'pending'] }
     });
 
     const upcomingAppointments = await Appointment.find({
       physioId: profile._id,
-      professionalType: 'physiotherapist',
+      professionalType: 'physio',
       appointmentDate: { $gte: today },
       status: { $in: ['confirmed', 'accepted', 'pending'] }
     })
@@ -461,7 +461,7 @@ exports.getEarnings = async (req, res) => {
       {
         $match: {
           professionalId: profile._id,
-          professionalType: 'physiotherapist',
+          professionalType: 'physio',
           createdAt: { $gte: startOfMonth }
         }
       },
@@ -501,7 +501,7 @@ exports.getEarningsReport = async (req, res) => {
 
     const matchStage = {
       professionalId: profile._id,
-      professionalType: 'physiotherapist'
+      professionalType: 'physio'
     };
 
     if (startDate && endDate) {
@@ -532,7 +532,7 @@ exports.getEarningsReport = async (req, res) => {
       {
         $match: {
           professionalId: profile._id,
-          professionalType: 'physiotherapist',
+          professionalType: 'physio',
           payoutStatus: 'pending'
         }
       },
@@ -572,14 +572,14 @@ exports.getDashboardStats = async (req, res) => {
 
     const todaysAppointments = await Appointment.countDocuments({
       physioId: profile._id,
-      professionalType: 'physiotherapist',
+      professionalType: 'physio',
       appointmentDate: { $gte: today, $lt: tomorrow },
       status: { $in: ['confirmed', 'accepted'] }
     });
 
     const pendingAppointments = await Appointment.countDocuments({
       physioId: profile._id,
-      professionalType: 'physiotherapist',
+      professionalType: 'physio',
       status: 'pending'
     });
 
@@ -590,7 +590,7 @@ exports.getDashboardStats = async (req, res) => {
 
     const weeklyAppointments = await Appointment.countDocuments({
       physioId: profile._id,
-      professionalType: 'physiotherapist',
+      professionalType: 'physio',
       appointmentDate: { $gte: startOfWeek, $lte: endOfWeek },
       status: { $in: ['confirmed', 'accepted', 'completed'] }
     });
@@ -600,7 +600,7 @@ exports.getDashboardStats = async (req, res) => {
       {
         $match: {
           professionalId: profile._id,
-          professionalType: 'physiotherapist',
+          professionalType: 'physio',
           createdAt: { $gte: startOfMonth }
         }
       },
@@ -609,7 +609,7 @@ exports.getDashboardStats = async (req, res) => {
 
     const recentAppointments = await Appointment.find({
       physioId: profile._id,
-      professionalType: 'physiotherapist'
+      professionalType: 'physio'
     })
       .populate('patientId', 'name age gender')
       .sort({ appointmentDate: -1 })
@@ -620,7 +620,7 @@ exports.getDashboardStats = async (req, res) => {
 
     const upcomingAppointments = await Appointment.find({
       physioId: profile._id,
-      professionalType: 'physiotherapist',
+      professionalType: 'physio',
       appointmentDate: { $gte: today, $lte: threeDaysLater },
       status: { $in: ['confirmed', 'accepted', 'pending'] }
     })

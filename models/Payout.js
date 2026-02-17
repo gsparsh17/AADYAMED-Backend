@@ -23,7 +23,7 @@ const payoutSchema = new mongoose.Schema({
   commissionsByProfessional: [{
     professionalType: {
       type: String,
-      enum: ['doctor', 'physiotherapist', 'pathology'],
+      enum: ['doctor', 'physio', 'pathology'],
       required: true
     },
     professionalId: {

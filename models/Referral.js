@@ -17,7 +17,7 @@ const doctorSuggestionSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['doctor', 'physiotherapist'],
+    enum: ['doctor', 'physio'],
     required: true
   },
   matchScore: Number,
@@ -71,7 +71,7 @@ const referralSchema = new mongoose.Schema({
   suggestedProfessionals: [doctorSuggestionSchema],
   selectedProfessional: {
     professionalId: mongoose.Schema.Types.ObjectId,
-    type: { type: String, enum: ['doctor', 'physiotherapist'] },
+    type: { type: String, enum: ['doctor', 'physio'] },
     selectedAt: Date,
     selectionReason: String
   },

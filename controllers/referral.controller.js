@@ -84,7 +84,7 @@ exports.selectProfessional = async (req, res) => {
     // Check if professional is in suggestions
     const suggestion = referral.suggestedProfessionals.find(s => 
       (type === 'doctor' && s.doctorId?.toString() === professionalId) ||
-      (type === 'physiotherapist' && s.physioId?.toString() === professionalId)
+      (type === 'physio' && s.physioId?.toString() === professionalId)
     );
     
     if (!suggestion) {
@@ -158,7 +158,7 @@ async function generateSuggestions(referralId) {
   
   suggestions = suggestions.concat(physios.map(physio => ({
     physioId: physio._id,
-    type: 'physiotherapist',
+    type: 'physio',
     matchScore: calculateMatchScore(physio, requirement),
     consultationFee: physio.consultationFee,
     homeVisitFee: physio.homeVisitFee,

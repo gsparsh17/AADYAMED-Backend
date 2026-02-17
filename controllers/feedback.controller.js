@@ -151,7 +151,7 @@ exports.getMyFeedback = async (req, res) => {
     
     if (req.user.role === 'patient') {
       filter.patientId = req.user.profileId;
-    } else if (['doctor', 'physiotherapist'].includes(req.user.role)) {
+    } else if (['doctor', 'physio'].includes(req.user.role)) {
       filter.professionalId = req.user.profileId;
       filter.professionalType = req.user.role;
     } else {

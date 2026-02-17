@@ -32,7 +32,7 @@ const validateRegistrationData = (data) => {
   }
   
   // Role validation
-  const validRoles = ['doctor', 'physiotherapist', 'patient', 'pathology', 'pharmacy'];
+  const validRoles = ['doctor', 'physio', 'patient', 'pathology', 'pharmacy'];
   if (!validRoles.includes(data.role)) {
     errors.push('Invalid role selected');
   }
@@ -100,18 +100,18 @@ exports.register = async (req, res) => {
       
     //   await sendEmail({
     //     to: user.email,
-    //     subject: 'Verify Your Email - AADYAMED',
+    //     subject: 'Verify Your Email - AadyaPlus',
     //     html: `
     //       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
     //         <div style="text-align: center; margin-bottom: 30px;">
-    //           <h2 style="color: #2563eb; margin-bottom: 10px;">Welcome to AADYAMED!</h2>
+    //           <h2 style="color: #2563eb; margin-bottom: 10px;">Welcome to AadyaPlus!</h2>
     //           <p style="color: #666; font-size: 16px;">Healthcare at your fingertips</p>
     //         </div>
             
     //         <div style="background-color: #f8fafc; padding: 20px; border-radius: 6px; margin-bottom: 30px;">
     //           <p style="margin: 0; color: #334155; line-height: 1.6;">
     //             Hello <strong>${user.name}</strong>,<br><br>
-    //             Thank you for creating an account with AADYAMED. To get started, please verify your email address by clicking the button below:
+    //             Thank you for creating an account with AadyaPlus. To get started, please verify your email address by clicking the button below:
     //           </p>
     //         </div>
             
@@ -135,9 +135,9 @@ exports.register = async (req, res) => {
     //         <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 30px 0;">
             
     //         <div style="color: #94a3b8; font-size: 12px; text-align: center;">
-    //           <p style="margin: 5px 0;">If you didn't create an account with AADYAMED, please ignore this email.</p>
-    //           <p style="margin: 5px 0;">Need help? Contact our support team at <a href="mailto:support@aadyamed.com" style="color: #2563eb;">support@aadyamed.com</a></p>
-    //           <p style="margin: 5px 0;">© ${new Date().getFullYear()} AADYAMED. All rights reserved.</p>
+    //           <p style="margin: 5px 0;">If you didn't create an account with AadyaPlus, please ignore this email.</p>
+    //           <p style="margin: 5px 0;">Need help? Contact our support team at <a href="mailto:support@AadyaPlus.com" style="color: #2563eb;">support@AadyaPlus.com</a></p>
+    //           <p style="margin: 5px 0;">© ${new Date().getFullYear()} AadyaPlus. All rights reserved.</p>
     //         </div>
     //       </div>
     //     `
@@ -300,7 +300,7 @@ exports.resendVerification = async (req, res) => {
       
       await sendEmail({
         to: user.email,
-        subject: 'Verify Your Email - AADYAMED',
+        subject: 'Verify Your Email - AadyaPlus',
         html: `<p>Click <a href="${verificationUrl}">here</a> to verify your email.</p>`
       });
     } catch (emailError) {
@@ -528,7 +528,7 @@ exports.completeProfile = async (req, res) => {
         profileModel = 'DoctorProfile';
         break;
         
-      case 'physiotherapist':
+      case 'physio':
         if (!profileData.licenseNumber || !profileData.consultationFee || !profileData.homeVisitFee) {
           return res.status(400).json({
             success: false,
@@ -620,7 +620,7 @@ exports.completeProfile = async (req, res) => {
     await user.save();
     
     // Send notification to admin for professional verification
-    if (['doctor', 'physiotherapist', 'pathology'].includes(user.role)) {
+    if (['doctor', 'physio', 'pathology'].includes(user.role)) {
       // Here you can trigger admin notification
       console.log(`New ${user.role} profile submitted for verification: ${profile._id}`);
       
@@ -684,7 +684,7 @@ exports.getProfileStatus = async (req, res) => {
         profile = await mongoose.model(user.profileModel).findById(user.profileId);
         
         // Get verification status for professionals
-        if (['doctor', 'physiotherapist', 'pathology'].includes(user.role)) {
+        if (['doctor', 'physio', 'pathology'].includes(user.role)) {
           verificationStatus = profile.verificationStatus;
         }
       } catch (profileError) {
@@ -699,7 +699,7 @@ exports.getProfileStatus = async (req, res) => {
       verificationStatus,
       profile,
       requiresProfileCompletion: !user.profileCompleted,
-      requiresVerification: ['doctor', 'physiotherapist', 'pathology'].includes(user.role) && 
+      requiresVerification: ['doctor', 'physio', 'pathology'].includes(user.role) && 
                            verificationStatus !== 'approved'
     });
     
@@ -844,7 +844,7 @@ exports.forgotPassword = async (req, res) => {
       
       await sendEmail({
         to: user.email,
-        subject: 'Reset Your Password - AADYAMED',
+        subject: 'Reset Your Password - AadyaPlus',
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h3>Password Reset Request</h3>

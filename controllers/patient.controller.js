@@ -816,7 +816,7 @@ exports.bookAppointment = async (req, res) => {
       patientId: profile._id,
       doctorId: doctorId || null,
       physioId: physioId || null,
-      professionalType: doctorId ? 'doctor' : 'physiotherapist',
+      professionalType: doctorId ? 'doctor' : 'physio',
       appointmentDate: new Date(appointmentDate),
       timeSlot,
       type,

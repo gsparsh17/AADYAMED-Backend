@@ -6,7 +6,7 @@ const { protect, authorize } = require('../middlewares/auth');
 router.use(protect);
 
 // Different access levels
-router.post('/', authorize('admin', 'pharmacy', 'doctor', 'physiotherapist'), pharmacySaleController.createSale);
+router.post('/', authorize('admin', 'pharmacy', 'doctor', 'physio'), pharmacySaleController.createSale);
 router.get('/', authorize('admin', 'pharmacy', 'patient'), pharmacySaleController.getAllSales);
 router.get('/report', authorize('admin', 'pharmacy'), pharmacySaleController.getSalesReport);
 router.get('/:id', authorize('admin', 'pharmacy'), pharmacySaleController.getSaleById);

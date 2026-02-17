@@ -46,7 +46,7 @@ exports.createAppointment = async (req, res) => {
     const patientId = patientProfile._id;
 
     // Validate professional type
-    if (!['doctor', 'physiotherapist'].includes(professionalType)) {
+    if (!['doctor', 'physio'].includes(professionalType)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid professional type. Must be "doctor" or "physiotherapist"'
@@ -222,7 +222,7 @@ exports.createAppointment = async (req, res) => {
     const professionalModel =
       professionalType === 'doctor'
         ? 'DoctorProfile'
-        : professionalType === 'physiotherapist'
+        : professionalType === 'physio'
           ? 'PhysiotherapistProfile'
           : 'PathologyProfile';
 
@@ -319,7 +319,7 @@ exports.getAppointments = async (req, res) => {
           });
         }
         filter.physioId = physioProfile._id;
-        filter.professionalType = 'physiotherapist';
+        filter.professionalType = 'physio';
         break;
 
       case 'admin':
@@ -1040,7 +1040,7 @@ async function createInvoiceForAppointment(appointment) {
       appointmentId: appointment._id,
       patientId: appointment.patientId,
       items: [{
-        description: `${appointment.professionalType === 'doctor' ? 'Doctor' : 'Physiotherapist'} Consultation`,
+        description: `${appointment.professionalType === 'doctor' ? 'Doctor' : 'physio'} Consultation`,
         quantity: 1,
         unitPrice: appointment.consultationFee,
         amount: appointment.consultationFee
@@ -1244,7 +1244,7 @@ async function sendAppointmentNotifications(appointment, professional, patientPr
     // Professional notification
     await Notification.create({
       userId: professionalUserId,
-      userRole: appointment.professionalType, // ✅ 'doctor' or 'physiotherapist'
+      userRole: appointment.professionalType, // ✅ 'doctor' or 'physio'
       title: 'New Appointment Request',
       message: `New appointment request from ${patientProfile.name} for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
       type: 'appointment',

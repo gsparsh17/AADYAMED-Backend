@@ -8,7 +8,7 @@ const notificationSchema = new mongoose.Schema({
   },
   userRole: {
     type: String,
-    enum: ['admin', 'doctor', 'physiotherapist', 'patient', 'pathology'],
+    enum: ['admin', 'doctor', 'physio', 'patient', 'pathology'],
     required: true
   },
   

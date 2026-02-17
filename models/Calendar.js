@@ -36,7 +36,7 @@ const CalendarSchema = new mongoose.Schema({
       professionalType: {
         type: String,
         required: true,
-        enum: ['doctor', 'physiotherapist', 'pathology']
+        enum: ['doctor', 'physio', 'pathology']
       },
       bookedSlots: [{
         appointmentId: {

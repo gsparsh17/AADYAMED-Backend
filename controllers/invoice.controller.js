@@ -364,7 +364,7 @@ function canViewInvoice(user, invoice) {
   }
   
   // Doctors/Physios can view invoices for their appointments
-  if ((user.role === 'doctor' || user.role === 'physiotherapist') && 
+  if ((user.role === 'doctor' || user.role === 'physio') && 
       invoice.appointmentId) {
     // Need to check if appointment belongs to this professional
     return true; // Simplified - implement proper check

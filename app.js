@@ -128,7 +128,7 @@ setTimeout(() => {
   initializeCalendarSystem();
 }, 3000); // Wait 3 seconds for all models to load
 
-// --- NEW ROUTES FOR AADYAMED SYSTEM ---
+// --- NEW ROUTES FOR AadyaPlus SYSTEM ---
 
 // Authentication Routes
 app.use('/api/auth', require('./routes/auth.routes'));
@@ -199,7 +199,7 @@ app.get('/health', async (req, res) => {
     
     res.status(200).json({
       status: 'success',
-      message: 'AADYAMED API is running',
+      message: 'AadyaPlus API is running',
       timestamp: new Date().toISOString(),
       version: '1.0.0',
       system: {
@@ -297,7 +297,7 @@ app.post('/api/system/initialize-calendar', async (req, res) => {
 // API documentation endpoint
 app.get('/api/docs', (req, res) => {
   res.json({
-    message: 'AADYAMED API Documentation',
+    message: 'AadyaPlus API Documentation',
     version: '2.0.0',
     calendarSystem: {
       description: 'Smart calendar system with on-demand generation for past months',

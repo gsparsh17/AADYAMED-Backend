@@ -43,7 +43,7 @@ exports.createPrescription = async (req, res) => {
       labTests,
       advice,
       followUpDate,
-      exercises: appointment.professionalType === 'physiotherapist' ? exercises : undefined,
+      exercises: appointment.professionalType === 'physio' ? exercises : undefined,
       status: 'issued'
     });
     
@@ -70,7 +70,7 @@ exports.getPrescriptions = async (req, res) => {
     // Role-based filtering
     if (req.user.role === 'patient') {
       filter.patientId = req.user.profileId;
-    } else if (['doctor', 'physiotherapist'].includes(req.user.role)) {
+    } else if (['doctor', 'physio'].includes(req.user.role)) {
       filter[req.user.role === 'doctor' ? 'doctorId' : 'physioId'] = req.user.profileId;
       filter.professionalType = req.user.role;
     } else if (req.user.role === 'admin') {
@@ -176,8 +176,8 @@ function canCreatePrescription(user, appointment) {
     return true;
   }
   
-  if (user.role === 'physiotherapist' &&
-      appointment.professionalType === 'physiotherapist' &&
+  if (user.role === 'physio' &&
+      appointment.professionalType === 'physio' &&
       // appointment.physioId?.toString() === user.profileId &&
       appointment.status === 'confirmed') {
     return true;
@@ -194,7 +194,7 @@ function canViewPrescription(user, prescription) {
   }
   
   if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId.toString()) ||
-      (user.role === 'physiotherapist' && prescription.physioId?._id.toString() === user.profileId.toString())) {
+      (user.role === 'physio' && prescription.physioId?._id.toString() === user.profileId.toString())) {
     return true;
   }
   
@@ -205,7 +205,7 @@ function canUpdatePrescription(user, prescription) {
   if (user.role === 'admin') return true;
   
   if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId) ||
-      (user.role === 'physiotherapist' && prescription.physioId?._id.toString() === user.profileId)) {
+      (user.role === 'physio' && prescription.physioId?._id.toString() === user.profileId)) {
     return true;
   }
   
