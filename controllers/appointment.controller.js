@@ -49,7 +49,7 @@ exports.createAppointment = async (req, res) => {
     if (!['doctor', 'physio'].includes(professionalType)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid professional type. Must be "doctor" or "physiotherapist"'
+        error: 'Invalid professional type. Must be "doctor" or "physio"'
       });
     }
 
