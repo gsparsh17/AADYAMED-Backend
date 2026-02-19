@@ -305,7 +305,38 @@ exports.getDoctorsBySpecialization = async (req, res) => {
   }
 };
 
-
+// In doctor.controller.js, add this new function:
+exports.getWeeklyAvailability = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const doctor = await DoctorProfile.findById(id)
+      .select('availability name consultationFee homeVisitFee');
+    
+    if (!doctor) {
+      return res.status(404).json({
+        success: false,
+        error: 'Doctor not found'
+      });
+    }
+    
+    // Return the weekly schedule template directly from doctor profile
+    return res.json({
+      success: true,
+      availability: doctor.availability || [], // This is your weekly template
+      doctorName: doctor.name,
+      consultationFee: doctor.consultationFee,
+      homeVisitFee: doctor.homeVisitFee
+    });
+    
+  } catch (err) {
+    console.error('Error fetching weekly availability:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch weekly availability'
+    });
+  }
+};
 // Get doctor's availability (public)
 exports.getDoctorAvailability = async (req, res) => {
   try {

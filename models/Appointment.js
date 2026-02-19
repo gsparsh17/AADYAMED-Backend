@@ -23,9 +23,16 @@ const appointmentSchema = new mongoose.Schema(
       ref: 'PhysiotherapistProfile',
     },
 
+    // ✅ NEW
+    pathologyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PathologyProfile',
+    },
+
+    // ✅ UPDATED
     professionalType: {
       type: String,
-      enum: ['doctor', 'physio'],
+      enum: ['doctor', 'physio', 'pathology'],
       required: true,
     },
 
@@ -87,10 +94,8 @@ const appointmentSchema = new mongoose.Schema(
         },
         validate: {
           validator: function (v) {
-            // If not home visit, allow empty
             if (this.type !== 'home') return true;
 
-            // Must be [lng, lat]
             return (
               Array.isArray(v) &&
               v.length === 2 &&
@@ -109,12 +114,10 @@ const appointmentSchema = new mongoose.Schema(
       },
     },
 
-    // Symptoms & Reason
     symptoms: [String],
     reason: String,
     notes: String,
 
-    // Status
     status: {
       type: String,
       enum: [
@@ -173,7 +176,6 @@ const appointmentSchema = new mongoose.Schema(
     razorpayPaymentId: String,
     paymentDate: Date,
 
-    // Rescheduling/Cancellation
     cancellationReason: String,
 
     cancelledBy: {
@@ -201,7 +203,6 @@ const appointmentSchema = new mongoose.Schema(
       },
     ],
 
-    // Follow-up
     followUpDate: Date,
     followUpNotes: String,
 
@@ -215,7 +216,6 @@ const appointmentSchema = new mongoose.Schema(
       ref: 'Appointment',
     },
 
-    // Consultation
     actualStartTime: Date,
     actualEndTime: Date,
     consultationNotes: String,
@@ -225,7 +225,6 @@ const appointmentSchema = new mongoose.Schema(
       ref: 'Prescription',
     },
 
-    // Notifications
     remindersSent: [
       {
         type: String,
@@ -234,7 +233,6 @@ const appointmentSchema = new mongoose.Schema(
       },
     ],
 
-    // Metadata
     bookedBy: {
       type: String,
       enum: ['patient', 'admin', 'assistant'],
@@ -247,15 +245,13 @@ const appointmentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-/**
- * ✅ Indexes
- * - Removed professionalId index (field doesn't exist in your schema)
- * - Added doctorId/physioId indexes
- * - 2dsphere index is partial: only docs with valid geo are indexed
- */
+// ✅ Indexes
 appointmentSchema.index({ patientId: 1, status: 1 });
 appointmentSchema.index({ doctorId: 1, status: 1 });
 appointmentSchema.index({ physioId: 1, status: 1 });
+// ✅ NEW
+appointmentSchema.index({ pathologyId: 1, status: 1 });
+
 appointmentSchema.index({ appointmentDate: 1, startTime: 1 });
 appointmentSchema.index({ status: 1, paymentStatus: 1 });
 
@@ -270,11 +266,6 @@ appointmentSchema.index(
   }
 );
 
-/**
- * ✅ Safety hook:
- * If NOT home visit, ensure we do NOT store a half-baked location
- * (prevents "type: Point" without coordinates issues)
- */
 appointmentSchema.pre('validate', function (next) {
   if (this.type !== 'home') {
     this.address = undefined;
@@ -283,9 +274,12 @@ appointmentSchema.pre('validate', function (next) {
   next();
 });
 
-// Calculate professional earning before save
 appointmentSchema.pre('save', function (next) {
-  if (this.isModified('consultationFee') || this.isModified('platformCommission') || this.isModified('homeVisitCharges')) {
+  if (
+    this.isModified('consultationFee') ||
+    this.isModified('platformCommission') ||
+    this.isModified('homeVisitCharges')
+  ) {
     this.professionalEarning = (this.consultationFee || 0) - (this.platformCommission || 0);
     this.totalAmount = (this.consultationFee || 0) + (this.homeVisitCharges || 0);
   }

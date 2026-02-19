@@ -1,10 +1,15 @@
-// controllers/physio.controller.js (UPDATED to match PhysiotherapistProfile schema)
+// controllers/physio.controller.js  (MATCHED WITH doctor.controller.js PATTERN)
 
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
+const User = require('../models/User');
+const Calendar = require('../models/Calendar');
 const Appointment = require('../models/Appointment');
 const Commission = require('../models/Commission');
-const Calendar = require('../models/Calendar');
-const User = require('../models/User');
+
+// If you already have these in your project (same as doctor):
+// calendarJob should be generic enough; if it's doctor-only, keep updateDoctorInCalendar but pass profile + type.
+// If your updateDoctorInCalendar is doctor-only, you can rename it later to updateProfessionalInCalendar.
+const { initializeCalendarForMonth, updateDoctorInCalendar } = require('../jobs/calendarJob');
 
 // ---------- helpers ----------
 const safeDate = (v) => {
@@ -26,8 +31,6 @@ const normalizeClinicAddress = (addr = {}) => ({
       : { type: 'Point', coordinates: [0, 0] }
 });
 
-// availabilitySlotSchema is shared with DoctorProfile.
-// Your DB expects: [{ day: 'monday', slots: [{ startTime, endTime, type, maxPatients? }] }]
 const defaultAvailability = [
   { day: 'monday', slots: [{ startTime: '09:00', endTime: '17:00', type: 'clinic' }] },
   { day: 'tuesday', slots: [{ startTime: '09:00', endTime: '17:00', type: 'clinic' }] },
@@ -36,261 +39,730 @@ const defaultAvailability = [
   { day: 'friday', slots: [{ startTime: '09:00', endTime: '17:00', type: 'clinic' }] }
 ];
 
-// ========== CREATE PROFILE (admin or self) ==========
-// Route in your router: POST /physio  => createPhysiotherapist
+const dateKeyLocal = (d) => {
+  const x = new Date(d);
+  const y = x.getFullYear();
+  const m = String(x.getMonth() + 1).padStart(2, '0');
+  const dd = String(x.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+};
+
+const timeToMinutes = (t) => {
+  const [hh, mm] = String(t || '00:00').split(':').map(Number);
+  return hh * 60 + mm;
+};
+
+const minutesToHHMM = (mins) => {
+  const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+  const mm = String(mins % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+};
+
+// ========== PUBLIC FUNCTIONS ==========
+
+// ✅ Create current physio profile (Physio only)  POST /physio/me/profile
 exports.createPhysiotherapist = async (req, res) => {
   try {
-    const body = req.body || {};
-
-    // You were passing userId in body, but your app also uses protect() -> req.user.id.
-    // We'll support BOTH:
-    const targetUserId = body.userId || req.user?.id;
-    if (!targetUserId) {
-      return res.status(400).json({ success: false, error: 'userId is required' });
-    }
-
-    const user = await User.findById(targetUserId);
-    if (!user) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-
-    const existingProfile = await PhysiotherapistProfile.findOne({ userId: targetUserId });
-    if (existingProfile) {
+    const existing = await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (existing) {
       return res.status(409).json({
         success: false,
-        error: 'Physiotherapist profile already exists for this user',
-        profile: existingProfile
+        error: 'Physiotherapist profile already exists',
+        physio: existing
       });
     }
 
-    // Required by schema: name, licenseNumber, specialization (each required), consultationFee, homeVisitFee
-    const name = (body.name || user.name || '').trim();
-    const licenseNumber = (body.licenseNumber || '').trim();
-    const specialization =
-      Array.isArray(body.specialization) && body.specialization.length
-        ? body.specialization
+    const user = await User.findById(req.user.id);
+    const body = req.body || {};
+
+    const contactNumber = body.contactNumber || body.phone || '';
+    const email = req.user?.email || body.email || '';
+
+    const specialization = Array.isArray(body.specialization)
+      ? body.specialization.filter(Boolean)
+      : typeof body.specialization === 'string'
+        ? body.specialization.split(',').map(s => s.trim()).filter(Boolean)
         : ['General Physiotherapy'];
 
-    const consultationFee =
-      body.consultationFee !== undefined && body.consultationFee !== ''
-        ? Number(body.consultationFee)
-        : 500;
+    const consultationFee = Number(body.consultationFee);
+    const homeVisitFee = body.homeVisitFee !== undefined ? Number(body.homeVisitFee) : 0;
 
-    const homeVisitFee =
-      body.homeVisitFee !== undefined && body.homeVisitFee !== ''
-        ? Number(body.homeVisitFee)
-        : 800;
+    const experienceYears =
+      body.experienceYears !== undefined ? Number(body.experienceYears)
+      : body.experience !== undefined ? Number(body.experience)
+      : 0;
 
-    if (!name) return res.status(400).json({ success: false, error: 'name is required' });
-    if (!licenseNumber) return res.status(400).json({ success: false, error: 'licenseNumber is required' });
-    if (!specialization?.length) return res.status(400).json({ success: false, error: 'specialization is required' });
+    const ca = body.clinicAddress || body.address || {};
+    const clinicAddress = {
+      address: ca.address || ca.street || '',
+      city: ca.city || '',
+      state: ca.state || '',
+      pincode: ca.pincode || '',
+      location: ca.location && Array.isArray(ca.location.coordinates)
+        ? ca.location
+        : { type: 'Point', coordinates: [0, 0] }
+    };
 
-    // clinicAddress in schema is object; normalize it
-    const clinicAddress = normalizeClinicAddress(body.clinicAddress);
+    // required schema fields
+    if (!body.name) return res.status(400).json({ success: false, error: 'name is required' });
+    if (!specialization.length) return res.status(400).json({ success: false, error: 'specialization is required' });
+    if (!body.licenseNumber) return res.status(400).json({ success: false, error: 'licenseNumber is required' });
+    if (Number.isNaN(consultationFee)) return res.status(400).json({ success: false, error: 'consultationFee is required' });
 
-    const physioProfile = await PhysiotherapistProfile.create({
-      userId: targetUserId,
+    const qualifications = Array.isArray(body.qualifications)
+      ? body.qualifications.map(q => ({
+          degree: q.degree || '',
+          university: q.university || '',
+          year: q.year !== undefined && q.year !== null && q.year !== '' ? Number(q.year) : undefined,
+          certificateUrl: q.certificateUrl || ''
+        }))
+      : [];
 
-      name,
-      email: (body.email || user.email || '').toLowerCase().trim(),
-      contactNumber: normalizePhone(body.phone || user.phone),
+    const availability = Array.isArray(body.availability) ? body.availability : defaultAvailability;
+
+    const newPhysio = await PhysiotherapistProfile.create({
+      userId: req.user.id,
+      name: body.name,
+      profileImage: body.profileImage,
 
       gender: body.gender,
-      dateOfBirth: safeDate(body.dateOfBirth),
+      dateOfBirth: body.dateOfBirth ? new Date(body.dateOfBirth) : undefined,
 
       specialization,
-      qualifications: Array.isArray(body.qualifications) ? body.qualifications : [],
-      experienceYears: body.experienceYears !== undefined ? Number(body.experienceYears) : 0,
+      qualifications,
 
-      licenseNumber,
-      licenseDocument: body.licenseDocument, // if you store url/path directly
+      experienceYears: Number.isNaN(experienceYears) ? 0 : experienceYears,
+
+      licenseNumber: body.licenseNumber,
+      licenseDocument: body.licenseDocument,
+
       clinicAddress,
-
       servesAreas: Array.isArray(body.servesAreas) ? body.servesAreas : [],
 
       consultationFee,
-      homeVisitFee,
+      homeVisitFee: Number.isNaN(homeVisitFee) ? 0 : homeVisitFee,
 
-      availability: Array.isArray(body.availability) && body.availability.length ? body.availability : defaultAvailability,
+      availability,
 
-      services: Array.isArray(body.services) ? body.services : [],
-      languages: Array.isArray(body.languages) && body.languages.length ? body.languages : ['English'],
+      languages: Array.isArray(body.languages) ? body.languages : (body.languages ? [body.languages] : ['English']),
       about: body.about || '',
+      services: Array.isArray(body.services) ? body.services : [],
 
-      // leave verificationStatus default = pending unless admin explicitly sets it
-      // verificationStatus: body.verificationStatus,
-
-      commissionRate: body.commissionRate !== undefined ? Number(body.commissionRate) : 20,
-
-      bankDetails: body.bankDetails || undefined,
+      contactNumber: contactNumber || normalizePhone(user?.phone),
       emergencyContact: body.emergencyContact,
-      // totals default in schema
+      email,
+
+      bankDetails: body.bankDetails ? {
+        accountName: body.bankDetails.accountName,
+        accountNumber: body.bankDetails.accountNumber,
+        ifscCode: body.bankDetails.ifscCode,
+        bankName: body.bankDetails.bankName,
+        branch: body.bankDetails.branch
+      } : undefined,
+
+      commissionRate: body.commissionRate !== undefined ? Number(body.commissionRate) : undefined
     });
 
-    user.profileId=physioProfile._id;
-    user.save();
+    user.profileId = newPhysio._id;
+    await user.save();
 
-    // Handle file uploads (kept same)
-    if (req.files) {
-      const update = {};
-      if (req.files.profileImage?.[0]?.path) update.profileImage = req.files.profileImage[0].path;
-      if (req.files.licenseDocument?.[0]?.path) update.licenseDocument = req.files.licenseDocument[0].path;
-      if (Object.keys(update).length) {
-        await PhysiotherapistProfile.findByIdAndUpdate(physioProfile._id, update, { new: true });
-      }
-    }
-
-    // Ensure user role is physio
-    if (user.role !== 'physio') {
-      user.role = 'physio';
-      await user.save();
-    }
-
-    // Optional: add/update calendar for next 30 days using their availability
+    // Sync calendar for next 30 days (same “style” as doctor: best-effort)
     try {
-      await updateCalendarAvailability(physioProfile._id, 'physio', physioProfile.availability);
-    } catch (e) {
-      console.error('Calendar update error (createPhysiotherapist):', e.message);
+      console.log(`🗓️ Adding new physio ${newPhysio.name} to calendar...`);
+      await addPhysioToCalendar(newPhysio);
+      console.log(`✅ Calendar updated for Physio ${newPhysio.name}`);
+    } catch (calendarError) {
+      console.error('❌ Failed to update calendar with new physio:', calendarError);
     }
 
     return res.status(201).json({
       success: true,
-      message: 'Physiotherapist profile created successfully',
-      profile: await PhysiotherapistProfile.findById(physioProfile._id).populate('userId', 'email isVerified')
+      message: 'Physiotherapist profile created successfully. Pending admin verification.',
+      physio: newPhysio
     });
-  } catch (error) {
-    console.error('Error creating physiotherapist:', error);
-
-    if (error.name === 'ValidationError') {
-      const errors = {};
-      Object.keys(error.errors).forEach((key) => (errors[key] = error.errors[key].message));
-      return res.status(400).json({ success: false, error: 'Validation failed', errors });
-    }
-
-    return res.status(400).json({ success: false, error: error.message });
+  } catch (err) {
+    console.error('Physio creation error:', err);
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
   }
 };
 
-// ========== PHYSIO-ONLY FUNCTIONS ==========
+// Get all physios (public)  GET /physio
+exports.getAllPhysios = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 20,
+      specialization,
+      verificationStatus,
+      search,
+      minRating,
+      maxFee,
+      city
+    } = req.query;
 
-// GET /physio/profile
+    const filter = {};
+
+    if (specialization) filter.specialization = { $in: [specialization] };
+
+    // Default: only approved for public
+    filter.verificationStatus = verificationStatus || 'approved';
+
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { specialization: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    if (minRating) filter.averageRating = { $gte: parseFloat(minRating) };
+    if (maxFee) filter.consultationFee = { $lte: parseFloat(maxFee) };
+    if (city) filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
+
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+    const physios = await PhysiotherapistProfile.find(filter)
+      .select(
+        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee languages about services verificationStatus averageRating totalReviews totalConsultations servesAreas'
+      )
+      .populate('userId', 'email isVerified')
+      .sort({ averageRating: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit, 10));
+
+    const total = await PhysiotherapistProfile.countDocuments(filter);
+
+    return res.json({
+      success: true,
+      physios,
+      pagination: {
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
+        total,
+        pages: Math.ceil(total / parseInt(limit, 10))
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching physios:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch physiotherapists'
+    });
+  }
+};
+
+// Get physio by ID (public)  GET /physio/:id
+exports.getPhysioById = async (req, res) => {
+  try {
+    const physio = await PhysiotherapistProfile.findById(req.params.id)
+      .select('-bankDetails -licenseDocument -adminNotes -commissionRate -pendingCommission -paidCommission')
+      .populate('userId', 'email isVerified');
+
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist not found'
+      });
+    }
+
+    const upcomingAppointments = await Appointment.find({
+      physioId: physio._id,
+      professionalType: 'physio',
+      appointmentDate: { $gte: new Date() },
+      status: { $in: ['confirmed', 'accepted'] }
+    })
+      .select('appointmentDate startTime type')
+      .sort({ appointmentDate: 1 })
+      .limit(5);
+
+    return res.json({
+      success: true,
+      physio: {
+        ...physio.toObject(),
+        upcomingAppointments
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching physio:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch physiotherapist details'
+    });
+  }
+};
+
+// Get physios by specialization (public)  GET /physio/specialization/:specialization
+exports.getPhysiosBySpecialization = async (req, res) => {
+  try {
+    const { specialization } = req.params;
+    const { city, minRating, maxFee, page = 1, limit = 20 } = req.query;
+
+    const filter = { verificationStatus: 'approved' };
+
+    if (specialization !== 'all') {
+      filter.specialization = { $in: [specialization] };
+    }
+
+    if (city) filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
+    if (minRating) filter.averageRating = { $gte: parseFloat(minRating) };
+    if (maxFee) filter.consultationFee = { $lte: parseFloat(maxFee) };
+
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+    const physios = await PhysiotherapistProfile.find(filter)
+      .select('name profileImage specialization averageRating consultationFee homeVisitFee clinicAddress availability totalConsultations servesAreas')
+      .sort({ averageRating: -1 })
+      .skip(skip)
+      .limit(parseInt(limit, 10));
+
+    const total = await PhysiotherapistProfile.countDocuments(filter);
+
+    return res.json({
+      success: true,
+      specialization,
+      count: physios.length,
+      physios,
+      pagination: {
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
+        total,
+        pages: Math.ceil(total / parseInt(limit, 10))
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching physios by specialization:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch physiotherapists'
+    });
+  }
+};
+
+// Weekly availability template (public)  GET /physio/:id/availability/weekly
+exports.getWeeklyAvailability = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const physio = await PhysiotherapistProfile.findById(id)
+      .select('availability name consultationFee homeVisitFee');
+
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist not found'
+      });
+    }
+
+    return res.json({
+      success: true,
+      availability: physio.availability || [],
+      physioName: physio.name,
+      consultationFee: physio.consultationFee,
+      homeVisitFee: physio.homeVisitFee
+    });
+  } catch (err) {
+    console.error('Error fetching weekly availability:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch weekly availability'
+    });
+  }
+};
+
+// Date availability (public)  GET /physio/:id/availability?date=YYYY-MM-DD
+exports.getPhysioAvailability = async (req, res) => {
+  try {
+    const { id } = req.params;   // physio profile id
+    const { date } = req.query;  // YYYY-MM-DD
+
+    // ---- interval helpers (same as doctor) ----
+    const clampInterval = (s, e, min, max) => ({ start: Math.max(min, s), end: Math.min(max, e) });
+
+    const isValidInterval = (iv) =>
+      iv && Number.isFinite(iv.start) && Number.isFinite(iv.end) && iv.end > iv.start;
+
+    const mergeIntervals = (intervals) => {
+      const arr = (intervals || []).filter(isValidInterval).sort((a, b) => a.start - b.start);
+      if (!arr.length) return [];
+      const out = [arr[0]];
+      for (let i = 1; i < arr.length; i++) {
+        const prev = out[out.length - 1];
+        const cur = arr[i];
+        if (cur.start <= prev.end) prev.end = Math.max(prev.end, cur.end);
+        else out.push({ ...cur });
+      }
+      return out;
+    };
+
+    const subtractIntervals = (baseStart, baseEnd, busyMerged) => {
+      let cursor = baseStart;
+      const free = [];
+      for (const b of busyMerged) {
+        if (b.end <= cursor) continue;
+        if (b.start >= baseEnd) break;
+
+        const bs = Math.max(b.start, baseStart);
+        const be = Math.min(b.end, baseEnd);
+
+        if (bs > cursor) free.push({ start: cursor, end: bs });
+        cursor = Math.max(cursor, be);
+      }
+      if (cursor < baseEnd) free.push({ start: cursor, end: baseEnd });
+      return free;
+    };
+
+    const sumMinutes = (intervals) => (intervals || []).reduce((acc, iv) => acc + (iv.end - iv.start), 0);
+
+    // ---- Validate target date ----
+    const targetDate = date ? new Date(date) : new Date();
+    if (Number.isNaN(targetDate.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid date format' });
+    }
+
+    const targetDayStart = new Date(targetDate);
+    targetDayStart.setHours(0, 0, 0, 0);
+
+    const targetDayEnd = new Date(targetDate);
+    targetDayEnd.setHours(23, 59, 59, 999);
+
+    const year = targetDayStart.getFullYear();
+    const month = targetDayStart.getMonth() + 1;
+    const targetKey = dateKeyLocal(targetDayStart);
+
+    // ---- Fetch physio profile ----
+    const physio = await PhysiotherapistProfile.findById(id)
+      .select('name consultationFee homeVisitFee verificationStatus userId')
+      .populate('userId', 'isVerified isActive');
+
+    if (!physio) {
+      return res.status(404).json({ success: false, error: 'Physiotherapist not found' });
+    }
+
+    if (physio.verificationStatus !== 'approved') {
+      return res.status(400).json({ success: false, error: 'Physiotherapist profile is not approved' });
+    }
+
+    if (!physio.userId?.isVerified || physio.userId?.isActive === false) {
+      return res.status(400).json({
+        success: false,
+        error: 'Physiotherapist is not available for appointments'
+      });
+    }
+
+    // ---- Calendar lookup (source of truth) ----
+    let calendar = await Calendar.findOne({ year, month });
+    if (!calendar && typeof initializeCalendarForMonth === 'function') {
+      calendar = await initializeCalendarForMonth(year, month);
+    }
+
+    const emptyResponse = (dayName) => res.json({
+      success: true,
+      date: targetKey,
+      dayName,
+      isAvailable: false,
+      slots: [],
+      physioName: physio.name,
+      consultationFee: physio.consultationFee,
+      homeVisitFee: physio.homeVisitFee
+    });
+
+    if (!calendar || !Array.isArray(calendar.days)) {
+      return emptyResponse(targetDayStart.toLocaleDateString('en-US', { weekday: 'long' }));
+    }
+
+    const day = calendar.days.find(d => dateKeyLocal(d.date) === targetKey);
+    if (!day) {
+      return emptyResponse(targetDayStart.toLocaleDateString('en-US', { weekday: 'long' }));
+    }
+
+    const professionalSchedule = (day.professionals || []).find(p =>
+      String(p.professionalId) === String(id) && p.professionalType === 'physio'
+    );
+
+    if (!professionalSchedule || !professionalSchedule.isAvailable) {
+      return res.json({
+        success: true,
+        date: targetKey,
+        dayName: day.dayName,
+        isAvailable: false,
+        slots: [],
+        physioName: physio.name,
+        consultationFee: physio.consultationFee,
+        homeVisitFee: physio.homeVisitFee
+      });
+    }
+
+    const workingHours = professionalSchedule.workingHours || [];
+    const breaks = professionalSchedule.breaks || [];
+    const bookedSlots = professionalSchedule.bookedSlots || [];
+
+    if (!workingHours.length) {
+      return res.json({
+        success: true,
+        date: targetKey,
+        dayName: day.dayName,
+        isAvailable: false,
+        slots: [],
+        physioName: physio.name,
+        consultationFee: physio.consultationFee,
+        homeVisitFee: physio.homeVisitFee
+      });
+    }
+
+    // ---- Appointment truth ----
+    const existingAppointments = await Appointment.find({
+      physioId: id,
+      professionalType: 'physio',
+      appointmentDate: { $gte: targetDayStart, $lte: targetDayEnd },
+      status: { $in: ['pending', 'confirmed', 'accepted'] }
+    }).select('startTime endTime status');
+
+    // ---- Build busy intervals ----
+    const busyRaw = [];
+
+    for (const br of breaks) {
+      const s = timeToMinutes(br.startTime);
+      const e = timeToMinutes(br.endTime);
+      if (e > s) busyRaw.push({ start: s, end: e });
+    }
+
+    for (const b of bookedSlots) {
+      if ((b.status || 'booked') === 'cancelled') continue;
+      const s = timeToMinutes(b.startTime);
+      const e = b.endTime ? timeToMinutes(b.endTime) : (s + 30);
+      if (e > s) busyRaw.push({ start: s, end: e });
+    }
+
+    for (const a of existingAppointments) {
+      const s = timeToMinutes(a.startTime);
+      const e = timeToMinutes(a.endTime);
+      if (e > s) busyRaw.push({ start: s, end: e });
+    }
+
+    const busyMerged = mergeIntervals(busyRaw.map(({ start, end }) => ({ start, end })));
+
+    const slotBlocks = workingHours.map((wh) => {
+      const whStart = timeToMinutes(wh.startTime);
+      const whEnd = timeToMinutes(wh.endTime);
+      if (whEnd <= whStart) return null;
+
+      const busyInBlock = busyMerged
+        .map(b => clampInterval(b.start, b.end, whStart, whEnd))
+        .filter(isValidInterval);
+
+      const busyInBlockMerged = mergeIntervals(busyInBlock);
+
+      const freeInBlock = subtractIntervals(whStart, whEnd, busyInBlockMerged);
+      const freeInBlockMerged = mergeIntervals(freeInBlock);
+
+      const busyMinutes = sumMinutes(busyInBlockMerged);
+      const freeMinutes = sumMinutes(freeInBlockMerged);
+      const hasFree = freeMinutes > 0;
+
+      const slotType = wh.type || 'clinic';
+      const fee = slotType === 'home' ? physio.homeVisitFee : physio.consultationFee;
+
+      return {
+        startTime: wh.startTime,
+        endTime: wh.endTime,
+        type: slotType,
+        maxPatients: Number.isFinite(wh.maxPatients) ? wh.maxPatients : 1,
+
+        isBooked: !hasFree,
+        isAvailable: hasFree,
+
+        fee,
+
+        busyMinutes,
+        freeMinutes,
+        busyIntervals: busyInBlockMerged.map(iv => ({
+          startTime: minutesToHHMM(iv.start),
+          endTime: minutesToHHMM(iv.end)
+        })),
+        freeIntervals: freeInBlockMerged.map(iv => ({
+          startTime: minutesToHHMM(iv.start),
+          endTime: minutesToHHMM(iv.end)
+        }))
+      };
+    }).filter(Boolean);
+
+    return res.json({
+      success: true,
+      date: targetKey,
+      dayName: day.dayName,
+      isAvailable: slotBlocks.some(s => s.isAvailable),
+      slots: slotBlocks,
+      physioName: physio.name,
+      consultationFee: physio.consultationFee,
+      homeVisitFee: physio.homeVisitFee
+    });
+  } catch (err) {
+    console.error('Error fetching physio availability:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch availability'
+    });
+  }
+};
+
+// ========== PHYSIO (ME) FUNCTIONS ==========
+
+// GET /physio/me/profile
 exports.getProfile = async (req, res) => {
   try {
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id })
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id })
       .populate('userId', 'email isVerified lastLogin');
 
-    if (!profile) {
-      return res.status(404).json({ success: false, error: 'Profile not found' });
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist profile not found'
+      });
     }
 
-    return res.json({ success: true, profile });
-  } catch (error) {
-    console.error('Error fetching physio profile:', error.message);
-    return res.status(500).json({ success: false, error: 'Failed to fetch profile' });
+    return res.json({ success: true, physio });
+  } catch (err) {
+    console.error('Error fetching physio profile:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch profile'
+    });
   }
 };
 
-// PUT /physio/profile
+// PUT /physio/me/profile
 exports.updateProfile = async (req, res) => {
   try {
     const updates = { ...(req.body || {}) };
 
-    // Remove fields that shouldn't be updated directly
+    if (updates.phone && !updates.contactNumber) {
+      updates.contactNumber = updates.phone;
+      delete updates.phone;
+    }
+
+    if (updates.clinicAddress?.street && !updates.clinicAddress.address) {
+      updates.clinicAddress.address = updates.clinicAddress.street;
+      delete updates.clinicAddress.street;
+    }
+
+    // Remove fields not allowed to change by physio
+    delete updates.userId;
     delete updates.verificationStatus;
+    delete updates.adminNotes;
+    delete updates.verifiedAt;
+    delete updates.verifiedBy;
     delete updates.totalEarnings;
-    delete updates.averageRating;
     delete updates.totalConsultations;
+    delete updates.averageRating;
     delete updates.totalReviews;
     delete updates.pendingCommission;
     delete updates.paidCommission;
-    delete updates.userId;
-    delete updates.createdAt;
-    delete updates.updatedAt;
+    delete updates.commissionRate;
 
-    // normalize
-    if (updates.phone) updates.contactNumber = normalizePhone(updates.phone);
-    delete updates.phone;
-
+    // normalize a few common fields
+    if (updates.contactNumber) updates.contactNumber = normalizePhone(updates.contactNumber);
     if (updates.clinicAddress) updates.clinicAddress = normalizeClinicAddress(updates.clinicAddress);
-    if (updates.dateOfBirth) {
-      const dob = safeDate(updates.dateOfBirth);
-      if (!dob) return res.status(400).json({ success: false, error: 'Invalid dateOfBirth' });
-      updates.dateOfBirth = dob;
+
+    const currentPhysio = await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (!currentPhysio) {
+      return res.status(404).json({ success: false, error: 'Physiotherapist profile not found' });
     }
-    if (updates.consultationFee !== undefined) updates.consultationFee = Number(updates.consultationFee);
-    if (updates.homeVisitFee !== undefined) updates.homeVisitFee = Number(updates.homeVisitFee);
-    if (updates.experienceYears !== undefined) updates.experienceYears = Number(updates.experienceYears);
 
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id });
-    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
-
-    const updatedProfile = await PhysiotherapistProfile.findByIdAndUpdate(
-      profile._id,
+    const physio = await PhysiotherapistProfile.findOneAndUpdate(
+      { userId: req.user.id },
       updates,
       { new: true, runValidators: true }
-    ).populate('userId', 'email isVerified');
+    ).populate('userId', 'email');
 
-    // If email changed, update user
-    if (updates.email) {
-      await User.findByIdAndUpdate(profile.userId, { email: updates.email });
+    if (!physio) {
+      return res.status(404).json({ success: false, error: 'Physiotherapist profile not found' });
+    }
+
+    // update user email too
+    if (updates.email && physio.userId) {
+      await User.findByIdAndUpdate(physio.userId, { email: updates.email });
+    }
+
+    // If availability changed in updateProfile (some UIs save availability here)
+    if (updates.availability &&
+        JSON.stringify(currentPhysio.availability) !== JSON.stringify(updates.availability)) {
+      try {
+        console.log('🔄 Availability changed, triggering immediate calendar sync...');
+        setTimeout(async () => {
+          try {
+            await updateDoctorInCalendar(physio._id, physio); // uses same calendarJob signature
+            console.log('✅ Calendar synced immediately after availability update');
+          } catch (syncError) {
+            console.error('❌ Immediate calendar sync failed:', syncError);
+          }
+        }, 1000);
+      } catch (e) {
+        console.error('Error triggering calendar sync:', e);
+      }
     }
 
     return res.json({
       success: true,
       message: 'Profile updated successfully',
-      profile: updatedProfile
+      physio
     });
-  } catch (error) {
-    console.error('Error updating physio profile:', error.message);
-
-    if (error.name === 'ValidationError') {
-      const errors = {};
-      Object.keys(error.errors).forEach((key) => (errors[key] = error.errors[key].message));
-      return res.status(400).json({ success: false, error: 'Validation failed', errors });
-    }
-
-    return res.status(400).json({ success: false, error: error.message });
+  } catch (err) {
+    console.error('Error updating physio profile:', err.message);
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
   }
 };
 
-// PUT /physio/availability
+// PUT /physio/me/availability
 exports.updateAvailability = async (req, res) => {
   try {
-    const { availability, servesAreas } = req.body || {};
+    const { availability } = req.body;
 
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id });
-    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist profile not found'
+      });
+    }
 
-    const updateData = {};
-    if (availability) updateData.availability = availability;
-    if (servesAreas) updateData.servesAreas = servesAreas;
+    const oldAvailability = physio.availability;
 
-    const updatedProfile = await PhysiotherapistProfile.findByIdAndUpdate(
-      profile._id,
-      updateData,
-      { new: true, runValidators: true }
-    );
+    physio.availability = availability;
+    await physio.save();
 
-    if (availability) {
+    if (JSON.stringify(oldAvailability) !== JSON.stringify(availability)) {
       try {
-        await updateCalendarAvailability(profile._id, 'physio', availability);
+        console.log('🔄 Availability changed, updating calendar immediately...');
+        const result = await updateDoctorInCalendar(physio._id, physio);
+
+        if (result?.success) console.log(`✅ Calendar updated immediately for ${physio.name}`);
+        else console.error('❌ Immediate calendar update failed:', result?.error);
       } catch (calendarError) {
-        console.error('Error updating calendar:', calendarError.message);
+        console.error('❌ Error updating physio in calendar:', calendarError);
       }
     }
 
     return res.json({
       success: true,
       message: 'Availability updated successfully',
-      profile: updatedProfile
+      availability: physio.availability
     });
-  } catch (error) {
-    console.error('Error updating availability:', error.message);
-    return res.status(400).json({ success: false, error: error.message });
+  } catch (err) {
+    console.error('Error updating availability:', err.message);
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
   }
 };
 
-// POST /physio/break
+// POST /physio/me/break  (kept simple, same as your earlier physio addBreak)
 exports.addBreak = async (req, res) => {
   try {
     const { date, startTime, endTime, reason } = req.body || {};
@@ -314,41 +786,37 @@ exports.addBreak = async (req, res) => {
     const dateStr = breakDate.toISOString().split('T')[0];
 
     let calendar = await Calendar.findOne({ year, month });
+    if (!calendar && typeof initializeCalendarForMonth === 'function') {
+      calendar = await initializeCalendarForMonth(year, month);
+    }
     if (!calendar) calendar = new Calendar({ year, month, days: [] });
 
     let day = calendar.days.find(d => new Date(d.date).toISOString().split('T')[0] === dateStr);
     if (!day) {
       const dayName = breakDate.toLocaleDateString('en-US', { weekday: 'long' });
-      day = {
-        date: breakDate,
-        dayName: dayName.charAt(0).toUpperCase() + dayName.slice(1),
-        isHoliday: false,
-        professionals: []
-      };
+      day = { date: breakDate, dayName, isHoliday: false, professionals: [] };
       calendar.days.push(day);
     }
 
     let professional = day.professionals.find(
-      p => p.professionalId.toString() === profile._id.toString() &&
-           p.professionalType === 'physio'
+      p => p.professionalId.toString() === profile._id.toString() && p.professionalType === 'physio'
     );
 
     if (!professional) {
-      const dayName = breakDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-      const dayAvailability = profile.availability?.find(a => a.day === dayName);
+      const dayNameLower = breakDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+      const dayAvailability = profile.availability?.find(a => a.day === dayNameLower);
 
-      const bookedSlots = dayAvailability?.slots?.map(slot => ({
+      const workingHours = (dayAvailability?.slots || []).map(slot => ({
         startTime: slot.startTime,
-        endTime: slot.endTime,
-        isBooked: false,
-        type: slot.type || 'clinic'
-      })) || [];
+        endTime: slot.endTime
+      }));
 
       professional = {
         professionalId: profile._id,
         professionalType: 'physio',
-        bookedSlots,
+        bookedSlots: [],
         breaks: [],
+        workingHours,
         isAvailable: true
       };
       day.professionals.push(professional);
@@ -373,19 +841,21 @@ exports.addBreak = async (req, res) => {
   }
 };
 
-// GET /physio/appointments
+// GET /physio/me/appointments
 exports.getAppointments = async (req, res) => {
   try {
     const { status, type, startDate, endDate, page = 1, limit = 20 } = req.query;
 
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id });
-    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist profile not found'
+      });
+    }
 
-    // IMPORTANT FIX:
-    // Your Appointment professionalType values elsewhere are: 'doctor' and 'physio'
-    // Keep it consistent: use 'physio' here.
     const filter = {
-      physioId: profile._id,
+      physioId: physio._id,
       professionalType: 'physio'
     };
 
@@ -395,64 +865,48 @@ exports.getAppointments = async (req, res) => {
       filter.appointmentDate = { $gte: new Date(startDate), $lte: new Date(endDate) };
     }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
 
     const appointments = await Appointment.find(filter)
       .populate('patientId', 'name phone age gender')
       .populate('referralId', 'requirement')
       .sort({ appointmentDate: -1 })
       .skip(skip)
-      .limit(parseInt(limit));
+      .limit(parseInt(limit, 10));
 
     const total = await Appointment.countDocuments(filter);
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    const todaysAppointments = await Appointment.countDocuments({
-      physioId: profile._id,
-      professionalType: 'physio',
-      appointmentDate: { $gte: today, $lt: tomorrow },
-      status: { $in: ['confirmed', 'accepted', 'pending'] }
-    });
-
-    const upcomingAppointments = await Appointment.find({
-      physioId: profile._id,
-      professionalType: 'physio',
-      appointmentDate: { $gte: today },
-      status: { $in: ['confirmed', 'accepted', 'pending'] }
-    })
-      .populate('patientId', 'name phone')
-      .sort({ appointmentDate: 1 })
-      .limit(5);
 
     return res.json({
       success: true,
       appointments,
-      todaysAppointments,
-      upcomingAppointments,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / parseInt(limit, 10))
       }
     });
-  } catch (error) {
-    console.error('Error fetching appointments:', error.message);
-    return res.status(500).json({ success: false, error: 'Failed to fetch appointments' });
+  } catch (err) {
+    console.error('Error fetching appointments:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch appointments'
+    });
   }
 };
 
-// GET /physio/earnings
+// GET /physio/me/earnings
 exports.getEarnings = async (req, res) => {
   try {
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id })
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id })
       .select('totalEarnings pendingCommission paidCommission totalConsultations');
 
-    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist profile not found'
+      });
+    }
 
     const today = new Date();
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -460,7 +914,7 @@ exports.getEarnings = async (req, res) => {
     const monthlyEarnings = await Commission.aggregate([
       {
         $match: {
-          professionalId: profile._id,
+          professionalId: physio._id,
           professionalType: 'physio',
           createdAt: { $gte: startOfMonth }
         }
@@ -477,49 +931,58 @@ exports.getEarnings = async (req, res) => {
     return res.json({
       success: true,
       earnings: {
-        totalEarnings: profile.totalEarnings || 0,
-        pendingCommission: profile.pendingCommission || 0,
-        paidCommission: profile.paidCommission || 0,
+        totalEarnings: physio.totalEarnings || 0,
+        pendingCommission: physio.pendingCommission || 0,
+        paidCommission: physio.paidCommission || 0,
         monthlyEarnings: monthlyEarnings[0]?.totalEarnings || 0,
         monthlyCommission: monthlyEarnings[0]?.totalCommission || 0
       },
-      stats: { totalConsultations: profile.totalConsultations || 0 }
+      stats: {
+        totalConsultations: physio.totalConsultations || 0
+      }
     });
-  } catch (error) {
-    console.error('Error fetching earnings:', error.message);
-    return res.status(500).json({ success: false, error: 'Failed to fetch earnings data' });
+  } catch (err) {
+    console.error('Error fetching earnings:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch earnings data'
+    });
   }
 };
 
-// GET /physio/earnings/report
-exports.getEarningsReport = async (req, res) => {
+// GET /physio/me/earnings/report
+exports.getPhysioEarnings = async (req, res) => {
   try {
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id });
-    if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist profile not found'
+      });
+    }
 
     const { startDate, endDate, groupBy = 'month' } = req.query;
 
     const matchStage = {
-      professionalId: profile._id,
+      professionalId: physio._id,
       professionalType: 'physio'
     };
 
-    if (startDate && endDate) {
-      matchStage.createdAt = { $gte: new Date(startDate), $lte: new Date(endDate) };
-    }
+if (startDate && endDate) {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  end.setHours(23, 59, 59, 999);
+  matchStage.createdAt = { $gte: start, $lte: end };
+}
+
 
     const earnings = await Commission.aggregate([
       { $match: matchStage },
       {
         $group: {
-          _id:
-            groupBy === 'month'
-              ? { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } }
-              : {
-                  year: { $year: '$createdAt' },
-                  month: { $month: '$createdAt' },
-                  day: { $dayOfMonth: '$createdAt' }
-                },
+          _id: groupBy === 'month'
+            ? { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } }
+            : { year: { $year: '$createdAt' }, month: { $month: '$createdAt' }, day: { $dayOfMonth: '$createdAt' } },
           totalEarnings: { $sum: '$professionalEarning' },
           totalCommission: { $sum: '$platformCommission' },
           appointmentCount: { $sum: 1 }
@@ -528,78 +991,70 @@ exports.getEarningsReport = async (req, res) => {
       { $sort: { '_id.year': -1, '_id.month': -1, '_id.day': -1 } }
     ]);
 
-    const pendingCommission = await Commission.aggregate([
-      {
-        $match: {
-          professionalId: profile._id,
-          professionalType: 'physio',
-          payoutStatus: 'pending'
-        }
-      },
-      { $group: { _id: null, total: { $sum: '$platformCommission' }, count: { $sum: 1 } } }
-    ]);
+const pendingCommission = await Commission.aggregate([
+  {
+    $match: {
+      professionalId: physio._id,
+      professionalType: 'physio',
+      payoutStatus: 'pending'
+    }
+  },
+  { $group: { _id: null, total: { $sum: '$professionalEarning' }, count: { $sum: 1 } } }
+]);
 
     return res.json({
       success: true,
       earnings,
       pendingCommission: pendingCommission[0]?.total || 0,
       profileStats: {
-        totalEarnings: profile.totalEarnings || 0,
-        pendingCommission: profile.pendingCommission || 0,
-        paidCommission: profile.paidCommission || 0
+        totalEarnings: physio.totalEarnings || 0,
+        pendingCommission: physio.pendingCommission || 0,
+        paidCommission: physio.paidCommission || 0
       }
     });
-  } catch (error) {
-    console.error('Error fetching earnings report:', error.message);
-    return res.status(500).json({ success: false, error: 'Failed to fetch earnings report' });
+  } catch (err) {
+    console.error('Error fetching earnings report:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch earnings report'
+    });
   }
 };
 
-// GET /physio/dashboard
-exports.getDashboardStats = async (req, res) => {
+// GET /physio/me/dashboard
+exports.getPhysioDashboard = async (req, res) => {
   try {
-    const profile = await PhysiotherapistProfile.findOne({ userId: req.user.id })
-      .select('name services averageRating totalConsultations totalEarnings servesAreas');
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id })
+      .select('name specialization averageRating totalConsultations totalEarnings');
 
-    if (!profile) {
-      return res.status(404).json({ success: false, error: 'Profile not found' });
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist profile not found'
+      });
     }
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
 
     const todaysAppointments = await Appointment.countDocuments({
-      physioId: profile._id,
+      physioId: physio._id,
       professionalType: 'physio',
-      appointmentDate: { $gte: today, $lt: tomorrow },
+      appointmentDate: { $gte: today },
       status: { $in: ['confirmed', 'accepted'] }
     });
 
     const pendingAppointments = await Appointment.countDocuments({
-      physioId: profile._id,
+      physioId: physio._id,
       professionalType: 'physio',
       status: 'pending'
-    });
-
-    const startOfWeek = new Date(today);
-    startOfWeek.setDate(today.getDate() - today.getDay());
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-
-    const weeklyAppointments = await Appointment.countDocuments({
-      physioId: profile._id,
-      professionalType: 'physio',
-      appointmentDate: { $gte: startOfWeek, $lte: endOfWeek },
-      status: { $in: ['confirmed', 'accepted', 'completed'] }
     });
 
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const monthlyEarnings = await Commission.aggregate([
       {
         $match: {
-          professionalId: profile._id,
+          professionalId: physio._id,
           professionalType: 'physio',
           createdAt: { $gte: startOfMonth }
         }
@@ -608,146 +1063,334 @@ exports.getDashboardStats = async (req, res) => {
     ]);
 
     const recentAppointments = await Appointment.find({
-      physioId: profile._id,
+      physioId: physio._id,
       professionalType: 'physio'
     })
-      .populate('patientId', 'name age gender')
+      .populate('patientId', 'name')
       .sort({ appointmentDate: -1 })
       .limit(5);
-
-    const threeDaysLater = new Date(today);
-    threeDaysLater.setDate(today.getDate() + 3);
-
-    const upcomingAppointments = await Appointment.find({
-      physioId: profile._id,
-      professionalType: 'physio',
-      appointmentDate: { $gte: today, $lte: threeDaysLater },
-      status: { $in: ['confirmed', 'accepted', 'pending'] }
-    })
-      .populate('patientId', 'name phone')
-      .sort({ appointmentDate: 1 })
-      .limit(10);
 
     return res.json({
       success: true,
       stats: {
-        totalConsultations: profile.totalConsultations || 0,
-        totalEarnings: profile.totalEarnings || 0,
-        averageRating: profile.averageRating || 0,
+        totalConsultations: physio.totalConsultations || 0,
+        totalEarnings: physio.totalEarnings || 0,
+        averageRating: physio.averageRating || 0,
         todaysAppointments,
         pendingAppointments,
-        weeklyAppointments,
         monthlyEarnings: monthlyEarnings[0]?.total || 0
       },
-      profile: {
-        name: profile.name,
-        services: profile.services,
-        servesAreas: profile.servesAreas
-      },
       recentAppointments,
-      upcomingAppointments
+      profile: {
+        name: physio.name,
+        specialization: physio.specialization
+      }
     });
-  } catch (error) {
-    console.error('Error fetching physio dashboard:', error.message);
-    return res.status(500).json({ success: false, error: 'Failed to fetch dashboard data' });
+  } catch (err) {
+    console.error('Error fetching physio dashboard:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch dashboard data'
+    });
   }
 };
 
-// ========== HELPER: calendar availability sync ==========
-async function updateCalendarAvailability(professionalId, professionalType, availability) {
+// ========== ADMIN-ONLY FUNCTIONS ==========
+
+// PUT /physio/:id
+exports.updatePhysio = async (req, res) => {
+  try {
+    const physioId = req.params.id;
+    const updates = req.body;
+
+    delete updates.totalEarnings;
+    delete updates.totalConsultations;
+    delete updates.pendingCommission;
+    delete updates.paidCommission;
+
+    const physio = await PhysiotherapistProfile.findByIdAndUpdate(
+      physioId,
+      updates,
+      { new: true, runValidators: true }
+    ).populate('userId', 'email');
+
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist not found'
+      });
+    }
+
+    if (updates.email && physio.userId) {
+      await User.findByIdAndUpdate(physio.userId, { email: updates.email });
+    }
+
+    if (updates.availability) {
+      try {
+        await updateDoctorInCalendar(physioId, physio);
+      } catch (calendarError) {
+        console.error('Error updating physio in calendar:', calendarError);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Physiotherapist updated successfully',
+      physio
+    });
+  } catch (err) {
+    console.error('Error updating physio:', err.message);
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
+  }
+};
+
+// DELETE /physio/:id
+exports.deletePhysio = async (req, res) => {
+  try {
+    const physio = await PhysiotherapistProfile.findById(req.params.id);
+    if (!physio) {
+      return res.status(404).json({
+        success: false,
+        error: 'Physiotherapist not found'
+      });
+    }
+
+    const upcomingAppointments = await Appointment.countDocuments({
+      physioId: physio._id,
+      professionalType: 'physio',
+      appointmentDate: { $gte: new Date() },
+      status: { $in: ['confirmed', 'accepted', 'pending'] }
+    });
+
+    if (upcomingAppointments > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot delete physiotherapist with upcoming appointments. Cancel appointments first.'
+      });
+    }
+
+    try {
+      await removePhysioFromCalendar(physio._id);
+    } catch (calendarError) {
+      console.error('Error removing physio from calendar:', calendarError);
+    }
+
+    if (physio.userId) {
+      await User.findByIdAndDelete(physio.userId);
+    }
+
+    await PhysiotherapistProfile.findByIdAndDelete(req.params.id);
+
+    return res.json({
+      success: true,
+      message: 'Physiotherapist deleted successfully'
+    });
+  } catch (err) {
+    console.error('Error deleting physio:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to delete physiotherapist'
+    });
+  }
+};
+
+// POST /physio/bulk
+exports.bulkCreatePhysios = async (req, res) => {
+  const physiosData = req.body;
+
+  if (!physiosData || !Array.isArray(physiosData)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid data format. Expected an array.'
+    });
+  }
+
+  const successfulImports = [];
+  const failedImports = [];
+
+  for (const physioData of physiosData) {
+    try {
+      const userExists = await User.findOne({ email: physioData.email });
+      if (userExists) {
+        throw new Error('User with this email already exists.');
+      }
+
+      const newUser = await User.create({
+        name: physioData.name,
+        email: physioData.email,
+        password: physioData.password || 'temporary123',
+        role: 'physio',
+        phone: physioData.phone
+      });
+
+      const newPhysio = await PhysiotherapistProfile.create({
+        userId: newUser._id,
+        name: physioData.name,
+        email: physioData.email,
+        contactNumber: physioData.phone,
+        specialization: physioData.specialization || ['General Physiotherapy'],
+        qualifications: physioData.qualifications || [],
+        experienceYears: physioData.experienceYears || 0,
+        licenseNumber: physioData.licenseNumber,
+        clinicAddress: {
+          address: physioData.address || '',
+          city: physioData.city || '',
+          state: physioData.state || '',
+          pincode: physioData.pincode || '',
+          location: physioData.location || { type: 'Point', coordinates: [0, 0] }
+        },
+        consultationFee: physioData.consultationFee || 0,
+        homeVisitFee: physioData.homeVisitFee || 0,
+        availability: physioData.availability || [],
+        about: physioData.about || '',
+        services: physioData.services || [],
+        gender: physioData.gender,
+        dateOfBirth: physioData.dateOfBirth ? new Date(physioData.dateOfBirth) : null,
+        bankDetails: physioData.bankDetails,
+        commissionRate: physioData.commissionRate || 20
+      });
+
+      try {
+        await addPhysioToCalendar(newPhysio);
+      } catch (calendarError) {
+        console.error('Error adding physio to calendar during bulk import:', calendarError);
+      }
+
+      successfulImports.push({
+        id: newPhysio._id,
+        name: newPhysio.name,
+        email: newPhysio.email
+      });
+    } catch (err) {
+      failedImports.push({
+        email: physioData.email,
+        reason: err.message
+      });
+    }
+  }
+
+  return res.status(201).json({
+    success: true,
+    message: 'Bulk import process completed.',
+    successfulCount: successfulImports.length,
+    failedCount: failedImports.length,
+    successfulImports,
+    failedImports
+  });
+};
+
+// ========== HELPER FUNCTIONS (calendar) ==========
+
+async function addPhysioToCalendar(physio) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const datesToUpdate = [];
   for (let i = 0; i <= 30; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    d.setHours(0, 0, 0, 0);
-    datesToUpdate.push(d);
+    const date = new Date(today);
+    date.setDate(today.getDate() + i);
+    date.setHours(0, 0, 0, 0);
+    datesToUpdate.push(date);
   }
 
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
+  const targetDate = new Date();
+  const year = targetDate.getFullYear();
+  const month = targetDate.getMonth() + 1;
 
   let calendar = await Calendar.findOne({ year, month });
-  if (!calendar) calendar = new Calendar({ year, month, days: [] });
+  if (!calendar) {
+    calendar = new Calendar({ year, month, days: [] });
+  }
 
-  let updated = false;
+  let needsUpdate = false;
 
-  for (const targetDate of datesToUpdate) {
-    const dateStr = targetDate.toISOString().split('T')[0];
-    const dayName = targetDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-    const dayAvailability = availability?.find((a) => a.day === dayName);
+  for (const targetDateItem of datesToUpdate) {
+    const dateStr = targetDateItem.toISOString().split('T')[0];
+    const dayName = targetDateItem.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+
+    const dayAvailability = physio.availability?.find(a => a.day === dayName);
+    if (!dayAvailability) continue;
 
     const existingDayIndex = calendar.days.findIndex(
-      (d) => new Date(d.date).toISOString().split('T')[0] === dateStr
+      d => new Date(d.date).toISOString().split('T')[0] === dateStr
     );
 
+    const workingHours = dayAvailability.slots.map(slot => ({
+      startTime: slot.startTime,
+      endTime: slot.endTime
+    }));
+
     if (existingDayIndex !== -1) {
-      const day = calendar.days[existingDayIndex];
-      const professionalIndex = day.professionals.findIndex(
-        (p) =>
-          p.professionalId.toString() === professionalId.toString() &&
-          p.professionalType === professionalType
+      const existingDay = calendar.days[existingDayIndex];
+      const isAlreadyAdded = existingDay.professionals.some(
+        p => p.professionalId.toString() === physio._id.toString() && p.professionalType === 'physio'
       );
 
-      if (professionalIndex !== -1) {
-        if (!dayAvailability) {
-          day.professionals.splice(professionalIndex, 1);
-          updated = true;
-        } else {
-          day.professionals[professionalIndex].bookedSlots = dayAvailability.slots.map((slot) => ({
-            startTime: slot.startTime,
-            endTime: slot.endTime,
-            isBooked: false,
-            type: slot.type || 'clinic'
-          }));
-          updated = true;
-        }
-      } else if (dayAvailability) {
-        day.professionals.push({
-          professionalId,
-          professionalType,
-          bookedSlots: dayAvailability.slots.map((slot) => ({
-            startTime: slot.startTime,
-            endTime: slot.endTime,
-            isBooked: false,
-            type: slot.type || 'clinic'
-          })),
+      if (!isAlreadyAdded) {
+        needsUpdate = true;
+        existingDay.professionals.push({
+          professionalId: physio._id,
+          professionalType: 'physio',
+          bookedSlots: [],
           breaks: [],
+          workingHours,
           isAvailable: true
         });
-        updated = true;
       }
-    } else if (dayAvailability) {
+    } else {
+      needsUpdate = true;
       calendar.days.push({
-        date: targetDate,
+        date: targetDateItem,
         dayName: dayName.charAt(0).toUpperCase() + dayName.slice(1),
         isHoliday: false,
-        professionals: [
-          {
-            professionalId,
-            professionalType,
-            bookedSlots: dayAvailability.slots.map((slot) => ({
-              startTime: slot.startTime,
-              endTime: slot.endTime,
-              isBooked: false,
-              type: slot.type || 'clinic'
-            })),
-            breaks: [],
-            isAvailable: true
-          }
-        ]
+        professionals: [{
+          professionalId: physio._id,
+          professionalType: 'physio',
+          bookedSlots: [],
+          breaks: [],
+          workingHours,
+          isAvailable: true
+        }]
       });
-      updated = true;
     }
   }
 
-  if (updated) {
-    calendar.days = calendar.days
-      .filter((day) => day.professionals.length > 0)
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (needsUpdate) {
+    const base = new Date(today);
+    const baseStr = base.toISOString().split('T')[0];
+
+    calendar.days = calendar.days.filter(day => {
+      const dayDate = new Date(day.date);
+      const diffDays = Math.floor((dayDate - base) / (1000 * 60 * 60 * 24));
+      return diffDays >= 0 && diffDays <= 30;
+    });
+
+    calendar.days.sort((a, b) => new Date(a.date) - new Date(b.date));
     await calendar.save();
+  }
+}
+
+async function removePhysioFromCalendar(physioId) {
+  const calendars = await Calendar.find({
+    'days.professionals.professionalId': physioId
+  });
+
+  for (const calendar of calendars) {
+    let updated = false;
+
+    for (const day of calendar.days) {
+      const initialLength = day.professionals.length;
+      day.professionals = day.professionals.filter(
+        p => !(p.professionalId.toString() === physioId.toString() && p.professionalType === 'physio')
+      );
+      if (day.professionals.length !== initialLength) updated = true;
+    }
+
+    calendar.days = calendar.days.filter(day => day.professionals.length > 0);
+
+    if (updated) await calendar.save();
   }
 }

@@ -2,6 +2,7 @@ const Appointment = require('../models/Appointment');
 const Referral = require('../models/Referral');
 const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
+const PathologyProfile = require('../models/PathologyProfile'); // ✅ NEW
 const PatientProfile = require('../models/PatientProfile');
 const Commission = require('../models/Commission');
 const CommissionSettings = require('../models/CommissionSettings');
@@ -26,7 +27,6 @@ exports.createAppointment = async (req, res) => {
       reason
     } = req.body;
 
-    // Validate required fields
     if (!professionalId || !professionalType || !appointmentDate || !startTime) {
       return res.status(400).json({
         success: false,
@@ -45,11 +45,11 @@ exports.createAppointment = async (req, res) => {
 
     const patientId = patientProfile._id;
 
-    // Validate professional type
-    if (!['doctor', 'physio'].includes(professionalType)) {
+    // ✅ UPDATED: include pathology
+    if (!['doctor', 'physio', 'pathology'].includes(professionalType)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid professional type. Must be "doctor" or "physio"'
+        error: 'Invalid professional type. Must be "doctor", "physio" or "pathology"'
       });
     }
 
@@ -61,47 +61,51 @@ exports.createAppointment = async (req, res) => {
       professional = await DoctorProfile.findById(professionalId)
         .populate('userId', 'isVerified isActive');
       if (!professional) {
-        return res.status(404).json({
-          success: false,
-          error: 'Doctor not found'
-        });
+        return res.status(404).json({ success: false, error: 'Doctor not found' });
       }
 
-      // Check if doctor is verified and active
       if (!professional.userId?.isVerified || !professional.userId?.isActive) {
-        return res.status(400).json({
-          success: false,
-          error: 'Doctor is not available for appointments'
-        });
+        return res.status(400).json({ success: false, error: 'Doctor is not available for appointments' });
       }
 
       consultationFee = professional.consultationFee || 0;
       if (type === 'home') {
         consultationFee += (professional.homeVisitFee || 0);
       }
-    } else {
+
+    } else if (professionalType === 'physio') {
       professional = await PhysiotherapistProfile.findById(professionalId)
         .populate('userId', 'isVerified isActive');
       if (!professional) {
-        return res.status(404).json({
-          success: false,
-          error: 'Physiotherapist not found'
-        });
+        return res.status(404).json({ success: false, error: 'Physiotherapist not found' });
       }
 
-      // Check if physio is verified and active
       if (!professional.userId?.isVerified || !professional.userId?.isActive) {
-        return res.status(400).json({
-          success: false,
-          error: 'Physiotherapist is not available for appointments'
-        });
+        return res.status(400).json({ success: false, error: 'Physiotherapist is not available for appointments' });
       }
 
-      // Get appropriate fee
       if (type === 'home') {
         consultationFee = professional.homeVisitFee || 0;
       } else {
         consultationFee = professional.consultationFee || 0;
+      }
+
+    } else {
+      // ✅ NEW: pathology
+      professional = await PathologyProfile.findById(professionalId)
+        .populate('userId', 'isVerified isActive');
+      if (!professional) {
+        return res.status(404).json({ success: false, error: 'Pathology not found' });
+      }
+
+      if (!professional.userId?.isVerified || !professional.userId?.isActive) {
+        return res.status(400).json({ success: false, error: 'Pathology is not available for appointments' });
+      }
+
+      // Adjust fee fields if your PathologyProfile differs
+      consultationFee = professional.consultationFee || 0;
+      if (type === 'home') {
+        consultationFee += (professional.homeVisitFee || 0);
       }
     }
 
@@ -172,21 +176,34 @@ exports.createAppointment = async (req, res) => {
       });
     }
 
-    const commissionRate = professionalType === 'doctor'
-      ? (professional.commissionRate || settings.defaultDoctorCommission)
-      : (professional.commissionRate || settings.defaultPhysioCommission);
+    const commissionRate =
+      professionalType === 'doctor'
+        ? (professional.commissionRate || settings.defaultDoctorCommission)
+        : professionalType === 'physio'
+          ? (professional.commissionRate || settings.defaultPhysioCommission)
+          : (professional.commissionRate || settings.defaultPathologyCommission || settings.defaultDoctorCommission);
 
     const platformCommission = Math.round((consultationFee * commissionRate) / 100);
     const professionalEarning = consultationFee - platformCommission;
 
     // Determine appointment duration
-    const duration = professionalType === 'doctor' ? 30 : 60; // Default 30 mins for doctor, 60 for physio
+    const duration =
+      professionalType === 'doctor' ? 30 :
+      professionalType === 'physio' ? 60 :
+      30; // pathology default
+
+    const idField =
+      professionalType === 'doctor'
+        ? 'doctorId'
+        : professionalType === 'physio'
+          ? 'physioId'
+          : 'pathologyId';
 
     // Create appointment
     const appointment = await Appointment.create({
       referralId,
       patientId,
-      [professionalType === 'doctor' ? 'doctorId' : 'physioId']: professionalId,
+      [idField]: professionalId,
       professionalType,
       appointmentDate: appointmentDateTime,
       startTime,
@@ -218,7 +235,7 @@ exports.createAppointment = async (req, res) => {
       });
     }
 
-    // Create commission record
+    // Commission model mapping
     const professionalModel =
       professionalType === 'doctor'
         ? 'DoctorProfile'
@@ -229,8 +246,8 @@ exports.createAppointment = async (req, res) => {
     await Commission.create({
       appointmentId: appointment._id,
       professionalId,
-      professionalModel,           // ✅ add this
-      professionalType,            // keep existing
+      professionalModel,
+      professionalType,
       patientId,
       consultationFee,
       platformCommission,
@@ -244,7 +261,6 @@ exports.createAppointment = async (req, res) => {
       },
       createdBy: req.user.id
     });
-
 
     // Update calendar
     await updateCalendarForAppointment(appointment);
@@ -284,46 +300,47 @@ exports.getAppointments = async (req, res) => {
 
     // Role-based filtering
     switch (req.user.role) {
-      case 'patient':
-        // Get patient profile ID
+      case 'patient': {
         const patientProfile = await PatientProfile.findOne({ userId: req.user.id });
         if (!patientProfile) {
-          return res.status(404).json({
-            success: false,
-            error: 'Patient profile not found'
-          });
+          return res.status(404).json({ success: false, error: 'Patient profile not found' });
         }
         filter.patientId = patientProfile._id;
         break;
+      }
 
-      case 'doctor':
-        // Get doctor profile ID
+      case 'doctor': {
         const doctorProfile = await DoctorProfile.findOne({ userId: req.user.id });
         if (!doctorProfile) {
-          return res.status(404).json({
-            success: false,
-            error: 'Doctor profile not found'
-          });
+          return res.status(404).json({ success: false, error: 'Doctor profile not found' });
         }
         filter.doctorId = doctorProfile._id;
         filter.professionalType = 'doctor';
         break;
+      }
 
-      case 'physio':
-        // Get physio profile ID
+      case 'physio': {
         const physioProfile = await PhysiotherapistProfile.findOne({ userId: req.user.id });
         if (!physioProfile) {
-          return res.status(404).json({
-            success: false,
-            error: 'Physiotherapist profile not found'
-          });
+          return res.status(404).json({ success: false, error: 'Physiotherapist profile not found' });
         }
         filter.physioId = physioProfile._id;
         filter.professionalType = 'physio';
         break;
+      }
+
+      // ✅ NEW
+      case 'pathology': {
+        const pathologyProfile = await PathologyProfile.findOne({ userId: req.user.id });
+        if (!pathologyProfile) {
+          return res.status(404).json({ success: false, error: 'Pathology profile not found' });
+        }
+        filter.pathologyId = pathologyProfile._id;
+        filter.professionalType = 'pathology';
+        break;
+      }
 
       case 'admin':
-        // Admin can see all
         break;
 
       default:
@@ -333,45 +350,38 @@ exports.getAppointments = async (req, res) => {
         });
     }
 
-    // Apply filters
     if (status) filter.status = status;
     if (type) filter.type = type;
     if (professionalType) filter.professionalType = professionalType;
+
     if (startDate && endDate) {
       const start = new Date(startDate);
       start.setHours(0, 0, 0, 0);
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
 
-      filter.appointmentDate = {
-        $gte: start,
-        $lte: end
-      };
+      filter.appointmentDate = { $gte: start, $lte: end };
     }
 
-    // Calculate pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // Base query
     let query = Appointment.find(filter)
       .sort({ appointmentDate: 1, startTime: 1 })
       .skip(skip)
       .limit(parseInt(limit));
 
-    // Populate based on role
     if (req.user.role === 'patient') {
       query = query
         .populate('doctorId', 'name specialization consultationFee clinicAddress')
-        .populate('physioId', 'name services consultationFee clinicAddress');
-    } else if (req.user.role === 'doctor' || req.user.role === 'physio' || req.user.role === 'admin') {
+        .populate('physioId', 'name services consultationFee clinicAddress')
+        .populate('pathologyId', 'name consultationFee clinicAddress'); // adjust fields if needed
+    } else if (['doctor', 'physio', 'pathology', 'admin'].includes(req.user.role)) {
       query = query.populate('patientId', 'name phone age gender');
     }
 
     const appointments = await query;
-
     const total = await Appointment.countDocuments(filter);
 
-    // Get stats for dashboard
     let stats = {};
     if (req.user.role === 'patient' || req.user.role === 'admin') {
       const today = new Date();
@@ -421,8 +431,6 @@ exports.getAppointmentById = async (req, res) => {
 
     const appointment = await Appointment.findById(id)
       .populate('patientId', 'name phone age gender bloodGroup address')
-      // .populate('doctorId', 'name specialization qualifications consultationFee homeVisitFee clinicAddress')
-      // .populate('physioId', 'name services consultationFee homeVisitFee clinicAddress')
       .populate('referralId', 'requirement symptoms')
       .populate('prescriptionId', 'diagnosis medicines exercises instructions');
 
@@ -433,7 +441,6 @@ exports.getAppointmentById = async (req, res) => {
       });
     }
 
-    // Authorization check
     const isAuthorized = await canViewAppointment(req.user, appointment);
     if (!isAuthorized) {
       return res.status(403).json({
@@ -442,7 +449,6 @@ exports.getAppointmentById = async (req, res) => {
       });
     }
 
-    // Get related data
     let invoice = null;
     if (appointment.paymentStatus === 'paid' || appointment.status === 'completed') {
       invoice = await Invoice.findOne({ appointmentId: appointment._id });
@@ -471,30 +477,19 @@ exports.updateAppointmentStatus = async (req, res) => {
     const { status, cancellationReason, notes } = req.body;
 
     if (!status) {
-      return res.status(400).json({
-        success: false,
-        error: 'Status is required'
-      });
+      return res.status(400).json({ success: false, error: 'Status is required' });
     }
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
-      return res.status(404).json({
-        success: false,
-        error: 'Appointment not found'
-      });
+      return res.status(404).json({ success: false, error: 'Appointment not found' });
     }
 
-    // Authorization check
     const canUpdate = await canUpdateStatus(req.user, appointment, status);
     if (!canUpdate) {
-      return res.status(403).json({
-        success: false,
-        error: 'Not authorized to update this appointment'
-      });
+      return res.status(403).json({ success: false, error: 'Not authorized to update this appointment' });
     }
 
-    // Validate status transition
     if (!isValidStatusTransition(appointment.status, status)) {
       return res.status(400).json({
         success: false,
@@ -505,16 +500,11 @@ exports.updateAppointmentStatus = async (req, res) => {
     const oldStatus = appointment.status;
     appointment.status = status;
 
-    // Handle specific status updates
     if (status === 'cancelled') {
       appointment.cancellationReason = cancellationReason;
       appointment.cancelledBy = req.user.role;
       appointment.cancelledAt = new Date();
-
-      // Calculate cancellation fee
       appointment.cancellationFee = calculateCancellationFee(appointment);
-
-      // Update calendar
       await updateCalendarForCancellation(appointment);
     }
 
@@ -523,17 +513,13 @@ exports.updateAppointmentStatus = async (req, res) => {
       appointment.respondedAt = new Date();
 
       if (status === 'accepted') {
-        appointment.status = 'confirmed'; // Change accepted to confirmed
+        appointment.status = 'confirmed';
       }
     }
 
     if (status === 'completed') {
       appointment.actualEndTime = new Date();
-
-      // Update professional stats
       await updateProfessionalStats(appointment);
-
-      // Create invoice
       await createInvoiceForAppointment(appointment);
     }
 
@@ -547,8 +533,6 @@ exports.updateAppointmentStatus = async (req, res) => {
     }
 
     await appointment.save();
-
-    // Send notification
     await sendStatusUpdateNotification(appointment, oldStatus, appointment.status);
 
     res.json({
@@ -573,40 +557,36 @@ exports.cancelAppointment = async (req, res) => {
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
-      return res.status(404).json({
-        success: false,
-        error: 'Appointment not found'
-      });
+      return res.status(404).json({ success: false, error: 'Appointment not found' });
     }
 
-    // Check if appointment can be cancelled
     if (appointment.status === 'cancelled') {
-      return res.status(400).json({
-        success: false,
-        error: 'Appointment is already cancelled'
-      });
+      return res.status(400).json({ success: false, error: 'Appointment is already cancelled' });
     }
 
     if (appointment.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        error: 'Cannot cancel completed appointment'
-      });
+      return res.status(400).json({ success: false, error: 'Cannot cancel completed appointment' });
     }
 
-    // Check authorization
     let canCancel = false;
 
     if (req.user.role === 'patient') {
       const patientProfile = await PatientProfile.findOne({ userId: req.user.id });
       canCancel = patientProfile && appointment.patientId.toString() === patientProfile._id.toString();
-    } else if (req.user.role === 'doctor' || req.user.role === 'physio') {
-      const professionalProfile = req.user.role === 'doctor'
-        ? await DoctorProfile.findOne({ userId: req.user.id })
-        : await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    } else if (['doctor', 'physio', 'pathology'].includes(req.user.role)) {
+      const professionalProfile =
+        req.user.role === 'doctor'
+          ? await DoctorProfile.findOne({ userId: req.user.id })
+          : req.user.role === 'physio'
+            ? await PhysiotherapistProfile.findOne({ userId: req.user.id })
+            : await PathologyProfile.findOne({ userId: req.user.id });
 
       if (professionalProfile) {
-        const professionalField = req.user.role === 'doctor' ? 'doctorId' : 'physioId';
+        const professionalField =
+          req.user.role === 'doctor' ? 'doctorId' :
+          req.user.role === 'physio' ? 'physioId' :
+          'pathologyId';
+
         canCancel = appointment[professionalField]?.toString() === professionalProfile._id.toString();
       }
     } else if (req.user.role === 'admin') {
@@ -614,13 +594,9 @@ exports.cancelAppointment = async (req, res) => {
     }
 
     if (!canCancel) {
-      return res.status(403).json({
-        success: false,
-        error: 'Not authorized to cancel this appointment'
-      });
+      return res.status(403).json({ success: false, error: 'Not authorized to cancel this appointment' });
     }
 
-    // Calculate cancellation time difference
     const appointmentTime = new Date(appointment.appointmentDate);
     const startTimeParts = appointment.startTime.split(':');
     appointmentTime.setHours(parseInt(startTimeParts[0]), parseInt(startTimeParts[1]), 0, 0);
@@ -629,13 +605,9 @@ exports.cancelAppointment = async (req, res) => {
     const hoursDiff = (appointmentTime - now) / (1000 * 60 * 60);
 
     if (hoursDiff < 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Cannot cancel past appointment'
-      });
+      return res.status(400).json({ success: false, error: 'Cannot cancel past appointment' });
     }
 
-    // Update appointment
     appointment.status = 'cancelled';
     appointment.cancellationReason = reason || 'Cancelled by user';
     appointment.cancelledBy = req.user.role;
@@ -643,11 +615,7 @@ exports.cancelAppointment = async (req, res) => {
     appointment.cancellationFee = calculateCancellationFee(appointment);
 
     await appointment.save();
-
-    // Update calendar
     await updateCalendarForCancellation(appointment);
-
-    // Send notification
     await sendCancellationNotification(appointment);
 
     res.json({
@@ -659,10 +627,7 @@ exports.cancelAppointment = async (req, res) => {
     });
   } catch (error) {
     console.error('Error cancelling appointment:', error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -673,75 +638,50 @@ exports.rescheduleAppointment = async (req, res) => {
     const { newDate, newTime, reason } = req.body;
 
     if (!newDate || !newTime) {
-      return res.status(400).json({
-        success: false,
-        error: 'New date and time are required'
-      });
+      return res.status(400).json({ success: false, error: 'New date and time are required' });
     }
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
-      return res.status(404).json({
-        success: false,
-        error: 'Appointment not found'
-      });
+      return res.status(404).json({ success: false, error: 'Appointment not found' });
     }
 
-    // Check if appointment can be rescheduled
     if (appointment.status === 'cancelled' || appointment.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        error: `Cannot reschedule ${appointment.status} appointment`
-      });
+      return res.status(400).json({ success: false, error: `Cannot reschedule ${appointment.status} appointment` });
     }
 
     if (appointment.rescheduleCount >= 2) {
-      return res.status(400).json({
-        success: false,
-        error: 'Maximum reschedule limit reached'
-      });
+      return res.status(400).json({ success: false, error: 'Maximum reschedule limit reached' });
     }
 
-    // Check authorization (only patient can reschedule)
     if (req.user.role !== 'patient') {
-      return res.status(403).json({
-        success: false,
-        error: 'Only patients can reschedule appointments'
-      });
+      return res.status(403).json({ success: false, error: 'Only patients can reschedule appointments' });
     }
 
     const patientProfile = await PatientProfile.findOne({ userId: req.user.id });
     if (!patientProfile || appointment.patientId.toString() !== patientProfile._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        error: 'Not authorized to reschedule this appointment'
-      });
+      return res.status(403).json({ success: false, error: 'Not authorized to reschedule this appointment' });
     }
 
-    // Validate new date and time
     const newDateTime = new Date(newDate);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     if (newDateTime < today) {
-      return res.status(400).json({
-        success: false,
-        error: 'New appointment date cannot be in the past'
-      });
+      return res.status(400).json({ success: false, error: 'New appointment date cannot be in the past' });
     }
 
     const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
     if (!timeRegex.test(newTime)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid time format. Use HH:MM (24-hour format)'
-      });
+      return res.status(400).json({ success: false, error: 'Invalid time format. Use HH:MM (24-hour format)' });
     }
 
-    // Check availability for new slot
-    const professionalId = appointment.professionalType === 'doctor'
-      ? appointment.doctorId
-      : appointment.physioId;
+    const professionalId =
+      appointment.professionalType === 'doctor'
+        ? appointment.doctorId
+        : appointment.professionalType === 'physio'
+          ? appointment.physioId
+          : appointment.pathologyId;
 
     const isAvailable = await checkAvailability(
       professionalId,
@@ -751,13 +691,9 @@ exports.rescheduleAppointment = async (req, res) => {
     );
 
     if (!isAvailable) {
-      return res.status(400).json({
-        success: false,
-        error: 'Selected time slot is not available'
-      });
+      return res.status(400).json({ success: false, error: 'Selected time slot is not available' });
     }
 
-    // Store previous appointment details
     const previousAppointment = {
       originalDate: appointment.appointmentDate,
       originalTime: appointment.startTime,
@@ -768,7 +704,6 @@ exports.rescheduleAppointment = async (req, res) => {
     appointment.previousAppointments = appointment.previousAppointments || [];
     appointment.previousAppointments.push(previousAppointment);
 
-    // Update appointment
     const oldDate = appointment.appointmentDate;
     const oldTime = appointment.startTime;
 
@@ -780,10 +715,7 @@ exports.rescheduleAppointment = async (req, res) => {
 
     await appointment.save();
 
-    // Update calendar
     await updateCalendarForReschedule(appointment, oldDate, oldTime);
-
-    // Send notification
     await sendRescheduleNotification(appointment, oldDate, oldTime);
 
     res.json({
@@ -794,10 +726,7 @@ exports.rescheduleAppointment = async (req, res) => {
     });
   } catch (error) {
     console.error('Error rescheduling appointment:', error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -809,38 +738,34 @@ exports.completeAppointment = async (req, res) => {
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
-      return res.status(404).json({
-        success: false,
-        error: 'Appointment not found'
-      });
+      return res.status(404).json({ success: false, error: 'Appointment not found' });
     }
 
-    // Check if appointment can be completed
     if (appointment.status === 'cancelled') {
-      return res.status(400).json({
-        success: false,
-        error: 'Cannot complete cancelled appointment'
-      });
+      return res.status(400).json({ success: false, error: 'Cannot complete cancelled appointment' });
     }
 
     if (appointment.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        error: 'Appointment is already completed'
-      });
+      return res.status(400).json({ success: false, error: 'Appointment is already completed' });
     }
 
-    // Check authorization (only professional can complete)
     let canComplete = false;
     let professionalProfile = null;
 
-    if (req.user.role === 'doctor' || req.user.role === 'physio') {
-      professionalProfile = req.user.role === 'doctor'
-        ? await DoctorProfile.findOne({ userId: req.user.id })
-        : await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (['doctor', 'physio', 'pathology'].includes(req.user.role)) {
+      professionalProfile =
+        req.user.role === 'doctor'
+          ? await DoctorProfile.findOne({ userId: req.user.id })
+          : req.user.role === 'physio'
+            ? await PhysiotherapistProfile.findOne({ userId: req.user.id })
+            : await PathologyProfile.findOne({ userId: req.user.id });
 
       if (professionalProfile) {
-        const professionalField = req.user.role === 'doctor' ? 'doctorId' : 'physioId';
+        const professionalField =
+          req.user.role === 'doctor' ? 'doctorId' :
+          req.user.role === 'physio' ? 'physioId' :
+          'pathologyId';
+
         canComplete = appointment[professionalField]?.toString() === professionalProfile._id.toString();
       }
     } else if (req.user.role === 'admin') {
@@ -848,13 +773,9 @@ exports.completeAppointment = async (req, res) => {
     }
 
     if (!canComplete) {
-      return res.status(403).json({
-        success: false,
-        error: 'Only the assigned professional can complete this appointment'
-      });
+      return res.status(403).json({ success: false, error: 'Only the assigned professional can complete this appointment' });
     }
 
-    // Update appointment
     appointment.status = 'completed';
     appointment.actualEndTime = new Date();
     appointment.professionalNotes = notes;
@@ -866,13 +787,8 @@ exports.completeAppointment = async (req, res) => {
 
     await appointment.save();
 
-    // Update professional stats
     await updateProfessionalStats(appointment);
-
-    // Create invoice
     await createInvoiceForAppointment(appointment);
-
-    // Send notification
     await sendCompletionNotification(appointment);
 
     res.json({
@@ -883,25 +799,30 @@ exports.completeAppointment = async (req, res) => {
     });
   } catch (error) {
     console.error('Error completing appointment:', error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
 // ========== HELPER FUNCTIONS ==========
 
-// Check availability for appointment slot
 async function checkAvailability(professionalId, professionalType, date, time) {
   try {
     const appointmentDate = new Date(date);
+
+    const idField =
+      professionalType === 'doctor' ? 'doctorId' :
+      professionalType === 'physio' ? 'physioId' :
+      'pathologyId';
+
+    const dayStart = new Date(appointmentDate);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const dayEnd = new Date(appointmentDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
     const appointments = await Appointment.find({
-      [professionalType === 'doctor' ? 'doctorId' : 'physioId']: professionalId,
-      appointmentDate: {
-        $gte: new Date(appointmentDate.setHours(0, 0, 0, 0)),
-        $lt: new Date(appointmentDate.setHours(23, 59, 59, 999))
-      },
+      [idField]: professionalId,
+      appointmentDate: { $gte: dayStart, $lt: dayEnd },
       startTime: time,
       status: { $in: ['pending', 'confirmed', 'accepted', 'in_progress'] }
     });
@@ -931,10 +852,15 @@ async function canViewAppointment(user, appointment) {
     return physioProfile && appointment.physioId?.toString() === physioProfile._id.toString();
   }
 
+  // ✅ NEW
+  if (user.role === 'pathology') {
+    const pathologyProfile = await PathologyProfile.findOne({ userId: user.id });
+    return pathologyProfile && appointment.pathologyId?.toString() === pathologyProfile._id.toString();
+  }
+
   return false;
 }
 
-// Check if user can update appointment status
 async function canUpdateStatus(user, appointment, newStatus) {
   if (user.role === 'admin') return true;
 
@@ -943,8 +869,6 @@ async function canUpdateStatus(user, appointment, newStatus) {
     if (!patientProfile || appointment.patientId.toString() !== patientProfile._id.toString()) {
       return false;
     }
-
-    // Patients can only cancel or reschedule their own appointments
     return ['cancelled', 'rescheduled'].includes(newStatus);
   }
 
@@ -953,8 +877,6 @@ async function canUpdateStatus(user, appointment, newStatus) {
     if (!doctorProfile || appointment.doctorId?.toString() !== doctorProfile._id.toString()) {
       return false;
     }
-
-    // Doctors can accept, reject, complete, or cancel appointments
     return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
   }
 
@@ -963,31 +885,36 @@ async function canUpdateStatus(user, appointment, newStatus) {
     if (!physioProfile || appointment.physioId?.toString() !== physioProfile._id.toString()) {
       return false;
     }
+    return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
+  }
 
-    // Physios can accept, reject, complete, or cancel appointments
+  // ✅ NEW
+  if (user.role === 'pathology') {
+    const pathologyProfile = await PathologyProfile.findOne({ userId: user.id });
+    if (!pathologyProfile || appointment.pathologyId?.toString() !== pathologyProfile._id.toString()) {
+      return false;
+    }
     return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
   }
 
   return false;
 }
 
-// Validate status transition
 function isValidStatusTransition(oldStatus, newStatus) {
   const validTransitions = {
     'pending': ['accepted', 'rejected', 'cancelled'],
     'accepted': ['confirmed', 'cancelled'],
     'confirmed': ['in_progress', 'completed', 'cancelled'],
     'in_progress': ['completed', 'cancelled'],
-    'completed': [], // Cannot change from completed
-    'cancelled': [], // Cannot change from cancelled
-    'rejected': [], // Cannot change from rejected
+    'completed': [],
+    'cancelled': [],
+    'rejected': [],
     'rescheduled': ['confirmed', 'cancelled']
   };
 
   return validTransitions[oldStatus]?.includes(newStatus) || false;
 }
 
-// Calculate cancellation fee
 function calculateCancellationFee(appointment) {
   if (appointment.status === 'completed') return 0;
 
@@ -998,16 +925,13 @@ function calculateCancellationFee(appointment) {
 
   const hoursDiff = (appointmentTime - now) / (1000 * 60 * 60);
 
-  // Get cancellation policy
-  // Default policy: 0% if >24h, 25% if 12-24h, 50% if 6-12h, 75% if 2-6h, 100% if <2h
   if (hoursDiff > 24) return 0;
   if (hoursDiff > 12) return appointment.consultationFee * 0.25;
   if (hoursDiff > 6) return appointment.consultationFee * 0.50;
   if (hoursDiff > 2) return appointment.consultationFee * 0.75;
-  return appointment.consultationFee; // No show or less than 2 hours
+  return appointment.consultationFee;
 }
 
-// Update professional stats after appointment completion
 async function updateProfessionalStats(appointment) {
   try {
     const updateFields = {
@@ -1020,27 +944,41 @@ async function updateProfessionalStats(appointment) {
 
     if (appointment.professionalType === 'doctor') {
       await DoctorProfile.findByIdAndUpdate(appointment.doctorId, updateFields);
-    } else {
+    } else if (appointment.professionalType === 'physio') {
       await PhysiotherapistProfile.findByIdAndUpdate(appointment.physioId, updateFields);
+    } else {
+      await PathologyProfile.findByIdAndUpdate(appointment.pathologyId, updateFields);
     }
   } catch (error) {
     console.error('Error updating professional stats:', error);
   }
 }
 
-// Create invoice for completed appointment
 async function createInvoiceForAppointment(appointment) {
   try {
-    // Check if invoice already exists
     const existingInvoice = await Invoice.findOne({ appointmentId: appointment._id });
     if (existingInvoice) return existingInvoice;
+
+    const label =
+      appointment.professionalType === 'doctor'
+        ? 'Doctor Consultation'
+        : appointment.professionalType === 'physio'
+          ? 'Physio Consultation'
+          : 'Pathology Appointment';
+
+    const professionalId =
+      appointment.professionalType === 'doctor'
+        ? appointment.doctorId
+        : appointment.professionalType === 'physio'
+          ? appointment.physioId
+          : appointment.pathologyId;
 
     const invoice = await Invoice.create({
       invoiceType: 'appointment',
       appointmentId: appointment._id,
       patientId: appointment.patientId,
       items: [{
-        description: `${appointment.professionalType === 'doctor' ? 'Doctor' : 'physio'} Consultation`,
+        description: label,
         quantity: 1,
         unitPrice: appointment.consultationFee,
         amount: appointment.consultationFee
@@ -1048,13 +986,13 @@ async function createInvoiceForAppointment(appointment) {
       subtotal: appointment.consultationFee,
       tax: 0,
       totalAmount: appointment.consultationFee,
-      amountPaid: appointment.consultationFee, // Assuming paid on booking
+      amountPaid: appointment.consultationFee,
       balanceDue: 0,
       status: 'paid',
       paymentMethod: 'online',
       commissionIncluded: true,
       commissionAmount: appointment.platformCommission,
-      professionalId: appointment.professionalType === 'doctor' ? appointment.doctorId : appointment.physioId,
+      professionalId,
       professionalType: appointment.professionalType
     });
 
@@ -1094,11 +1032,9 @@ async function updateCalendarForAppointment(appointment) {
 
     const apptKey = utcYMD(apptDate);
 
-    // find day by UTC date (string compare), without ISO
     let day = calendar.days.find(d => utcYMD(new Date(d.date)) === apptKey);
 
     if (!day) {
-      // store day.date at UTC midnight to normalize matching
       const midnightUTC = new Date(Date.UTC(
         apptDate.getUTCFullYear(),
         apptDate.getUTCMonth(),
@@ -1121,7 +1057,13 @@ async function updateCalendarForAppointment(appointment) {
       calendar.days.push(day);
     }
 
-    const professionalField = appointment.professionalType === "doctor" ? "doctorId" : "physioId";
+    const professionalField =
+      appointment.professionalType === "doctor"
+        ? "doctorId"
+        : appointment.professionalType === "physio"
+          ? "physioId"
+          : "pathologyId";
+
     const professionalId = appointment[professionalField];
 
     let prof = day.professionals.find(p =>
@@ -1135,13 +1077,12 @@ async function updateCalendarForAppointment(appointment) {
         professionalType: appointment.professionalType,
         bookedSlots: [],
         breaks: [],
-        workingHours: [],   // keep if your schema expects it
+        workingHours: [],
         isAvailable: true
       };
       day.professionals.push(prof);
     }
 
-    // Prevent duplicates if function runs twice
     const exists = prof.bookedSlots?.some(bs =>
       bs.appointmentId?.toString() === appointment._id.toString()
     );
@@ -1164,9 +1105,6 @@ async function updateCalendarForAppointment(appointment) {
   }
 }
 
-
-
-// Update calendar for cancelled appointment
 async function updateCalendarForCancellation(appointment) {
   try {
     const appointmentDate = new Date(appointment.appointmentDate);
@@ -1186,7 +1124,13 @@ async function updateCalendarForCancellation(appointment) {
 
     if (!day) return;
 
-    const professionalField = appointment.professionalType === 'doctor' ? 'doctorId' : 'physioId';
+    const professionalField =
+      appointment.professionalType === 'doctor'
+        ? 'doctorId'
+        : appointment.professionalType === 'physio'
+          ? 'physioId'
+          : 'pathologyId';
+
     const professionalId = appointment[professionalField];
 
     const professional = day.professionals.find(
@@ -1196,7 +1140,6 @@ async function updateCalendarForCancellation(appointment) {
 
     if (!professional) return;
 
-    // Remove the booked slot
     professional.bookedSlots = professional.bookedSlots.filter(
       slot => slot.appointmentId.toString() !== appointment._id.toString()
     );
@@ -1207,32 +1150,27 @@ async function updateCalendarForCancellation(appointment) {
   }
 }
 
-// Update calendar for rescheduled appointment
 async function updateCalendarForReschedule(appointment, oldDate, oldTime) {
   try {
-    // Remove from old slot
     await updateCalendarForCancellation({
       ...appointment.toObject(),
       appointmentDate: oldDate,
       startTime: oldTime
     });
 
-    // Add to new slot
     await updateCalendarForAppointment(appointment);
   } catch (error) {
     console.error('Error updating calendar for reschedule:', error);
   }
 }
 
-// Send appointment notifications
 async function sendAppointmentNotifications(appointment, professional, patientProfile) {
   try {
     const professionalUserId = professional?.userId?._id || professional?.userId;
 
-    // Patient notification
     await Notification.create({
       userId: patientProfile.userId,
-      userRole: 'patient', // ✅ REQUIRED
+      userRole: 'patient',
       title: 'Appointment Created',
       message: `Your appointment with ${professional.name} is scheduled for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
       type: 'appointment',
@@ -1241,10 +1179,9 @@ async function sendAppointmentNotifications(appointment, professional, patientPr
       relatedEntityId: appointment._id
     });
 
-    // Professional notification
     await Notification.create({
       userId: professionalUserId,
-      userRole: appointment.professionalType, // ✅ 'doctor' or 'physio'
+      userRole: appointment.professionalType, // doctor | physio | pathology
       title: 'New Appointment Request',
       message: `New appointment request from ${patientProfile.name} for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
       type: 'appointment',
@@ -1258,8 +1195,6 @@ async function sendAppointmentNotifications(appointment, professional, patientPr
   }
 }
 
-
-// Send status update notification
 async function sendStatusUpdateNotification(appointment, oldStatus, newStatus) {
   try {
     const statusMessages = {
@@ -1275,7 +1210,6 @@ async function sendStatusUpdateNotification(appointment, oldStatus, newStatus) {
     const message = statusMessages[newStatus];
     if (!message) return;
 
-    // Get patient user ID
     const patientProfile = await PatientProfile.findById(appointment.patientId);
     if (!patientProfile) return;
 
@@ -1294,23 +1228,23 @@ async function sendStatusUpdateNotification(appointment, oldStatus, newStatus) {
   }
 }
 
-// Send cancellation notification
 async function sendCancellationNotification(appointment) {
   try {
-    // Get professional user ID
     let professionalUserId = null;
+
     if (appointment.professionalType === 'doctor') {
       const doctor = await DoctorProfile.findById(appointment.doctorId);
       professionalUserId = doctor?.userId;
-    } else {
+    } else if (appointment.professionalType === 'physio') {
       const physio = await PhysiotherapistProfile.findById(appointment.physioId);
       professionalUserId = physio?.userId;
+    } else {
+      const pathology = await PathologyProfile.findById(appointment.pathologyId);
+      professionalUserId = pathology?.userId;
     }
 
-    // Get patient user ID
     const patientProfile = await PatientProfile.findById(appointment.patientId);
 
-    // Notify professional
     if (professionalUserId) {
       await Notification.create({
         userId: professionalUserId,
@@ -1323,7 +1257,6 @@ async function sendCancellationNotification(appointment) {
       });
     }
 
-    // Notify patient
     if (patientProfile) {
       await Notification.create({
         userId: patientProfile.userId,
@@ -1341,25 +1274,25 @@ async function sendCancellationNotification(appointment) {
   }
 }
 
-// Send reschedule notification
 async function sendRescheduleNotification(appointment, oldDate, oldTime) {
   try {
-    // Get professional user ID
     let professionalUserId = null;
+
     if (appointment.professionalType === 'doctor') {
       const doctor = await DoctorProfile.findById(appointment.doctorId);
       professionalUserId = doctor?.userId;
-    } else {
+    } else if (appointment.professionalType === 'physio') {
       const physio = await PhysiotherapistProfile.findById(appointment.physioId);
       professionalUserId = physio?.userId;
+    } else {
+      const pathology = await PathologyProfile.findById(appointment.pathologyId);
+      professionalUserId = pathology?.userId;
     }
 
-    // Get patient user ID
     const patientProfile = await PatientProfile.findById(appointment.patientId);
 
     const newDateStr = appointment.appointmentDate.toLocaleDateString();
 
-    // Notify professional
     if (professionalUserId) {
       await Notification.create({
         userId: professionalUserId,
@@ -1377,10 +1310,8 @@ async function sendRescheduleNotification(appointment, oldDate, oldTime) {
   }
 }
 
-// Send completion notification
 async function sendCompletionNotification(appointment) {
   try {
-    // Get patient user ID
     const patientProfile = await PatientProfile.findById(appointment.patientId);
     if (!patientProfile) return;
 

@@ -3,7 +3,6 @@ const router = express.Router();
 const calendarController = require('../controllers/calendarController');
 const { protect, authorize } = require('../middlewares/auth');
 
-// ========== PROTECTED ROUTES ==========
 router.use(protect);
 
 // Get calendar view (past/current/future months)
@@ -14,8 +13,6 @@ router.get('/professional-schedule', calendarController.getProfessionalSchedule)
 
 // Get available slots for booking
 router.get('/available-slots', calendarController.getAvailableSlots);
-
-// ========== PROFESSIONAL SCHEDULE MANAGEMENT ==========
 
 // Update availability (mark day available/unavailable)
 router.put('/availability',
@@ -32,14 +29,10 @@ router.delete('/break/:id',
   calendarController.removeBreak
 );
 
-// ========== APPOINTMENT BOOKING ==========
-
 // Book a time slot
 router.post('/book-slot', 
   calendarController.bookSlot
 );
-
-// ========== ADMIN CALENDAR MANAGEMENT ==========
 
 // Initialize calendar for specific month
 router.post('/initialize', 
@@ -73,7 +66,6 @@ router.post('/manual-sync',
   }
 );
 
-// Fix calendar inconsistencies
 // Access: Admin only
 router.post('/fix-inconsistencies', 
   
@@ -182,7 +174,6 @@ router.get('/system-status',
   }
 );
 
-// Get detailed calendar info for specific month
 // Access: Admin only
 router.get('/month-details/:year/:month', 
   
@@ -296,7 +287,6 @@ router.get('/month-details/:year/:month',
   }
 );
 
-// Export calendar data for backup/analytics
 // Access: Admin only
 router.get('/export/:year/:month', 
   
@@ -394,9 +384,7 @@ router.get('/export/:year/:month',
   }
 );
 
-// ========== HEALTH CHECK ENDPOINTS ==========
 
-// Calendar health check
 // Access: Admin only
 router.get('/health', 
   
