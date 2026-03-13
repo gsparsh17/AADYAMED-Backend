@@ -839,23 +839,23 @@ async function canViewAppointment(user, appointment) {
 
   if (user.role === 'patient') {
     const patientProfile = await PatientProfile.findOne({ userId: user.id });
-    return patientProfile && appointment.patientId.toString() === patientProfile._id.toString();
+    return patientProfile && (appointment.patientId?._id || appointment.patientId)?.toString() === patientProfile._id.toString();
   }
 
   if (user.role === 'doctor') {
     const doctorProfile = await DoctorProfile.findOne({ userId: user.id });
-    return doctorProfile && appointment.doctorId?.toString() === doctorProfile._id.toString();
+    return doctorProfile && (appointment.doctorId?._id || appointment.doctorId)?.toString() === doctorProfile._id.toString();
   }
 
   if (user.role === 'physio') {
     const physioProfile = await PhysiotherapistProfile.findOne({ userId: user.id });
-    return physioProfile && appointment.physioId?.toString() === physioProfile._id.toString();
+    return physioProfile && (appointment.physioId?._id || appointment.physioId)?.toString() === physioProfile._id.toString();
   }
 
   // ✅ NEW
   if (user.role === 'pathology') {
     const pathologyProfile = await PathologyProfile.findOne({ userId: user.id });
-    return pathologyProfile && appointment.pathologyId?.toString() === pathologyProfile._id.toString();
+    return pathologyProfile && (appointment.pathologyId?._id || appointment.pathologyId)?.toString() === pathologyProfile._id.toString();
   }
 
   return false;
@@ -866,7 +866,7 @@ async function canUpdateStatus(user, appointment, newStatus) {
 
   if (user.role === 'patient') {
     const patientProfile = await PatientProfile.findOne({ userId: user.id });
-    if (!patientProfile || appointment.patientId.toString() !== patientProfile._id.toString()) {
+    if (!patientProfile || (appointment.patientId?._id || appointment.patientId)?.toString() !== patientProfile._id.toString()) {
       return false;
     }
     return ['cancelled', 'rescheduled'].includes(newStatus);
@@ -874,7 +874,7 @@ async function canUpdateStatus(user, appointment, newStatus) {
 
   if (user.role === 'doctor') {
     const doctorProfile = await DoctorProfile.findOne({ userId: user.id });
-    if (!doctorProfile || appointment.doctorId?.toString() !== doctorProfile._id.toString()) {
+    if (!doctorProfile || (appointment.doctorId?._id || appointment.doctorId)?.toString() !== doctorProfile._id.toString()) {
       return false;
     }
     return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
@@ -882,7 +882,7 @@ async function canUpdateStatus(user, appointment, newStatus) {
 
   if (user.role === 'physio') {
     const physioProfile = await PhysiotherapistProfile.findOne({ userId: user.id });
-    if (!physioProfile || appointment.physioId?.toString() !== physioProfile._id.toString()) {
+    if (!physioProfile || (appointment.physioId?._id || appointment.physioId)?.toString() !== physioProfile._id.toString()) {
       return false;
     }
     return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
@@ -891,7 +891,7 @@ async function canUpdateStatus(user, appointment, newStatus) {
   // ✅ NEW
   if (user.role === 'pathology') {
     const pathologyProfile = await PathologyProfile.findOne({ userId: user.id });
-    if (!pathologyProfile || appointment.pathologyId?.toString() !== pathologyProfile._id.toString()) {
+    if (!pathologyProfile || (appointment.pathologyId?._id || appointment.pathologyId)?.toString() !== pathologyProfile._id.toString()) {
       return false;
     }
     return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
