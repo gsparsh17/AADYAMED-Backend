@@ -61,8 +61,13 @@ const appointmentSchema = new mongoose.Schema(
 
     type: {
       type: String,
-      enum: ['clinic', 'home'],
+      enum: ['clinic', 'home', 'video'],
       required: true,
+    },
+
+    // Video Consultation Link
+    meetingLink: {
+      type: String,
     },
 
     // Location

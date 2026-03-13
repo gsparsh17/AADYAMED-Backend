@@ -10,6 +10,21 @@ const Notification = require('../models/Notification');
 const Calendar = require('../models/Calendar');
 const Invoice = require('../models/Invoice');
 
+// ========== HELPER FUNCTIONS ==========
+// ========== HELPER FUNCTIONS ==========
+// Return a dynamic Jitsi Meet link instead, as Google Meet blocks randomly generated IDs
+const generateMeetingLink = () => {
+  const chars = 'abcdefghijklmnopqrstuvwxyz';
+  const getRandomChars = (len) => {
+    let result = '';
+    for (let i = 0; i < len; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+  return `https://meet.jit.si/${getRandomChars(12)}`; // Jitsi allows arbitrary room names
+};
+
 // ========== APPOINTMENT FUNCTIONS ==========
 
 // Create a new appointment
@@ -23,6 +38,7 @@ exports.createAppointment = async (req, res) => {
       startTime,
       type = 'clinic',
       address,
+      location,
       symptoms,
       reason
     } = req.body;
@@ -199,6 +215,9 @@ exports.createAppointment = async (req, res) => {
           ? 'physioId'
           : 'pathologyId';
 
+    // Generate meeting link if type is video
+    const meetingLink = type === 'video' ? generateMeetingLink() : undefined;
+
     // Create appointment
     const appointment = await Appointment.create({
       referralId,
@@ -209,7 +228,9 @@ exports.createAppointment = async (req, res) => {
       startTime,
       duration,
       type,
+      meetingLink,
       address: type === 'home' ? address : undefined,
+      location: type === 'home' ? location : undefined,
       symptoms: symptoms || [],
       reason: reason || '',
       consultationFee,
