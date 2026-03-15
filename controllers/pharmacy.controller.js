@@ -1,222 +1,280 @@
-// controllers/pharmacy.controller.js (UPDATED)
-
-const Pharmacy = require('../models/Pharmacy');
+const PharmacyProfile = require('../models/PharmacyProfile');
 const User = require('../models/User');
 
-const normalizeEmail = (v) => (v ? String(v).trim().toLowerCase() : '');
-const normalizePhone = (v) => (v ? String(v).replace(/\D/g, '').slice(-10) : '');
+// Helper function to calculate distance between coordinates
+const calculateDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+};
 
-exports.createPharmacy = async (req, res) => {
+exports.createPharmacyProfile = async (req, res) => {
   try {
-    const { name, licenseNumber, email, phone, address, password } = req.body || {};
-
-    const cleanEmail = normalizeEmail(email);
-    const cleanPhone = normalizePhone(phone);
-
-    if (!name?.trim()) {
-      return res.status(400).json({ success: false, error: 'name is required' });
-    }
-    if (!licenseNumber?.trim()) {
-      return res.status(400).json({ success: false, error: 'licenseNumber is required' });
-    }
-    if (!cleanEmail) {
-      return res.status(400).json({ success: false, error: 'email is required' });
-    }
-
-    // Prevent duplicates early (friendlier than relying only on mongoose unique error)
-    const existingPharmacy = await Pharmacy.findOne({
-      $or: [{ licenseNumber: licenseNumber.trim() }, { email: cleanEmail }]
-    });
-
-    if (existingPharmacy) {
-      return res.status(409).json({
+    const existingProfile = await PharmacyProfile.findOne({ userId: req.user.id });
+    if (existingProfile) {
+      return res.status(400).json({
         success: false,
-        error: 'Pharmacy already exists with this licenseNumber or email'
+        error: 'Profile already exists'
       });
     }
 
-    // If you are also creating a user, ensure email isn't already used by another user
-    if (password) {
-      const existingUser = await User.findOne({ email: cleanEmail });
-      if (existingUser) {
-        return res.status(409).json({
-          success: false,
-          error: 'User already exists with this email'
-        });
-      }
-    }
+    const profileData = {
+      userId: req.user.id,
+      ...req.body
+    };
 
-    const pharmacy = await Pharmacy.create({
-      name: name.trim(),
-      licenseNumber: licenseNumber.trim(),
-      email: cleanEmail,
-      phone: cleanPhone,
-      address: address || ''
-      // status default: 'Active'
-      // registeredAt default handled by schema
+    const profile = await PharmacyProfile.create(profileData);
+
+    // Update user's profileCompleted status
+    await User.findByIdAndUpdate(req.user.id, {
+      profileCompleted: true,
+      profileId: profile._id
     });
 
-    let createdUser = null;
-
-    // OPTIONAL: create login user for pharmacy
-    if (password) {
-      createdUser = await User.create({
-        name: name.trim(),
-        email: cleanEmail,
-        phone: cleanPhone,
-        role: 'pharmacy',
-        password
-      });
-    }
-
-    const user = await User.findById(req.user.id);
-    user.profileId=pharmacy._id;
-    user.save();
-
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
-      message: 'Pharmacy created',
-      pharmacyId: pharmacy._id,
-      userId: createdUser?._id || null
+      message: 'Pharmacy profile created successfully',
+      profile
     });
-  } catch (err) {
-    // Handle mongoose duplicate key errors nicely
-    if (err?.code === 11000) {
-      const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      return res.status(409).json({
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({
         success: false,
-        error: `Duplicate ${field}. Please use a different ${field}.`
+        error: 'License number already exists'
       });
     }
-
-    return res.status(400).json({ success: false, error: err.message });
-  }
-};
-
-exports.getAllPharmacies = async (req, res) => {
-  try {
-    // Only active pharmacies (your old behavior)
-    const pharmacies = await Pharmacy.find({ status: 'Active' }).sort({ registeredAt: -1 });
-
-    return res.json({
-      success: true,
-      pharmacies,
-      count: pharmacies.length
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
   }
 };
 
-exports.getPharmacyById = async (req, res) => {
+exports.getPharmacyProfile = async (req, res) => {
   try {
-    const pharmacy = await Pharmacy.findById(req.params.id);
-
-    if (!pharmacy) {
-      return res.status(404).json({ success: false, error: 'Pharmacy not found' });
-    }
-
-    return res.json({ success: true, pharmacy });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-};
-
-exports.updatePharmacy = async (req, res) => {
-  try {
-    const updates = { ...(req.body || {}) };
-
-    if (updates.email) updates.email = normalizeEmail(updates.email);
-    if (updates.phone) updates.phone = normalizePhone(updates.phone);
-    if (updates.name) updates.name = String(updates.name).trim();
-    if (updates.licenseNumber) updates.licenseNumber = String(updates.licenseNumber).trim();
-
-    // Find existing pharmacy
-    const pharmacy = await Pharmacy.findById(req.params.id);
-    if (!pharmacy) {
-      return res.status(404).json({ success: false, error: 'Pharmacy not found' });
-    }
-
-    // If license/email is being changed, prevent duplicates
-    if (updates.email || updates.licenseNumber) {
-      const conflict = await Pharmacy.findOne({
-        _id: { $ne: pharmacy._id },
-        $or: [
-          updates.email ? { email: updates.email } : null,
-          updates.licenseNumber ? { licenseNumber: updates.licenseNumber } : null
-        ].filter(Boolean)
+    const profile = await PharmacyProfile.findOne({ userId: req.user.id });
+    if (!profile) {
+      return res.status(404).json({
+        success: false,
+        error: 'Profile not found'
       });
-
-      if (conflict) {
-        return res.status(409).json({
-          success: false,
-          error: 'Another pharmacy already uses this email or licenseNumber'
-        });
-      }
     }
+    res.json({
+      success: true,
+      pharmacy: profile
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
 
-    const updatedPharmacy = await Pharmacy.findByIdAndUpdate(
-      pharmacy._id,
-      updates,
+exports.updatePharmacyProfile = async (req, res) => {
+  try {
+    const profile = await PharmacyProfile.findOneAndUpdate(
+      { userId: req.user.id },
+      req.body,
       { new: true, runValidators: true }
     );
 
-    // Keep User (role: pharmacy) in sync by email (best effort)
-    // If your User model links by pharmacyId, switch to that instead.
-    if (updates.email || updates.phone || updates.name) {
-      await User.findOneAndUpdate(
-        { role: 'pharmacy', email: pharmacy.email }, // match old email
-        {
-          ...(updates.email ? { email: updates.email } : {}),
-          ...(updates.phone ? { phone: updates.phone } : {}),
-          ...(updates.name ? { name: updates.name } : {})
-        },
-        { new: true }
-      );
-    }
-
-    return res.json({
-      success: true,
-      message: 'Pharmacy updated successfully',
-      pharmacy: updatedPharmacy
-    });
-  } catch (err) {
-    if (err?.code === 11000) {
-      const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      return res.status(409).json({
+    if (!profile) {
+      return res.status(404).json({
         success: false,
-        error: `Duplicate ${field}. Please use a different ${field}.`
+        error: 'Profile not found'
       });
     }
 
-    return res.status(400).json({ success: false, error: err.message });
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      pharmacy: profile
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        error: 'License number already exists'
+      });
+    }
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 };
 
-exports.deletePharmacy = async (req, res) => {
+// Get all approved pharmacies with optional location filtering
+exports.getPharmacies = async (req, res) => {
   try {
-    const pharmacy = await Pharmacy.findById(req.params.id);
-    if (!pharmacy) {
-      return res.status(404).json({ success: false, error: 'Pharmacy not found' });
+    const { 
+      city, 
+      lat, 
+      lng, 
+      radius = 25, 
+      deliveryAvailable,
+      minRating,
+      page = 1, 
+      limit = 20 
+    } = req.query;
+
+    const filter = { verificationStatus: 'approved' };
+
+    if (city) {
+      filter['address.city'] = { $regex: city, $options: 'i' };
     }
 
-    // Soft delete (your schema supports status)
-    const updated = await Pharmacy.findByIdAndUpdate(
-      pharmacy._id,
-      { status: 'Inactive' },
-      { new: true }
-    );
+    if (deliveryAvailable === 'true') {
+      filter.deliveryAvailable = true;
+    }
 
-    // Best effort: also deactivate / restrict the user account (if you have such flags)
-    // If your User schema has "isActive" or similar, uncomment and use it.
-    // await User.findOneAndUpdate({ role: 'pharmacy', email: pharmacy.email }, { isActive: false });
+    if (minRating) {
+      filter.averageRating = { $gte: parseFloat(minRating) };
+    }
 
-    return res.json({
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    let pharmacies = await PharmacyProfile.find(filter)
+      .select('pharmacyName phone email address operatingHours deliveryAvailable deliveryRadius minimumOrderAmount deliveryCharge paymentMethods averageRating totalReviews totalOrders')
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    // If user location is provided, calculate distances
+    if (lat && lng) {
+      const userLat = parseFloat(lat);
+      const userLng = parseFloat(lng);
+      
+      pharmacies = pharmacies.map(pharmacy => {
+        const pharmacyLoc = pharmacy.address?.location?.coordinates;
+        if (pharmacyLoc && pharmacyLoc.length === 2) {
+          const distance = calculateDistance(
+            userLat,
+            userLng,
+            pharmacyLoc[1], // latitude
+            pharmacyLoc[0]  // longitude
+          );
+          return { ...pharmacy.toObject(), distance };
+        }
+        return pharmacy;
+      });
+
+      // Filter by radius
+      if (radius) {
+        pharmacies = pharmacies.filter(p => !p.distance || p.distance <= parseFloat(radius));
+      }
+
+      // Sort by distance
+      pharmacies.sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity));
+    }
+
+    const total = pharmacies.length;
+
+    res.json({
       success: true,
-      message: 'Pharmacy deactivated successfully',
-      pharmacy: updated
+      count: pharmacies.length,
+      pharmacies,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit))
+      }
     });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
+  } catch (error) {
+    console.error('Error fetching pharmacies:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch pharmacies'
+    });
+  }
+};
+
+// Get pharmacy by ID
+exports.getPharmacyById = async (req, res) => {
+  try {
+    const pharmacy = await PharmacyProfile.findById(req.params.id)
+      .select('-__v');
+
+    if (!pharmacy) {
+      return res.status(404).json({
+        success: false,
+        error: 'Pharmacy not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      pharmacy
+    });
+  } catch (error) {
+    console.error('Error fetching pharmacy:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch pharmacy'
+    });
+  }
+};
+
+// Get pharmacies by city
+exports.getPharmaciesByCity = async (req, res) => {
+  try {
+    const { city } = req.params;
+    const { lat, lng, radius = 25 } = req.query;
+
+    const filter = { 
+      verificationStatus: 'approved',
+      'address.city': { $regex: city, $options: 'i' }
+    };
+
+    let pharmacies = await PharmacyProfile.find(filter)
+      .select('pharmacyName phone email address operatingHours deliveryAvailable deliveryRadius averageRating totalReviews');
+
+    // If user location is provided, calculate distances
+    if (lat && lng) {
+      const userLat = parseFloat(lat);
+      const userLng = parseFloat(lng);
+      
+      pharmacies = pharmacies.map(pharmacy => {
+        const pharmacyLoc = pharmacy.address?.location?.coordinates;
+        if (pharmacyLoc && pharmacyLoc.length === 2) {
+          const distance = calculateDistance(
+            userLat,
+            userLng,
+            pharmacyLoc[1],
+            pharmacyLoc[0]
+          );
+          return { ...pharmacy.toObject(), distance };
+        }
+        return pharmacy;
+      });
+
+      // Filter by radius
+      if (radius) {
+        pharmacies = pharmacies.filter(p => !p.distance || p.distance <= parseFloat(radius));
+      }
+
+      // Sort by distance
+      pharmacies.sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity));
+    }
+
+    res.json({
+      success: true,
+      city,
+      count: pharmacies.length,
+      pharmacies
+    });
+  } catch (error) {
+    console.error('Error fetching pharmacies by city:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch pharmacies'
+    });
   }
 };

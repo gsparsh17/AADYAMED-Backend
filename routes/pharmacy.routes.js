@@ -1,18 +1,27 @@
 const express = require('express');
 const router = express.Router();
+const { protect, authorize } = require('../middlewares/auth');
 const {
-  createPharmacy,
-  getAllPharmacies,
+  createPharmacyProfile,
+  getPharmacyProfile,
+  updatePharmacyProfile,
+  getPharmacies,
   getPharmacyById,
-  updatePharmacy,
-  deletePharmacy
+  getPharmaciesByCity
 } = require('../controllers/pharmacy.controller');
 
-// Pharmacy routes
-router.post('/', createPharmacy);
-router.get('/', getAllPharmacies);
+// Public routes
+router.get('/all', getPharmacies);
+router.get('/city/:city', getPharmaciesByCity);
 router.get('/:id', getPharmacyById);
-router.put('/:id', updatePharmacy);
-router.delete('/:id', deletePharmacy);
+
+// Protected pharmacy routes
+router.use(protect);
+router.use(authorize('pharmacy'));
+
+router.route('/profile')
+  .post(createPharmacyProfile)
+  .get(getPharmacyProfile)
+  .put(updatePharmacyProfile);
 
 module.exports = router;

@@ -3,7 +3,7 @@ const User = require('../models/User');
 const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 const PathologyProfile = require('../models/PathologyProfile');
-const Pharmacy = require('../models/Pharmacy');
+const PharmacyProfile = require('../models/PharmacyProfile');
 const Appointment = require('../models/Appointment');
 const Referral = require('../models/Referral');
 const Commission = require('../models/Commission');
@@ -567,7 +567,18 @@ exports.forceVerifyUser = async (req, res) => {
   try {
     const { id } = req.params;
     
-    const user = await User.findByIdAndUpdate(
+    // Find the user first to get their role
+    const user = await User.findById(id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+    
+    // Update user verification status
+    const updatedUser = await User.findByIdAndUpdate(
       id,
       {
         isVerified: true,
@@ -577,11 +588,56 @@ exports.forceVerifyUser = async (req, res) => {
       { new: true }
     );
     
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
+    // Update the corresponding profile based on user role
+    let updatedProfile = null;
+    const verificationData = {
+      verificationStatus: 'approved',
+      verifiedAt: new Date(),
+      verifiedBy: req.user.id,
+      adminNotes: req.body.notes || 'Force verified by admin'
+    };
+
+    switch (user.role) {
+      case 'doctor':
+        updatedProfile = await DoctorProfile.findOneAndUpdate(
+          { userId: id },
+          verificationData,
+          { new: true }
+        );
+        break;
+        
+      case 'physio':
+        updatedProfile = await PhysiotherapistProfile.findOneAndUpdate(
+          { userId: id },
+          verificationData,
+          { new: true }
+        );
+        break;
+        
+      case 'pathology':
+        updatedProfile = await PathologyProfile.findOneAndUpdate(
+          { userId: id },
+          verificationData,
+          { new: true }
+        );
+        break;
+        
+      case 'pharmacy':
+        updatedProfile = await PharmacyProfile.findOneAndUpdate(
+          { userId: id },
+          verificationData,
+          { new: true }
+        );
+        break;
+        
+      case 'patient':
+        // Patients don't need verification status in their profile
+        // but you can still log that they were verified
+        console.log(`Patient ${id} verified by admin`);
+        break;
+        
+      default:
+        console.log(`Unknown role ${user.role} for user ${id}`);
     }
     
     // Log the action
@@ -590,27 +646,39 @@ exports.forceVerifyUser = async (req, res) => {
       action: 'USER_FORCE_VERIFIED',
       entity: 'User',
       entityId: user._id,
-      details: { verifiedBy: req.user.id },
+      details: { 
+        verifiedBy: req.user.id,
+        userRole: user.role,
+        profileUpdated: !!updatedProfile,
+        notes: req.body.notes || 'No notes provided'
+      },
       timestamp: new Date()
     });
     
     res.json({
       success: true,
-      message: 'User verified successfully',
-      user
+      message: `User verified successfully. ${updatedProfile ? 'Profile also updated.' : ''}`,
+      user: updatedUser,
+      profile: updatedProfile || null
     });
     
   } catch (error) {
     console.error('Force verify user error:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to verify user'
+      error: 'Failed to verify user',
+      details: error.message
     });
   }
 };
 
 // ========== PROFESSIONALS MANAGEMENT ==========
 
+/**
+ * @desc    Get all professionals with filters
+ * @route   GET /api/admin/professionals
+ * @access  Admin
+ */
 /**
  * @desc    Get all professionals with filters
  * @route   GET /api/admin/professionals
@@ -627,66 +695,173 @@ exports.getProfessionals = async (req, res) => {
       limit = 20
     } = req.query;
     
-    let Model;
-    let selectFields = '';
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
     
+    // Build filter
+    const buildFilter = (params) => {
+      const filter = {};
+      
+      if (params.verificationStatus && params.verificationStatus !== 'all') {
+        filter.verificationStatus = params.verificationStatus;
+      }
+      
+      if (params.specialization) {
+        filter.specialization = { $in: [params.specialization] };
+      }
+      
+      if (params.search) {
+        filter.$or = [
+          { name: { $regex: params.search, $options: 'i' } },
+          { email: { $regex: params.search, $options: 'i' } },
+          { phone: { $regex: params.search, $options: 'i' } },
+          { labName: { $regex: params.search, $options: 'i' } }
+        ];
+      }
+      
+      return filter;
+    };
+    
+    const filterParams = { verificationStatus, specialization, search };
+    
+    // Define comprehensive field selections for each type
+    const doctorFields = 'name specialization consultationFee homeVisitFee averageRating totalConsultations totalEarnings verificationStatus clinicAddress qualifications licenseNumber experienceYears gender dateOfBirth languages about availability commissionRate pendingCommission paidCommission adminNotes verifiedAt verifiedBy bankDetails contactNumber email profileImage createdAt updatedAt';
+    
+    const physioFields = 'name specialization consultationFee homeVisitFee averageRating totalConsultations totalEarnings verificationStatus clinicAddress qualifications licenseNumber experienceYears gender dateOfBirth languages about services availability commissionRate pendingCommission paidCommission adminNotes verifiedAt verifiedBy bankDetails contactNumber email profileImage servesAreas createdAt updatedAt';
+    
+    const pathologyFields = 'labName services homeCollectionAvailable homeCollectionCharges averageRating totalTestsConducted totalEarnings verificationStatus address operatingHours testSlots accreditation licenses contactPerson phone email website commissionRate adminNotes verifiedAt verifiedBy bankDetails profileImage registrationNumber createdAt updatedAt';
+    
+    // If specific type is requested
     if (type === 'doctor') {
-      Model = DoctorProfile;
-      selectFields = 'name specialization consultationFee averageRating totalConsultations verificationStatus clinicAddress';
-    } else if (type === 'physio') {
-      Model = PhysiotherapistProfile;
-      selectFields = 'name specialization consultationFee homeVisitFee averageRating totalConsultations verificationStatus clinicAddress';
-    } else if (type === 'pathology') {
-      Model = PathologyProfile;
-      selectFields = 'labName services homeCollectionAvailable averageRating totalTestsConducted verificationStatus address';
-    } else {
-      // Get all types
-      const [doctors, physios, pathology] = await Promise.all([
-        DoctorProfile.find(buildFilter({ verificationStatus, specialization, search }))
-          .populate('userId', 'email isActive')
-          .select('name specialization verificationStatus')
-          .limit(parseInt(limit)),
-        PhysiotherapistProfile.find(buildFilter({ verificationStatus, specialization, search }))
-          .populate('userId', 'email isActive')
-          .select('name specialization verificationStatus')
-          .limit(parseInt(limit)),
-        PathologyProfile.find(buildFilter({ verificationStatus, specialization: undefined, search }))
-          .populate('userId', 'email isActive')
-          .select('labName verificationStatus')
-          .limit(parseInt(limit))
+      const filter = buildFilter({ ...filterParams, specialization: filterParams.specialization });
+      
+      const [professionals, total] = await Promise.all([
+        DoctorProfile.find(filter)
+          .populate('userId', 'email isActive lastLogin loginCount createdAt')
+          .select(doctorFields)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limitNum),
+        DoctorProfile.countDocuments(filter)
       ]);
       
       return res.json({
         success: true,
-        professionals: {
-          doctors,
-          physios,
-          pathology
+        professionals,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          pages: Math.ceil(total / limitNum)
         }
       });
     }
     
-    const filter = buildFilter({ verificationStatus, specialization, search });
+    if (type === 'physio') {
+      const filter = buildFilter({ ...filterParams, specialization: filterParams.specialization });
+      
+      const [professionals, total] = await Promise.all([
+        PhysiotherapistProfile.find(filter)
+          .populate('userId', 'email isActive lastLogin loginCount createdAt')
+          .select(physioFields)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limitNum),
+        PhysiotherapistProfile.countDocuments(filter)
+      ]);
+      
+      return res.json({
+        success: true,
+        professionals,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          pages: Math.ceil(total / limitNum)
+        }
+      });
+    }
     
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    if (type === 'pathology') {
+      const filter = buildFilter({ verificationStatus: filterParams.verificationStatus, search: filterParams.search });
+      
+      const [professionals, total] = await Promise.all([
+        PathologyProfile.find(filter)
+          .populate('userId', 'email isActive lastLogin loginCount createdAt')
+          .select(pathologyFields)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limitNum),
+        PathologyProfile.countDocuments(filter)
+      ]);
+      
+      return res.json({
+        success: true,
+        professionals,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          pages: Math.ceil(total / limitNum)
+        }
+      });
+    }
     
-    const professionals = await Model.find(filter)
-      .populate('userId', 'email isActive lastLogin')
-      .select(selectFields)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
+    // Get all types with pagination for each
+    const [doctors, physios, pathology] = await Promise.all([
+      DoctorProfile.find(buildFilter({ ...filterParams, specialization: filterParams.specialization }))
+        .populate('userId', 'email isActive lastLogin loginCount createdAt')
+        .select(doctorFields)
+        .sort({ createdAt: -1 })
+        .limit(limitNum),
+      
+      PhysiotherapistProfile.find(buildFilter({ ...filterParams, specialization: filterParams.specialization }))
+        .populate('userId', 'email isActive lastLogin loginCount createdAt')
+        .select(physioFields)
+        .sort({ createdAt: -1 })
+        .limit(limitNum),
+      
+      PathologyProfile.find(buildFilter({ verificationStatus: filterParams.verificationStatus, search: filterParams.search }))
+        .populate('userId', 'email isActive lastLogin loginCount createdAt')
+        .select(pathologyFields)
+        .sort({ createdAt: -1 })
+        .limit(limitNum)
+    ]);
     
-    const total = await Model.countDocuments(filter);
+    // Get total counts for each type
+    const [totalDoctors, totalPhysios, totalPathology] = await Promise.all([
+      DoctorProfile.countDocuments(buildFilter({ ...filterParams, specialization: filterParams.specialization })),
+      PhysiotherapistProfile.countDocuments(buildFilter({ ...filterParams, specialization: filterParams.specialization })),
+      PathologyProfile.countDocuments(buildFilter({ verificationStatus: filterParams.verificationStatus, search: filterParams.search }))
+    ]);
     
     res.json({
       success: true,
-      professionals,
+      professionals: {
+        doctors,
+        physios,
+        pathology
+      },
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
+        doctors: {
+          page: pageNum,
+          limit: limitNum,
+          total: totalDoctors,
+          pages: Math.ceil(totalDoctors / limitNum)
+        },
+        physios: {
+          page: pageNum,
+          limit: limitNum,
+          total: totalPhysios,
+          pages: Math.ceil(totalPhysios / limitNum)
+        },
+        pathology: {
+          page: pageNum,
+          limit: limitNum,
+          total: totalPathology,
+          pages: Math.ceil(totalPathology / limitNum)
+        }
       }
     });
     
@@ -698,6 +873,31 @@ exports.getProfessionals = async (req, res) => {
     });
   }
 };
+
+// Helper function for building filters (define this outside or at the top of the file)
+function buildFilter({ verificationStatus, specialization, search }) {
+  const filter = {};
+  
+  if (verificationStatus && verificationStatus !== 'all') {
+    filter.verificationStatus = verificationStatus;
+  }
+  
+  if (specialization) {
+    filter.specialization = { $in: [specialization] };
+  }
+  
+  if (search) {
+    filter.$or = [
+      { name: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+      { phone: { $regex: search, $options: 'i' } },
+      { labName: { $regex: search, $options: 'i' } },
+      { contactPerson: { $regex: search, $options: 'i' } }
+    ];
+  }
+  
+  return filter;
+}
 
 /**
  * @desc    Get professional by ID

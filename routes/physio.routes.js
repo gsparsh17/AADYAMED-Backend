@@ -5,9 +5,6 @@ const router = express.Router();
 const physioController = require('../controllers/physio.controller');
 const { protect, authorize } = require('../middlewares/auth');
 
-// ========== PUBLIC ROUTES (NO TOKEN) ==========
-// Put STATIC routes FIRST, then ID routes LAST.
-
 // List / search
 router.get('/', physioController.getAllPhysios);
 router.get('/specialization/:specialization', physioController.getPhysiosBySpecialization);
@@ -15,10 +12,6 @@ router.get('/specialization/:specialization', physioController.getPhysiosBySpeci
 // Availability (public)
 router.get('/:id/availability/weekly', physioController.getWeeklyAvailability);
 router.get('/:id/availability', physioController.getPhysioAvailability);
-
-// If you later add public static endpoints like these, they must stay ABOVE "/:id":
-// router.get('/service-areas', physioController.getServiceAreas);
-// router.get('/home-visit-pricing', physioController.getHomeVisitPricing);
 
 // ========== PHYSIO (ME) ROUTES ==========
 router.use('/me', protect, authorize('physio'));

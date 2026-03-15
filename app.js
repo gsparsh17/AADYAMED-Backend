@@ -140,6 +140,7 @@ app.use('/api/admin', require('./routes/admin.routes'));
 app.use('/api/doctor', require('./routes/doctor.routes'));
 app.use('/api/physio', require('./routes/physio.routes'));
 app.use('/api/pathology', require('./routes/pathology.routes'));
+app.use('/api/pharmacy', require('./routes/pharmacy.routes'));
 
 // Patient Routes
 app.use('/api/patient', require('./routes/patient.routes'));

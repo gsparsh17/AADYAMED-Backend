@@ -60,7 +60,7 @@ const userSchema = new mongoose.Schema({
   },
   profileModel: {
     type: String,
-    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PatientProfile', 'PathologyProfile', 'Pharmacy', null],
+    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PatientProfile', 'PathologyProfile', 'PharmacyProfile', null],
     default: null
   },
   
