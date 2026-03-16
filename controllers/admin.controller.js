@@ -74,14 +74,15 @@ exports.getDashboardStats = async (req, res) => {
       Promise.all([
         DoctorProfile.countDocuments({ verificationStatus: 'pending' }),
         PhysiotherapistProfile.countDocuments({ verificationStatus: 'pending' }),
-        PathologyProfile.countDocuments({ verificationStatus: 'pending' })
-      ]).then(([doctors, physios, pathology]) => doctors + physios + pathology),
+        PathologyProfile.countDocuments({ verificationStatus: 'pending' }),
+        PharmacyProfile.countDocuments({ verificationStatus: 'pending' })
+      ]).then(([doctors, physios, pathology, pharmacy]) => doctors + physios + pathology + pharmacy),
       
       // Total pathology centers
       PathologyProfile.countDocuments({ verificationStatus: 'approved' }),
       
       // Total pharmacies
-      Pharmacy.countDocuments({ status: 'Active' }),
+      PharmacyProfile.countDocuments({ verificationStatus: 'approved' }),
       
       // Today's appointments count
       Appointment.countDocuments({
@@ -912,6 +913,7 @@ exports.getProfessionalById = async (req, res) => {
     if (type === 'doctor') Model = DoctorProfile;
     else if (type === 'physio') Model = PhysiotherapistProfile;
     else if (type === 'pathology') Model = PathologyProfile;
+    else if (type === 'pharmacy') Model = PharmacyProfile;
     else {
       return res.status(400).json({
         success: false,
@@ -983,6 +985,7 @@ exports.verifyProfessional = async (req, res) => {
     if (type === 'doctor') Model = DoctorProfile;
     else if (type === 'physio') Model = PhysiotherapistProfile;
     else if (type === 'pathology') Model = PathologyProfile;
+    else if (type === 'pharmacy') Model = PharmacyProfile;
     else {
       return res.status(400).json({
         success: false,
@@ -1159,13 +1162,29 @@ exports.getAppointments = async (req, res) => {
       }
     ]);
     
+    // Get statistics in expected format
+    const statsObj = {
+      total,
+      completed: 0,
+      pending: 0,
+      confirmed: 0,
+      cancelled: 0,
+      rescheduled: 0,
+      revenue: stats.reduce((acc, curr) => acc + (curr.totalRevenue || 0), 0)
+    };
+
+    stats.forEach(s => {
+      if (s._id === 'completed') statsObj.completed = s.count;
+      else if (s._id === 'pending') statsObj.pending = s.count;
+      else if (['confirmed', 'accepted'].includes(s._id)) statsObj.confirmed += s.count;
+      else if (s._id === 'cancelled') statsObj.cancelled = s.count;
+      else if (s._id === 'rescheduled') statsObj.rescheduled = s.count;
+    });
+
     res.json({
       success: true,
       appointments,
-      stats: stats.reduce((acc, curr) => {
-        acc[curr._id] = { count: curr.count, revenue: curr.totalRevenue };
-        return acc;
-      }, {}),
+      stats: statsObj,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -1388,69 +1407,83 @@ exports.getPayments = async (req, res) => {
     const commissions = await Commission.find(filter)
       .populate({
         path: 'professionalId',
-        select: 'name labName specialization'
+        select: 'name firstName lastName labName pharmacyName specialization'
       })
       .populate('appointmentId')
-      .populate('patientId', 'name')
+      .populate('patientId', 'name patientId firstName lastName')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
     
     const total = await Commission.countDocuments(filter);
     
-    // Get summary
-    const summary = await Commission.aggregate([
-      {
-        $match: filter
-      },
-      {
-        $group: {
-          _id: '$payoutStatus',
-          totalAmount: { $sum: '$platformCommission' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
     
-    // Get totals
-    const totals = await Commission.aggregate([
-      {
-        $match: filter
-      },
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const statsResult = await Commission.aggregate([
+      { $match: filter },
       {
         $group: {
           _id: null,
-          totalCommission: { $sum: '$platformCommission' },
-          totalEarnings: { $sum: '$professionalEarning' },
-          totalConsultations: { $sum: 1 },
-          paidAmount: {
-            $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, '$platformCommission', 0] }
+          total: { $sum: 1 },
+          success: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, 1, 0] } },
+          pending: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'pending'] }, 1, 0] } },
+          failed: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'failed'] }, 1, 0] } },
+          processing: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'processing'] }, 1, 0] } },
+          revenue: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, '$platformCommission', 0] } },
+          platformCommission: { $sum: '$platformCommission' },
+          professionalPayouts: { $sum: '$professionalEarning' },
+          todayRevenue: {
+            $sum: {
+              $cond: [
+                { $and: [
+                  { $eq: ['$payoutStatus', 'paid'] },
+                  { $gte: ['$createdAt', startOfToday] }
+                ]},
+                '$platformCommission',
+                0
+              ]
+            }
           },
-          pendingAmount: {
-            $sum: { $cond: [{ $eq: ['$payoutStatus', 'pending'] }, '$platformCommission', 0] }
-          },
-          processingAmount: {
-            $sum: { $cond: [{ $eq: ['$payoutStatus', 'processing'] }, '$platformCommission', 0] }
+          monthlyRevenue: {
+            $sum: {
+              $cond: [
+                { $and: [
+                  { $eq: ['$payoutStatus', 'paid'] },
+                  { $gte: ['$createdAt', startOfMonth] }
+                ]},
+                '$platformCommission',
+                0
+              ]
+            }
           }
         }
       }
     ]);
+
+    const stats = statsResult[0] || {
+      total: 0,
+      success: 0,
+      pending: 0,
+      failed: 0,
+      processing: 0,
+      revenue: 0,
+      platformCommission: 0,
+      professionalPayouts: 0,
+      todayRevenue: 0,
+      monthlyRevenue: 0
+    };
+    stats.avgTransaction = stats.success > 0 ? stats.revenue / stats.success : 0;
     
     res.json({
       success: true,
       commissions,
-      summary: summary.reduce((acc, curr) => {
-        acc[curr._id] = { amount: curr.totalAmount, count: curr.count };
-        return acc;
-      }, {}),
-      totals: totals[0] || {
-        totalCommission: 0,
-        totalEarnings: 0,
-        totalConsultations: 0,
-        paidAmount: 0,
-        pendingAmount: 0,
-        processingAmount: 0
-      },
+      summary: stats,
+      totals: stats,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -2173,18 +2206,19 @@ exports.updateCommissionSettings = async (req, res) => {
  */
 exports.getPendingVerifications = async (req, res) => {
   try {
-    const { type, page = 1, limit = 20 } = req.query;
+    const { type, status, page = 1, limit = 20 } = req.query;
     
-    const filter = { verificationStatus: 'pending' };
+    const requestedStatus = (status && status !== 'all') ? status : 'all';
+    const filter = requestedStatus === 'all' ? {} : { verificationStatus: requestedStatus };
     
     let results = {};
     
     if (!type || type === 'doctor') {
       const doctors = await DoctorProfile.find(filter)
         .populate('userId', 'email phone createdAt')
-        .select('name specialization licenseNumber qualifications experienceYears clinicAddress')
-        .sort({ createdAt: 1 })
-        .limit(type ? parseInt(limit) : 100);
+        .select('userId name specialization licenseNumber qualifications experienceYears clinicAddress verificationStatus adminNotes verifiedAt createdAt email phone contactNumber')
+        .sort({ createdAt: -1 })
+        .limit(type ? parseInt(limit) : 50);
       
       results.doctors = doctors;
     }
@@ -2192,9 +2226,9 @@ exports.getPendingVerifications = async (req, res) => {
     if (!type || type === 'physio') {
       const physios = await PhysiotherapistProfile.find(filter)
         .populate('userId', 'email phone createdAt')
-        .select('name specialization licenseNumber qualifications experienceYears clinicAddress')
-        .sort({ createdAt: 1 })
-        .limit(type ? parseInt(limit) : 100);
+        .select('userId name specialization licenseNumber qualifications experienceYears clinicAddress verificationStatus adminNotes verifiedAt createdAt email phone contactNumber')
+        .sort({ createdAt: -1 })
+        .limit(type ? parseInt(limit) : 50);
       
       results.physios = physios;
     }
@@ -2202,16 +2236,30 @@ exports.getPendingVerifications = async (req, res) => {
     if (!type || type === 'pathology') {
       const pathology = await PathologyProfile.find(filter)
         .populate('userId', 'email phone createdAt')
-        .select('labName registrationNumber services address licenses')
-        .sort({ createdAt: 1 })
-        .limit(type ? parseInt(limit) : 100);
+        .select('userId labName registrationNumber services address licenses verificationStatus adminNotes verifiedAt createdAt email phone')
+        .sort({ createdAt: -1 })
+        .limit(type ? parseInt(limit) : 50);
       
       results.pathology = pathology;
+    }
+
+    if (!type || type === 'pharmacy') {
+      const pharmacy = await PharmacyProfile.find(filter)
+        .populate('userId', 'email phone createdAt')
+        .select('userId pharmacyName licenseNumber address verificationStatus adminNotes verifiedAt createdAt email phone')
+        .sort({ createdAt: -1 })
+        .limit(type ? parseInt(limit) : 50);
+      
+      results.pharmacy = pharmacy;
     }
     
     res.json({
       success: true,
-      verifications: results
+      verifications: results,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit)
+      }
     });
     
   } catch (error) {
@@ -2230,7 +2278,7 @@ exports.getPendingVerifications = async (req, res) => {
  */
 exports.getVerificationStats = async (req, res) => {
   try {
-    const [doctors, physios, pathology] = await Promise.all([
+    const [doctors, physios, pathology, pharmacy] = await Promise.all([
       DoctorProfile.aggregate([
         {
           $group: {
@@ -2254,6 +2302,14 @@ exports.getVerificationStats = async (req, res) => {
             count: { $sum: 1 }
           }
         }
+      ]),
+      PharmacyProfile.aggregate([
+        {
+          $group: {
+            _id: '$verificationStatus',
+            count: { $sum: 1 }
+          }
+        }
       ])
     ]);
     
@@ -2270,7 +2326,8 @@ exports.getVerificationStats = async (req, res) => {
       stats: {
         doctors: formatStats(doctors),
         physios: formatStats(physios),
-        pathology: formatStats(pathology)
+        pathology: formatStats(pathology),
+        pharmacy: formatStats(pharmacy)
       }
     });
     
@@ -2507,11 +2564,13 @@ exports.getPharmacies = async (req, res) => {
     } = req.query;
     
     const filter = {};
-    if (status) filter.status = status;
+    if (status && status !== 'all') {
+      filter.verificationStatus = status;
+    }
     
     if (search) {
       filter.$or = [
-        { name: { $regex: search, $options: 'i' } },
+        { pharmacyName: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
         { phone: { $regex: search, $options: 'i' } }
       ];
@@ -2519,13 +2578,13 @@ exports.getPharmacies = async (req, res) => {
     
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
-    const pharmacies = await Pharmacy.find(filter)
+    const pharmacies = await PharmacyProfile.find(filter)
       .populate('userId', 'email isActive')
-      .sort({ registeredAt: -1 })
+      .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
     
-    const total = await Pharmacy.countDocuments(filter);
+    const total = await PharmacyProfile.countDocuments(filter);
     
     res.json({
       success: true,
@@ -2556,7 +2615,7 @@ exports.getPharmacyById = async (req, res) => {
   try {
     const { id } = req.params;
     
-    const pharmacy = await Pharmacy.findById(id)
+    const pharmacy = await PharmacyProfile.findById(id)
       .populate('userId', 'email isActive lastLogin');
     
     if (!pharmacy) {
@@ -2613,7 +2672,7 @@ exports.updatePharmacy = async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     
-    const pharmacy = await Pharmacy.findByIdAndUpdate(
+    const pharmacy = await PharmacyProfile.findByIdAndUpdate(
       id,
       updates,
       { new: true, runValidators: true }
@@ -2650,7 +2709,7 @@ exports.deletePharmacy = async (req, res) => {
   try {
     const { id } = req.params;
     
-    const pharmacy = await Pharmacy.findById(id);
+    const pharmacy = await PharmacyProfile.findById(id);
     if (!pharmacy) {
       return res.status(404).json({
         success: false,
@@ -2658,8 +2717,8 @@ exports.deletePharmacy = async (req, res) => {
       });
     }
     
-    // Soft delete - mark as inactive
-    await Pharmacy.findByIdAndUpdate(id, { status: 'Inactive' });
+    // Soft delete - mark as inactive (actually verificationStatus can be suspended or just change user isActive)
+    await PharmacyProfile.findByIdAndUpdate(id, { verificationStatus: 'suspended' });
     
     // Update user
     await User.findByIdAndUpdate(pharmacy.userId, { isActive: false });

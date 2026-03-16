@@ -43,7 +43,7 @@ const payoutSchema = new mongoose.Schema({
   }],
   payoutMethod: {
     type: String,
-    enum: ['bank_transfer', 'upi', 'cash', 'cheque'],
+    enum: ['bank_transfer', 'upi', 'cash', 'cheque', 'manual', 'bulk_transfer', 'card', 'netbanking', 'wallet'],
     required: true
   },
   status: {

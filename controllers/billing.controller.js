@@ -10,7 +10,8 @@ exports.generateAppointmentBill = async (req, res) => {
     const appointment = await Appointment.findById(appointmentId)
       .populate('patientId', 'name phone email address')
       .populate('doctorId', 'name specialization consultationFee')
-      .populate('physioId', 'name specialization consultationFee homeVisitFee');
+      .populate('physioId', 'name specialization consultationFee homeVisitFee')
+      .populate('pathologyId', 'labName consultationFee');
     
     if (!appointment) {
       return res.status(404).json({ message: 'Appointment not found' });
@@ -24,24 +25,28 @@ exports.generateAppointmentBill = async (req, res) => {
     
     const professional = appointment.professionalType === 'doctor' 
       ? appointment.doctorId 
-      : appointment.physioId;
+      : appointment.professionalType === 'physio'
+        ? appointment.physioId
+        : appointment.pathologyId;
     
     const consultationFee = appointment.consultationFee;
-    const homeVisitCharges = appointment.type === 'home' ? professional.homeVisitFee || 0 : 0;
+    const homeVisitCharges = appointment.type === 'home' ? professional?.homeVisitFee || 0 : 0;
     
     // Get commission settings
     const settings = await CommissionSettings.getSettings();
-    const commissionRate = appointment.professionalType === 'doctor' 
-      ? settings.defaultDoctorCommission 
-      : settings.defaultPhysioCommission;
+    const commissionRate = 
+      appointment.professionalType === 'doctor' ? settings.defaultDoctorCommission : 
+      appointment.professionalType === 'physio' ? settings.defaultPhysioCommission :
+      settings.defaultPathologyCommission;
     
     const platformCommission = (consultationFee * commissionRate) / 100;
     const professionalEarning = consultationFee - platformCommission;
     
     // Create invoice items
+    const professionalName = professional?.name || professional?.labName || 'Professional';
     const items = [
       {
-        description: `Consultation Fee - ${appointment.professionalType === 'doctor' ? 'Dr.' : ''} ${professional.name}`,
+        description: `Consultation Fee - ${appointment.professionalType === 'doctor' ? 'Dr.' : ''} ${professionalName}`,
         quantity: 1,
         unitPrice: consultationFee,
         amount: consultationFee,
@@ -94,9 +99,17 @@ exports.generateAppointmentBill = async (req, res) => {
     // Create commission record if not exists
     const existingCommission = await Commission.findOne({ appointmentId });
     if (!existingCommission) {
+      const professionalModel = 
+        appointment.professionalType === 'doctor' ? 'DoctorProfile' :
+        appointment.professionalType === 'physio' ? 'PhysiotherapistProfile' :
+        'PathologyProfile';
+
       await Commission.create({
         appointmentId,
-        professionalId: appointment.professionalType === 'doctor' ? appointment.doctorId : appointment.physioId,
+        professionalId: appointment.professionalType === 'doctor' ? appointment.doctorId : 
+                       appointment.professionalType === 'physio' ? appointment.physioId : 
+                       appointment.pathologyId,
+        professionalModel,
         professionalType: appointment.professionalType,
         patientId: appointment.patientId._id,
         consultationFee,

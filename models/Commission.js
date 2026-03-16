@@ -17,14 +17,14 @@ const commissionSchema = new mongoose.Schema({
   // ✅ actual mongoose model name to populate
   professionalModel: {
     type: String,
-    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PathologyProfile'],
+    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PathologyProfile', 'PharmacyProfile'],
     required: true
   },
 
   // ✅ keep your existing business type
   professionalType: {
     type: String,
-    enum: ['doctor', 'physio', 'pathology'],
+    enum: ['doctor', 'physio', 'pathology', 'pharmacy'],
     required: true
   },
 
@@ -46,7 +46,7 @@ const commissionSchema = new mongoose.Schema({
   payoutDate: Date,
   payoutMethod: {
     type: String,
-    enum: ['bank_transfer', 'upi', 'cash', 'cheque']
+    enum: ['bank_transfer', 'upi', 'cash', 'cheque', 'manual', 'bulk_transfer', 'card', 'netbanking', 'wallet']
   },
   transactionId: String,
   payoutReference: String,
