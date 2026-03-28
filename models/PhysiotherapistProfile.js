@@ -43,6 +43,7 @@ const physiotherapistProfileSchema = new mongoose.Schema({
 
   consultationFee: { type: Number, required: true, min: 0 },
   homeVisitFee: { type: Number, required: true, min: 0 },
+  videoCallFee: { type: Number, default: 0 },
 
   availability: [availabilitySlotSchema], // ✅ Shared schema
 

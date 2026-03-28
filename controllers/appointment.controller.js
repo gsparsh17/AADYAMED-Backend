@@ -87,6 +87,10 @@ exports.createAppointment = async (req, res) => {
       consultationFee = professional.consultationFee || 0;
       if (type === 'home') {
         consultationFee += (professional.homeVisitFee || 0);
+      } else if (type === 'video') {
+        consultationFee = professional.videoCallFee || professional.consultationFee || 0;
+      } else {
+        consultationFee = professional.consultationFee || 0;
       }
 
     } else if (professionalType === 'physio') {
@@ -102,6 +106,8 @@ exports.createAppointment = async (req, res) => {
 
       if (type === 'home') {
         consultationFee = professional.homeVisitFee || 0;
+      } else if (type === 'video') {
+        consultationFee = professional.videoCallFee || professional.consultationFee || 0;
       } else {
         consultationFee = professional.consultationFee || 0;
       }
@@ -122,6 +128,8 @@ exports.createAppointment = async (req, res) => {
       consultationFee = professional.consultationFee || 0;
       if (type === 'home') {
         consultationFee += (professional.homeVisitFee || 0);
+      } else if (type === 'video') {
+        consultationFee = professional.videoCallFee || professional.consultationFee || 0;
       }
     }
 
@@ -393,9 +401,9 @@ exports.getAppointments = async (req, res) => {
 
     if (req.user.role === 'patient') {
       query = query
-        .populate('doctorId', 'name specialization consultationFee clinicAddress')
-        .populate('physioId', 'name services consultationFee clinicAddress')
-        .populate('pathologyId', 'name consultationFee clinicAddress'); // adjust fields if needed
+        .populate('doctorId', 'name specialization consultationFee homeVisitFee videoCallFee clinicAddress')
+        .populate('physioId', 'name services consultationFee homeVisitFee videoCallFee clinicAddress')
+        .populate('pathologyId', 'labName email phone address'); // adjust fields if needed
     } else if (['doctor', 'physio', 'pathology', 'admin'].includes(req.user.role)) {
       query = query.populate('patientId', 'name phone age gender');
     }

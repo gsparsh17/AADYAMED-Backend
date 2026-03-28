@@ -61,6 +61,7 @@ const doctorProfileSchema = new mongoose.Schema({
 
   consultationFee: { type: Number, required: true, min: 0 },
   homeVisitFee: { type: Number, default: 0 },
+  videoCallFee: { type: Number, default: 0 },
 
   availability: [availabilitySlotSchema],
 

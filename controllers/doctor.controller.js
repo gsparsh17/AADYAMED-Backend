@@ -36,6 +36,7 @@ exports.createDoctor = async (req, res) => {
 
     const consultationFee = Number(body.consultationFee);
     const homeVisitFee = body.homeVisitFee !== undefined ? Number(body.homeVisitFee) : 0;
+    const videoCallFee = body.videoCallFee !== undefined ? Number(body.videoCallFee) : 0;
 
     const experienceYears =
       body.experienceYears !== undefined ? Number(body.experienceYears)
@@ -101,6 +102,7 @@ exports.createDoctor = async (req, res) => {
 
       consultationFee,
       homeVisitFee: Number.isNaN(homeVisitFee) ? 0 : homeVisitFee,
+      videoCallFee: Number.isNaN(videoCallFee) ? 0 : videoCallFee,
 
       availability,
 
@@ -186,7 +188,7 @@ exports.getAllDoctors = async (req, res) => {
     const doctors = await DoctorProfile.find(filter)
       // DoctorProfile has no password field; keep public-safe fields
       .select(
-        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee languages about services verificationStatus averageRating totalReviews totalConsultations'
+        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee videoCallFee languages about services verificationStatus averageRating totalReviews totalConsultations'
       )
       .populate('userId', 'email isVerified')
       .sort({ averageRating: -1, createdAt: -1 })
@@ -277,7 +279,7 @@ exports.getDoctorsBySpecialization = async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const doctors = await DoctorProfile.find(filter)
-      .select('name profileImage specialization averageRating consultationFee homeVisitFee clinicAddress availability totalConsultations')
+      .select('name profileImage specialization averageRating consultationFee homeVisitFee videoCallFee clinicAddress availability totalConsultations')
       .sort({ averageRating: -1 })
       .skip(skip)
       .limit(parseInt(limit));

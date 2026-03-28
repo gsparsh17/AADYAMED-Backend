@@ -80,6 +80,7 @@ exports.createPhysiotherapist = async (req, res) => {
 
     const consultationFee = Number(body.consultationFee);
     const homeVisitFee = body.homeVisitFee !== undefined ? Number(body.homeVisitFee) : 0;
+    const videoCallFee = body.videoCallFee !== undefined ? Number(body.videoCallFee) : 0;
 
     const experienceYears =
       body.experienceYears !== undefined ? Number(body.experienceYears)
@@ -135,6 +136,7 @@ exports.createPhysiotherapist = async (req, res) => {
 
       consultationFee,
       homeVisitFee: Number.isNaN(homeVisitFee) ? 0 : homeVisitFee,
+      videoCallFee: Number.isNaN(videoCallFee) ? 0 : videoCallFee,
 
       availability,
 
@@ -215,7 +217,7 @@ exports.getAllPhysios = async (req, res) => {
 
     const physios = await PhysiotherapistProfile.find(filter)
       .select(
-        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee languages about services verificationStatus averageRating totalReviews totalConsultations servesAreas availability'
+        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee videoCallFee languages about services verificationStatus averageRating totalReviews totalConsultations servesAreas availability'
       )
       .populate('userId', 'email isVerified')
       .sort({ averageRating: -1, createdAt: -1 })
@@ -297,7 +299,7 @@ exports.getPhysiosBySpecialization = async (req, res) => {
     const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
 
     const physios = await PhysiotherapistProfile.find(filter)
-      .select('name profileImage specialization averageRating consultationFee homeVisitFee clinicAddress availability totalConsultations servesAreas')
+      .select('name profileImage specialization averageRating consultationFee homeVisitFee videoCallFee clinicAddress availability totalConsultations servesAreas')
       .sort({ averageRating: -1 })
       .skip(skip)
       .limit(parseInt(limit, 10));
