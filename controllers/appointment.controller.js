@@ -347,7 +347,8 @@ exports.getAppointments = async (req, res) => {
       case 'patient': {
         const patientProfile = await PatientProfile.findOne({ userId: req.user.id });
         if (!patientProfile) {
-          return res.status(404).json({ success: false, error: 'Patient profile not found' });
+          // If no profile, they definitely don't have appointments. Return empty rather than 404 crash.
+          return res.json({ success: true, appointments: [], pagination: {page: 1, limit: 10, total: 0, pages: 1}, stats: {upcoming: 0, completed: 0, cancelled: 0} });
         }
         filter.patientId = patientProfile._id;
         break;
