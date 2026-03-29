@@ -83,6 +83,20 @@ exports.createLabTest = async (req, res) => {
   }
 };
 
+exports.getLabTestsByPatientId = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const labTests = await LabTest.find({ patientId: id })
+      .sort({ scheduledDate: -1 })
+      .populate('pathologyId', 'labName phone address')
+      .populate('doctorId', 'name')
+      .populate('prescriptionId', 'prescriptionNumber');
+    res.json(labTests);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 exports.getLabTests = async (req, res) => {
   try {
     const { 

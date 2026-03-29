@@ -6,6 +6,7 @@ const { protect } = require('../middlewares/auth');
 router.use(protect);
 
 router.post('/', labTestController.createLabTest);
+router.get('/patient/:id', labTestController.getLabTestsByPatientId);
 router.get('/', labTestController.getLabTests);
 router.put('/:id/status', labTestController.updateTestStatus);
 router.put('/:id/upload-report', labTestController.uploadReport);

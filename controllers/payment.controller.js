@@ -3,15 +3,21 @@ const Appointment = require('../models/Appointment');
 const LabTest = require('../models/LabTest');
 const crypto = require('crypto');
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
-});
-
 exports.createPaymentOrder = async (req, res) => {
   try {
     const { amount, currency = 'INR', entityType, entityId, notes } = req.body;
     
+    // Safely retrieve keys inside handler
+    const key_id = process.env.RAZORPAY_KEY_ID?.trim();
+    const key_secret = process.env.RAZORPAY_KEY_SECRET?.trim();
+    
+    if (!key_id || !key_secret) {
+      console.error('Razorpay keys missing from environment');
+      return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
+    }
+
+    const razorpay = new Razorpay({ key_id, key_secret });
+
     const options = {
       amount: amount * 100, // Razorpay expects amount in paise
       currency,
@@ -28,7 +34,9 @@ exports.createPaymentOrder = async (req, res) => {
     
     res.json({ success: true, order });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Razorpay create order error:', error);
+    const errorMessage = error.error?.description || error.message || 'Razorpay order creation failed';
+    res.status(500).json({ success: false, message: errorMessage, details: error });
   }
 };
 

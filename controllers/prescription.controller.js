@@ -62,6 +62,21 @@ exports.createPrescription = async (req, res) => {
   }
 };
 
+exports.getPrescriptionsByPatientId = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const prescriptions = await Prescription.find({ patientId: id })
+      .sort({ issuedAt: -1 })
+      .populate('patientId', 'name age gender')
+      .populate('doctorId', 'name specialization')
+      .populate('physioId', 'name specialization')
+      .populate('appointmentId', 'appointmentDate type');
+    res.json(prescriptions);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 exports.getPrescriptions = async (req, res) => {
   try {
     const { patientId, startDate, endDate, page = 1, limit = 10 } = req.query;

@@ -24,9 +24,14 @@ router.put('/me/availability', physioController.updateAvailability);
 router.post('/me/break', physioController.addBreak);
 
 router.get('/me/appointments', physioController.getAppointments);
+router.get('/me/patients', physioController.getMyPatients);
+router.get('/me/patients/:id', physioController.getPatientById);
 router.get('/me/earnings', physioController.getEarnings);
 router.get('/me/earnings/report', physioController.getPhysioEarnings);
 router.get('/me/dashboard', physioController.getPhysioDashboard);
+
+// ========== PUBLIC "BY ID" ROUTE ==========
+router.get('/:id', physioController.getPhysioById);
 
 // ========== ADMIN ROUTES ==========
 router.use(protect, authorize('admin'));
@@ -34,8 +39,5 @@ router.use(protect, authorize('admin'));
 router.post('/bulk', physioController.bulkCreatePhysios);
 router.put('/:id', physioController.updatePhysio);
 router.delete('/:id', physioController.deletePhysio);
-
-// ========== PUBLIC "BY ID" ROUTE MUST BE LAST ==========
-router.get('/:id', physioController.getPhysioById);
 
 module.exports = router;

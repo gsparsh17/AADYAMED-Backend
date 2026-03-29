@@ -1456,3 +1456,15 @@ async function removeDoctorFromCalendar(doctorId) {
     }
   }
 }
+
+// GET /doctor/patients/:id
+exports.getPatientById = async (req, res) => {
+  try {
+    const PatientProfile = require('../models/PatientProfile');
+    const profile = await PatientProfile.findById(req.params.id);
+    if (!profile) return res.status(404).json({ success: false, error: 'Patient not found' });
+    return res.json(profile);
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};

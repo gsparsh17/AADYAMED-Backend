@@ -9,6 +9,9 @@ router.use(protect);
 // Create appointment
 router.post('/', appointmentController.createAppointment);
 
+// Get appointments by patient id (doctor view)
+router.get('/patient/:id', appointmentController.getAppointmentsByPatientId);
+
 // Get appointments (role-based)
 router.get('/', appointmentController.getAppointments);
 

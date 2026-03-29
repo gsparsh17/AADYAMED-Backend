@@ -313,6 +313,21 @@ exports.createAppointment = async (req, res) => {
 };
 
 // Get appointments (role-based)
+exports.getAppointmentsByPatientId = async (req, res) => {
+  try {
+    const { id } = req.params;
+    // We can restrict it to only appointments involving this doctor if needed, but the UI might want the doctor to see the full patient history.
+    // We will just return the appointments.
+    const appointments = await Appointment.find({ patientId: id })
+      .populate('doctorId', 'name specialization')
+      .populate('physioId', 'name services')
+      .sort({ appointmentDate: -1 });
+    return res.json(appointments);
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 exports.getAppointments = async (req, res) => {
   try {
     const {
@@ -379,7 +394,9 @@ exports.getAppointments = async (req, res) => {
         });
     }
 
-    if (status) filter.status = status;
+    if (status) {
+      filter.status = Array.isArray(status) ? { $in: status } : status;
+    }
     if (type) filter.type = type;
     if (professionalType) filter.professionalType = professionalType;
 
@@ -740,7 +757,7 @@ exports.rescheduleAppointment = async (req, res) => {
     appointment.startTime = newTime;
     appointment.rescheduleCount += 1;
     appointment.rescheduleReason = reason;
-    appointment.status = 'rescheduled';
+    appointment.status = 'pending';
 
     await appointment.save();
 

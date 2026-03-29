@@ -799,6 +799,67 @@ exports.getAppointments = async (req, res) => {
   }
 };
 
+// GET /physio/me/patients
+exports.getMyPatients = async (req, res) => {
+  try {
+    const physio = await PhysiotherapistProfile.findOne({ userId: req.user.id });
+    if (!physio) return res.status(404).json({ success: false, error: 'Physiotherapist profile not found' });
+
+    // Find all appointments for this physio
+    const appointments = await Appointment.find({
+      physioId: physio._id,
+      professionalType: 'physio'
+    })
+      .populate('patientId', 'name phone email age gender bloodGroup weight height address chronicConditions')
+      .sort({ appointmentDate: -1 });
+
+    // Group by patient and compute stats
+    const patientMap = {};
+    for (const apt of appointments) {
+      if (!apt.patientId?._id) continue;
+      const pid = apt.patientId._id.toString();
+      if (!patientMap[pid]) {
+        const p = apt.patientId.toObject ? apt.patientId.toObject() : apt.patientId;
+        patientMap[pid] = {
+          ...p,
+          totalVisits: 0,
+          lastVisit: null,
+          totalPrescriptions: 0,
+          activeTreatments: 0,
+          registeredAt: apt.createdAt
+        };
+      }
+      patientMap[pid].totalVisits += 1;
+      const aptDate = new Date(apt.appointmentDate);
+      if (!patientMap[pid].lastVisit || aptDate > new Date(patientMap[pid].lastVisit)) {
+        patientMap[pid].lastVisit = apt.appointmentDate;
+      }
+      if (apt.status === 'confirmed' || apt.status === 'accepted') {
+        patientMap[pid].activeTreatments += 1;
+      }
+    }
+
+    const patients = Object.values(patientMap);
+
+    return res.json({ success: true, patients });
+  } catch (err) {
+    console.error('Error fetching physio patients:', err.message);
+    return res.status(500).json({ success: false, error: 'Failed to fetch patients' });
+  }
+};
+
+// GET /physio/me/patients/:id
+exports.getPatientById = async (req, res) => {
+  try {
+    const PatientProfile = require('../models/PatientProfile');
+    const profile = await PatientProfile.findById(req.params.id);
+    if (!profile) return res.status(404).json({ success: false, error: 'Patient not found' });
+    return res.json(profile);
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 // GET /physio/me/earnings
 exports.getEarnings = async (req, res) => {
   try {

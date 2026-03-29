@@ -21,6 +21,7 @@ router.get('/me/earnings/report', doctorController.getDoctorEarnings);
 router.get('/me/earnings', doctorController.getEarnings);
 router.get('/me/dashboard', doctorController.getDoctorDashboard);
 router.post('/me/profile', doctorController.createDoctor);
+router.get('/patients/:id', doctorController.getPatientById);
 
 // ========== ADMIN ROUTES ==========
 router.use(protect, authorize('admin'));
