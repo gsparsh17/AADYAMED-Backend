@@ -161,6 +161,7 @@ app.use('/api/payment', require('./routes/payment.routes'));
 app.use('/api/feedback', require('./routes/feedback.routes'));
 app.use('/api/notifications', require('./routes/notification.routes'));
 app.use('/api/calendar', require('./routes/calendar.routes'));
+app.use('/api/chat', require('./routes/chat.routes'));
 
 // Pharmacy Routes
 app.use('/api/medicine', require('./routes/medicine.routes'));
