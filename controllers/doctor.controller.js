@@ -755,25 +755,20 @@ exports.updateAvailability = async (req, res) => {
 
     // Update calendar with new availability - ONLY if availability actually changed
     if (JSON.stringify(oldAvailability) !== JSON.stringify(availability)) {
-      try {
-        console.log('🔄 Availability changed, updating calendar immediately...');
-        
-        // Trigger immediate update
-        const result = await updateDoctorInCalendar(doctor._id, doctor);
-        
-        if (result.success) {
-          console.log(`✅ Calendar updated immediately for ${doctor.name}`);
-        } else {
-          console.error('❌ Immediate calendar update failed:', result.error);
-          // Don't fail the request, just log error
+      setTimeout(async () => {
+        try {
+          console.log('🔄 Availability changed, updating calendar immediately in background...');
+          const result = await updateDoctorInCalendar(doctor._id, doctor);
+          if (result.success) {
+            console.log(`✅ Calendar updated immediately for ${doctor.name}`);
+          }
+        } catch (calendarError) {
+          console.error('❌ Error updating doctor in calendar:', calendarError);
         }
-      } catch (calendarError) {
-        console.error('❌ Error updating doctor in calendar:', calendarError);
-        // Don't fail the request, just log the error
-      }
+      }, 500); // Send to background
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Availability updated successfully',
       availability: doctor.availability
