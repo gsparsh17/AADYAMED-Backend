@@ -68,7 +68,7 @@ const startServer = async () => {
           });
 
           // Broadcast to everyone in the room (including sender to confirm)
-          io.to(sessionId).emit('receive_message', msg);
+          io.to(sessionId).emit('receive_message', msg.toJSON());
           
           // Optionally, we could also emit to a global user room to notify them if they aren't in the chat view
 
