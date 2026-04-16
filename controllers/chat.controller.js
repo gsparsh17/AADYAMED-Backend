@@ -9,24 +9,19 @@ const PatientProfile = require('../models/PatientProfile');
 // Create or Get Chat Session
 exports.getOrCreateSession = async (req, res) => {
   try {
-    const { patientId, professionalId, professionalType } = req.body;
+    const { patientId, professionalId, professionalType, appointmentId } = req.body;
     
     if (!patientId || !professionalId || !professionalType) {
       return res.status(400).json({ success: false, error: 'patientId, professionalId, and professionalType are required' });
     }
 
-    let session = await ChatSession.findOne({
-      patientId,
-      professionalId,
-      professionalType
-    }).populate('lastMessage');
+    const query = { patientId, professionalId, professionalType };
+    if (appointmentId) query.appointmentId = appointmentId;
+
+    let session = await ChatSession.findOne(query).populate('lastMessage');
 
     if (!session) {
-      session = await ChatSession.create({
-        patientId,
-        professionalId,
-        professionalType
-      });
+      session = await ChatSession.create(query);
     }
 
     res.json({ success: true, session });
