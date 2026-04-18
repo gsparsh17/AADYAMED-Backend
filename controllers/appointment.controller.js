@@ -86,7 +86,7 @@ exports.createAppointment = async (req, res) => {
 
       consultationFee = professional.consultationFee || 0;
       if (type === 'home') {
-        consultationFee += (professional.homeVisitFee || 0);
+        consultationFee = (professional.homeVisitFee || professional.consultationFee || 0);
       } else if (type === 'video') {
         consultationFee = professional.videoCallFee || professional.consultationFee || 0;
       } else {
@@ -127,7 +127,7 @@ exports.createAppointment = async (req, res) => {
       // Adjust fee fields if your PathologyProfile differs
       consultationFee = professional.consultationFee || 0;
       if (type === 'home') {
-        consultationFee += (professional.homeVisitFee || 0);
+        consultationFee = (professional.homeVisitFee || professional.consultationFee || 0);
       } else if (type === 'video') {
         consultationFee = professional.videoCallFee || professional.consultationFee || 0;
       }
