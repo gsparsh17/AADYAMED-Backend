@@ -673,11 +673,13 @@ exports.updateAvailability = async (req, res) => {
     await physio.save();
 
     if (JSON.stringify(oldAvailability) !== JSON.stringify(availability)) {
-      try {
-        await updateDoctorInCalendar(physio._id, physio);
-      } catch (calendarError) {
-        console.error('❌ Error updating physio in calendar:', calendarError);
-      }
+      setTimeout(async () => {
+        try {
+          await updateDoctorInCalendar(physio._id, physio);
+        } catch (calendarError) {
+          console.error('❌ Error updating physio in calendar:', calendarError);
+        }
+      }, 500);
     }
 
     return res.json({ success: true, message: 'Availability updated successfully', availability: physio.availability });
