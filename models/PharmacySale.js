@@ -10,6 +10,11 @@ const pharmacySaleItemSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'MedicineBatch'
   },
+  batchAllocations: [{
+    batchId: { type: mongoose.Schema.Types.ObjectId, ref: 'MedicineBatch' },
+    quantity: { type: Number, min: 0 },
+    purchasePrice: { type: Number, min: 0 }
+  }],
   medicineName: String,
   genericName: String,
   quantity: {
@@ -30,6 +35,15 @@ const pharmacySaleItemSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  priceIncludesTax: { type: Boolean, default: true },
+  hsnCode: String,
+  taxableAmount: { type: Number, default: 0 },
+  taxAmount: { type: Number, default: 0 },
+  cgst: { type: Number, default: 0 },
+  sgst: { type: Number, default: 0 },
+  igst: { type: Number, default: 0 },
+  costAmount: { type: Number, default: 0 },
+  returnedQuantity: { type: Number, default: 0, min: 0 },
   totalAmount: {
     type: Number,
     required: true
@@ -91,6 +105,16 @@ const pharmacySaleSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  cgst: { type: Number, default: 0 },
+  sgst: { type: Number, default: 0 },
+  igst: { type: Number, default: 0 },
+  taxMode: { type: String, enum: ['intrastate', 'interstate'], default: 'intrastate' },
+  costOfGoods: { type: Number, default: 0 },
+  grossProfit: { type: Number, default: 0 },
+  returnedAmount: { type: Number, default: 0 },
+  returnedSubtotal: { type: Number, default: 0 },
+  returnedTax: { type: Number, default: 0 },
+  returnedCost: { type: Number, default: 0 },
   roundOff: {
     type: Number,
     default: 0
@@ -123,7 +147,7 @@ const pharmacySaleSchema = new mongoose.Schema({
   // Status
   status: {
     type: String,
-    enum: ['draft', 'pending', 'dispensed', 'cancelled', 'returned'],
+    enum: ['draft', 'pending', 'dispensed', 'partially_returned', 'cancelled', 'returned'],
     default: 'draft'
   },
   
@@ -144,6 +168,8 @@ const pharmacySaleSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+  dispensedAt: Date,
+  invoiceNumber: String,
   dispensedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

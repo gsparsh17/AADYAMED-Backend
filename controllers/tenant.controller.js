@@ -87,6 +87,8 @@ exports.createStore = async (req, res) => {
       name,
       code,
       licenseNumber: req.body.licenseNumber || profile.licenseNumber,
+      drugLicenseNumber: req.body.drugLicenseNumber || req.body.licenseNumber || profile.licenseNumber,
+      gstin: req.body.gstin,
       email: req.body.email || profile.email || req.user.email,
       phone: req.body.phone || profile.phone || req.user.phone,
       address: req.body.address || {},
@@ -118,7 +120,7 @@ exports.updateStore = async (req, res) => {
       return res.status(403).json({ success: false, error: 'You do not have access to this pharmacy store' });
     }
 
-    const allowed = ['name', 'licenseNumber', 'email', 'phone', 'address', 'operatingHours', 'settings', 'status'];
+    const allowed = ['name', 'licenseNumber', 'drugLicenseNumber', 'gstin', 'email', 'phone', 'address', 'operatingHours', 'settings', 'status'];
     const updates = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => allowed.includes(key)));
     updates.updatedBy = req.user._id;
 

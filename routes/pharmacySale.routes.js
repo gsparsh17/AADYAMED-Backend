@@ -13,6 +13,7 @@ router.post('/', requireOrganizationRole('owner','admin','manager','pharmacist',
 router.get('/', pharmacySaleController.getAllSales);
 router.get('/report', pharmacySaleController.getSalesReport);
 router.get('/stats/today', pharmacySaleController.getTodaySalesStats);
+router.get('/:id/invoice', pharmacySaleController.downloadSaleInvoice);
 router.get('/:id', pharmacySaleController.getSaleById);
 router.post('/:id/dispense', requireOrganizationRole('owner','admin','manager','pharmacist','cashier'), pharmacySaleController.dispenseSale);
 

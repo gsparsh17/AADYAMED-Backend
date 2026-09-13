@@ -76,6 +76,8 @@ const prescriptionSchema = new mongoose.Schema({
   },
   dispensedItems: [{
     medicineId: mongoose.Schema.Types.ObjectId,
+    medicineName: String,
+    genericName: String,
     batchId: mongoose.Schema.Types.ObjectId,
     quantity: Number,
     unit: String,

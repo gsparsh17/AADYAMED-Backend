@@ -27,6 +27,8 @@ const stockAdjustmentSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  previousBatchQuantity: Number,
+  newBatchQuantity: Number,
   
   // Adjustment Details
   adjustmentType: {
@@ -39,9 +41,11 @@ const stockAdjustmentSchema = new mongoose.Schema({
   // Reference
   referenceType: {
     type: String,
-    enum: ['sale', 'purchase', 'prescription', 'return', 'manual', 'other']
+    enum: ['sale', 'purchase', 'prescription', 'return', 'manual', 'transfer', 'grn', 'stocktake', 'other']
   },
   referenceId: mongoose.Schema.Types.ObjectId,
+  sourceStoreId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore' },
+  destinationStoreId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore' },
   
   // Notes
   notes: String,

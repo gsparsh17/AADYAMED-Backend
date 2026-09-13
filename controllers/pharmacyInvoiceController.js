@@ -3,6 +3,7 @@ const Medicine = require('../models/Medicine');
 const PDFDocument = require('pdfkit');
 const Prescription = require('../models/Prescription');
 const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
+const { scopeFromRequest, consumeFefo, addToBatch } = require('../services/inventory.service');
 
 const roundMoney = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
@@ -10,66 +11,73 @@ const createInvoiceAndHandleStock = async (req, res) => {
   const { prescription_id, patient_id, doctor_id, items, payment_mode = 'Cash' } = req.body;
   if (!patient_id) return res.status(400).json({ success: false, message: 'patient_id is required.' });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, message: 'Invoice must contain at least one item.' });
+  const requested = items.map(item => ({ medicineId: item.medicine_id || item.medicineId, quantity: Number(item.quantity) }));
+  if (requested.some(item => !item.medicineId || !Number.isFinite(item.quantity) || item.quantity <= 0)) return res.status(400).json({ success: false, message: 'One or more invoice items are invalid.' });
 
-  const normalizedItems = items.map(item => ({
-    medicine_id: item.medicine_id || item.medicineId,
-    name: item.name,
-    quantity: Number(item.quantity),
-    price: Number(item.price)
-  }));
-  if (normalizedItems.some(item => !item.medicine_id || !item.name || !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
-    return res.status(400).json({ success: false, message: 'One or more invoice items are invalid.' });
-  }
-
+  const completed = [];
+  let createdInvoice = null;
   try {
-    const medicineIds = normalizedItems.map(item => item.medicine_id);
+    let prescription = null;
+    if (prescription_id) {
+      prescription = await Prescription.findById(prescription_id);
+      if (!prescription || !['issued', 'superseded'].includes(prescription.status)) return res.status(400).json({ success: false, message: 'An issued prescription is required.' });
+      if (prescription.expiresAt && new Date(prescription.expiresAt) < new Date()) return res.status(400).json({ success: false, message: 'Prescription has expired.' });
+      if (prescription.patientId && String(prescription.patientId) !== String(patient_id)) return res.status(400).json({ success: false, message: 'Prescription does not belong to this patient.' });
+    }
+
+    const medicineIds = requested.map(item => item.medicineId);
     const medicines = await Medicine.find(scopedFilter(req, { _id: { $in: medicineIds }, isActive: true }));
     const medicineMap = new Map(medicines.map(m => [String(m._id), m]));
-    for (const item of normalizedItems) {
-      const medicine = medicineMap.get(String(item.medicine_id));
-      if (!medicine) return res.status(400).json({ success: false, message: `Medicine ${item.name} is not available in the selected store.` });
-      if (medicine.quantity < item.quantity) {
-        return res.status(409).json({ success: false, message: `Insufficient stock for ${medicine.medicineName}. Available: ${medicine.quantity}` });
+    const serverItems = [];
+    const norm = value => String(value || '').trim().toLowerCase();
+    for (const item of requested) {
+      const medicine = medicineMap.get(String(item.medicineId));
+      if (!medicine) return res.status(400).json({ success: false, message: `Medicine ${item.medicineId} is not available in the selected store.` });
+      if (medicine.prescriptionRequired) {
+        if (!prescription) return res.status(400).json({ success: false, message: `Prescription required for ${medicine.medicineName}.` });
+        const names = new Set([norm(medicine.medicineName), norm(medicine.genericName)].filter(Boolean));
+        const prescribed = (prescription.medicines || []).some(rx => names.has(norm(rx.medicineName)) || names.has(norm(rx.genericName)));
+        if (!prescribed) return res.status(400).json({ success: false, message: `${medicine.medicineName} is not on the selected prescription.` });
       }
+      serverItems.push({ medicine, quantity: item.quantity, name: medicine.medicineName, price: Number(medicine.sellingPrice || 0) });
     }
 
-    const serverTotal = roundMoney(normalizedItems.reduce((sum, item) => sum + item.quantity * item.price, 0));
-    const decremented = [];
-    try {
-      for (const item of normalizedItems) {
-        const result = await Medicine.updateOne(
-          scopedFilter(req, { _id: item.medicine_id, isActive: true, quantity: { $gte: item.quantity } }),
-          { $inc: { quantity: -item.quantity } }
-        );
-        if (result.modifiedCount !== 1) throw new Error(`Stock changed while processing ${item.name}. Please retry.`);
-        decremented.push(item);
-      }
-
-      const createdInvoice = await PharmacyInvoice.create(scopedPayload(req, {
-        prescription_id: prescription_id || undefined,
-        patient_id,
-        doctor_id: doctor_id || undefined,
-        items: normalizedItems,
-        total_amount: serverTotal,
-        payment_mode,
-        status: 'Paid',
-        created_by: req.user.id
-      }));
-
-      if (prescription_id) {
-        await Prescription.findByIdAndUpdate(prescription_id, {
-          pharmacyStatus: 'fully_dispensed', dispensedBy: req.user.id, dispensedAt: new Date()
-        });
-      }
-      return res.status(201).json(createdInvoice);
-    } catch (writeError) {
-      await Promise.allSettled(decremented.map(item => Medicine.updateOne(
-        scopedFilter(req, { _id: item.medicine_id }),
-        { $inc: { quantity: item.quantity } }
-      )));
-      throw writeError;
+    const scope = scopeFromRequest(req);
+    for (const item of serverItems) {
+      const stock = await consumeFefo({ scope, medicineId: item.medicine._id, quantity: item.quantity, actorId: req.user.id, reason: 'Legacy pharmacy invoice', referenceType: 'sale', referenceId: prescription_id || undefined });
+      completed.push({ ...item, allocations: stock.allocations });
     }
+
+    const invoiceItems = serverItems.map(item => ({ medicine_id: item.medicine._id, name: item.name, quantity: item.quantity, price: item.price }));
+    const serverTotal = roundMoney(invoiceItems.reduce((sum, item) => sum + item.quantity * item.price, 0));
+    createdInvoice = await PharmacyInvoice.create(scopedPayload(req, { prescription_id: prescription_id || undefined, patient_id, doctor_id: doctor_id || undefined, items: invoiceItems, total_amount: serverTotal, payment_mode, status: 'Paid', created_by: req.user.id }));
+
+    if (prescription) {
+      const dispensed = completed.map(item => ({ medicineId: item.medicine._id, medicineName: item.medicine.medicineName, genericName: item.medicine.genericName, batchId: item.allocations[0]?.batchId, quantity: item.quantity, unit: item.medicine.unit, dispensedAt: new Date(), dispensedBy: req.user.id }));
+      prescription.dispensedItems = (prescription.dispensedItems || []).concat(dispensed);
+      const fulfilled = (prescription.medicines || []).every(rx => {
+        const wanted = Math.max(1, Number(rx.prescribedQuantity ?? rx.quantity ?? 1) || 1);
+        const names = new Set([norm(rx.medicineName), norm(rx.genericName)].filter(Boolean));
+        const supplied = (prescription.dispensedItems || []).reduce((sum, entry) => names.has(norm(entry.medicineName)) || names.has(norm(entry.genericName)) ? sum + Number(entry.quantity || 0) : sum, 0);
+        return names.size > 0 && supplied >= wanted;
+      });
+      prescription.pharmacyStatus = fulfilled && (prescription.medicines || []).length ? 'fully_dispensed' : 'partially_dispensed';
+      prescription.dispensedBy = req.user.id;
+      prescription.dispensedAt = new Date();
+      await prescription.save();
+    }
+    return res.status(201).json(createdInvoice);
   } catch (error) {
+    const scope = req.tenant ? scopeFromRequest(req) : null;
+    if (scope) {
+      for (const item of completed.reverse()) {
+        for (const allocation of item.allocations || []) {
+          try { await addToBatch({ scope, medicineId: item.medicine._id, batchId: allocation.batchId, quantity: allocation.quantity, actorId: req.user.id, adjustmentType: 'addition', reason: 'Rollback legacy pharmacy invoice', referenceType: 'sale', referenceId: prescription_id || undefined }); }
+          catch (rollbackError) { console.error('Legacy invoice stock rollback failed:', rollbackError); }
+        }
+      }
+    }
+    if (createdInvoice?._id) { try { await PharmacyInvoice.deleteOne({ _id: createdInvoice._id }); } catch (cleanupError) { console.error('Legacy invoice cleanup failed:', cleanupError); } }
     console.error('Pharmacy invoice error:', error);
     return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Could not process invoice.' });
   }

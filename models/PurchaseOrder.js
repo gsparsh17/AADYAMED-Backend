@@ -18,6 +18,9 @@ const purchaseOrderItemSchema = new mongoose.Schema({
     required: true
   },
   sellingPrice: Number,
+  mrp: Number,
+  taxRate: { type: Number, default: 0 },
+  taxAmount: { type: Number, default: 0 },
   batchNumber: String,
   expiryDate: Date,
   
@@ -107,6 +110,7 @@ const purchaseOrderSchema = new mongoose.Schema({
   // Documents
   invoiceNumber: String,
   deliveryChallan: String,
+  grnIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'GoodsReceipt' }],
   
   // Notes
   notes: String,

@@ -1,8 +1,8 @@
 const Medicine = require('../models/Medicine');
 const MedicineBatch = require('../models/MedicineBatch');
-const StockAdjustment = require('../models/StockAdjustment');
 const Supplier = require('../models/Supplier');
 const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
+const { scopeFromRequest, addToBatch, deductFromSpecificBatch } = require('../services/inventory.service');
 
 const normalizeMedicinePayload = (body = {}) => {
   const payload = {
@@ -19,6 +19,9 @@ const normalizeMedicinePayload = (body = {}) => {
   delete payload.organization_id;
   delete payload.storeId;
   delete payload.store_id;
+  // Stock is ledger-controlled. Medicine CRUD may not create/update quantity directly.
+  delete payload.quantity;
+  delete payload.stock_quantity;
 
   if (!payload.unit && payload.category) {
     const categoryUnits = {
@@ -45,6 +48,7 @@ const withLegacyMedicineFields = (medicine) => {
     requires_prescription: obj.prescriptionRequired,
     prescription_required: obj.prescriptionRequired,
     tax_rate: obj.taxRate,
+    price_includes_tax: obj.priceIncludesTax,
     is_active: obj.isActive
   };
 };
@@ -143,55 +147,39 @@ exports.deleteMedicine = async (req, res) => {
 };
 
 exports.addStock = async (req, res) => {
+  let batch = null;
+  let stockAdded = 0;
+  let medicineIdForRollback = null;
   try {
     const { batchNumber, quantity, purchasePrice, sellingPrice, expiryDate, manufactureDate, supplierId } = req.body;
     const numericQuantity = Number(quantity);
-    if (!batchNumber || !expiryDate || !Number.isFinite(numericQuantity) || numericQuantity <= 0) {
-      return res.status(400).json({ message: 'batchNumber, expiryDate and a positive quantity are required' });
-    }
-
+    if (!batchNumber || !expiryDate || !Number.isFinite(numericQuantity) || numericQuantity <= 0) return res.status(400).json({ message: 'batchNumber, expiryDate and a positive quantity are required' });
+    if (new Date(expiryDate) <= new Date()) return res.status(400).json({ message: 'Expired stock cannot be added' });
     const medicine = await Medicine.findOne(scopedFilter(req, { _id: req.params.id }));
+    medicineIdForRollback = medicine?._id;
     if (!medicine) return res.status(404).json({ message: 'Medicine not found in the selected store' });
-
     if (supplierId) {
       const supplier = await Supplier.findOne(scopedFilter(req, { _id: supplierId, isActive: true }));
       if (!supplier) return res.status(400).json({ message: 'Supplier does not belong to the selected store' });
     }
-
     const duplicate = await MedicineBatch.exists(scopedFilter(req, { medicineId: medicine._id, batchNumber }));
     if (duplicate) return res.status(409).json({ message: 'Batch number already exists for this medicine in the selected store' });
-
-    const previousQuantity = medicine.quantity;
-    const batch = await MedicineBatch.create(scopedPayload(req, {
-      medicineId: medicine._id,
-      batchNumber,
-      quantity: numericQuantity,
-      availableQuantity: numericQuantity,
-      purchasePrice,
-      sellingPrice: sellingPrice || medicine.sellingPrice,
-      expiryDate,
-      manufactureDate: manufactureDate || new Date(),
-      supplierId,
-      addedBy: req.user.id
-    }));
-
-    medicine.quantity += numericQuantity;
-    await medicine.save();
-
-    await StockAdjustment.create(scopedPayload(req, {
-      medicineId: medicine._id,
-      batchId: batch._id,
-      previousQuantity,
-      adjustmentQuantity: numericQuantity,
-      newQuantity: medicine.quantity,
-      adjustmentType: 'addition',
-      reason: 'New stock purchase',
-      referenceType: 'purchase',
-      adjustedBy: req.user.id
-    }));
-
-    res.status(201).json({ success: true, batch, medicine: withLegacyMedicineFields(medicine) });
+    batch = await MedicineBatch.create(scopedPayload(req, { medicineId: medicine._id, batchNumber, quantity: 0, availableQuantity: 0, purchasePrice, sellingPrice: sellingPrice || medicine.sellingPrice, expiryDate, manufactureDate: manufactureDate || new Date(), supplierId, addedBy: req.user.id }));
+    await addToBatch({ scope: scopeFromRequest(req), medicineId: medicine._id, batchId: batch._id, quantity: numericQuantity, actorId: req.user.id, adjustmentType: 'addition', reason: req.body.reason || 'Batch stock receipt', referenceType: 'purchase' });
+    stockAdded = numericQuantity;
+    batch.quantity = numericQuantity;
+    await batch.save();
+    res.status(201).json({ success: true, batch, medicine: withLegacyMedicineFields(await Medicine.findById(medicine._id)) });
   } catch (error) {
+    if (stockAdded > 0 && batch?._id && medicineIdForRollback) {
+      try { await deductFromSpecificBatch({ scope: scopeFromRequest(req), medicineId: medicineIdForRollback, batchId: batch._id, quantity: stockAdded, actorId: req.user.id, adjustmentType: 'deduction', reason: 'Rollback failed batch stock receipt', referenceType: 'purchase' }); } catch (rollbackError) { console.error('Medicine stock rollback failed:', rollbackError); }
+    }
+    if (batch?._id) {
+      try {
+        const current = await MedicineBatch.findOne(scopedFilter(req, { _id: batch._id }));
+        if (current && Number(current.availableQuantity || 0) <= 0) await current.deleteOne();
+      } catch (_) {}
+    }
     res.status(error.statusCode || 500).json({ message: error.message });
   }
 };

@@ -200,6 +200,10 @@ app.use('/api/orders/purchase-orders', require('./routes/purchaseOrder.routes'))
 app.use('/api/orders/sale', require('./routes/pharmacySale.routes'));
 app.use('/api/sales', require('./routes/pharmacySale.routes'));
 app.use('/api/stock-adjustments', require('./routes/stockAdjustment.routes'));
+app.use('/api/pharmacy-erp', require('./routes/inventory.routes'));
+app.use('/api/stock-transfers', require('./routes/stockTransfer.routes'));
+app.use('/api/pharmacy-returns', require('./routes/pharmacyReturn.routes'));
+app.use('/api/grns', require('./routes/goodsReceipt.routes'));
 
 // Previously present route files that were unreachable from app.js.
 // Only routes that are compatible with the current model layer are mounted here.

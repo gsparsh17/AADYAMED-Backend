@@ -3,8 +3,9 @@ const PurchaseOrder = require('../models/PurchaseOrder');
 const Medicine = require('../models/Medicine');
 const MedicineBatch = require('../models/MedicineBatch');
 const Supplier = require('../models/Supplier');
-const StockAdjustment = require('../models/StockAdjustment');
+const GoodsReceipt = require('../models/GoodsReceipt');
 const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
+const { scopeFromRequest, addToBatch, deductFromSpecificBatch } = require('../services/inventory.service');
 
 function normalizeItem(item = {}) {
   return {
@@ -14,6 +15,8 @@ function normalizeItem(item = {}) {
     sellingPrice: Number(item.sellingPrice ?? item.selling_price ?? 0) || undefined,
     batchNumber: item.batchNumber || item.batch_number,
     expiryDate: item.expiryDate || item.expiry_date,
+    mrp: Number(item.mrp || 0) || undefined,
+    taxRate: Number(item.taxRate ?? item.tax_rate ?? 0) || 0,
   };
 }
 
@@ -91,10 +94,13 @@ exports.createPurchaseOrder = async (req, res) => {
         sellingPrice: item.sellingPrice || medicine.sellingPrice,
         batchNumber: item.batchNumber,
         expiryDate: item.expiryDate,
+        mrp: item.mrp,
+        taxRate: item.taxRate || medicine.taxRate || 0,
+        taxAmount: Number(((item.quantity * item.purchasePrice) * (item.taxRate || medicine.taxRate || 0) / 100).toFixed(2)),
       });
     }
 
-    const tax = Number((subtotal * 0.18).toFixed(2));
+    const tax = Number(validatedItems.reduce((sum, item) => sum + Number(item.taxAmount || 0), 0).toFixed(2));
     const totalAmount = Number((subtotal + tax).toFixed(2));
     const purchaseOrder = await PurchaseOrder.create(scopedPayload(req, {
       supplierId,
@@ -183,6 +189,8 @@ exports.approvePurchaseOrder = async (req, res) => {
 };
 
 exports.receivePurchaseOrder = async (req, res) => {
+  const appliedStocks = [];
+  let createdGrn = null;
   try {
     const receivedItems = (req.body.receivedItems || req.body.received_items || []).map(normalizeReceiveItem);
     const damagedItems = (req.body.damagedItems || req.body.damaged_items || []).map(normalizeReceiveItem);
@@ -195,96 +203,154 @@ exports.receivePurchaseOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Order must be approved or ordered before receiving stock' });
     }
 
-    let totalReceived = 0;
-    let totalDamaged = 0;
+    // Validate the complete GRN before mutating stock. This prevents a bad later
+    // line from leaving earlier PO lines partially received.
+    const seen = new Set();
+    const plans = [];
     for (const receivedItem of receivedItems) {
+      if (!receivedItem.itemId || seen.has(String(receivedItem.itemId))) {
+        return res.status(400).json({ success: false, message: 'Each purchase-order item may appear only once per GRN' });
+      }
+      seen.add(String(receivedItem.itemId));
       const orderItem = purchaseOrder.items.id(receivedItem.itemId);
       if (!orderItem) return res.status(400).json({ success: false, message: `Purchase order item ${receivedItem.itemId} not found` });
-
       const previouslyReceived = Number(orderItem.receivedQuantity || 0);
       const remainingOrdered = Math.max(0, Number(orderItem.quantity) - previouslyReceived);
       const receivedQty = Number(receivedItem.quantity || 0);
       const damagedQty = Number(damagedItems.find(d => String(d.itemId) === String(receivedItem.itemId))?.quantity || 0);
-      if (receivedQty <= 0 || receivedQty > remainingOrdered) {
-        return res.status(400).json({ success: false, message: `Invalid received quantity for ${orderItem.medicineName}. Remaining: ${remainingOrdered}` });
-      }
-      if (damagedQty < 0 || damagedQty > receivedQty) {
-        return res.status(400).json({ success: false, message: `Invalid damaged quantity for ${orderItem.medicineName}` });
-      }
-      if (!receivedItem.expiryDate) return res.status(400).json({ success: false, message: `Expiry date is required for ${orderItem.medicineName}` });
+      if (receivedQty <= 0 || receivedQty > remainingOrdered) return res.status(400).json({ success: false, message: `Invalid received quantity for ${orderItem.medicineName}. Remaining: ${remainingOrdered}` });
+      if (damagedQty < 0 || damagedQty > receivedQty) return res.status(400).json({ success: false, message: `Invalid damaged quantity for ${orderItem.medicineName}` });
+      if (!receivedItem.expiryDate || Number.isNaN(new Date(receivedItem.expiryDate).getTime())) return res.status(400).json({ success: false, message: `Valid expiry date is required for ${orderItem.medicineName}` });
+      if (new Date(receivedItem.expiryDate) <= new Date()) return res.status(400).json({ success: false, message: `Expired stock cannot be received for ${orderItem.medicineName}` });
 
       const medicine = await Medicine.findOne(scopedFilter(req, { _id: orderItem.medicineId }));
       if (!medicine) return res.status(400).json({ success: false, message: `Medicine ${orderItem.medicineName} is not in the selected store` });
-
-      const stockQty = receivedQty - damagedQty;
+      const acceptedQty = receivedQty - damagedQty;
       const batchNumber = receivedItem.batchNumber || orderItem.batchNumber || `BATCH-${Date.now()}-${medicine._id.toString().slice(-4)}`;
-      let batch = await MedicineBatch.findOne(scopedFilter(req, { medicineId: medicine._id, batchNumber }));
-      if (batch) {
-        batch.quantity += stockQty;
-        batch.availableQuantity += stockQty;
+      plans.push({ orderItem, medicine, receivedItem, receivedQty, damagedQty, acceptedQty, batchNumber, previouslyReceived });
+    }
+
+    const scope = scopeFromRequest(req);
+    const grnItems = [];
+    let totalReceived = 0;
+    let totalDamaged = 0;
+    let acceptedValue = 0;
+    let damagedValue = 0;
+
+    for (const plan of plans) {
+      const { orderItem, medicine, receivedItem, receivedQty, damagedQty, acceptedQty, batchNumber, previouslyReceived } = plan;
+      let batch = null;
+      let createdBatch = false;
+      if (acceptedQty > 0) {
+        batch = await MedicineBatch.findOne(scopedFilter(req, { medicineId: medicine._id, batchNumber }));
+        createdBatch = !batch;
+        if (!batch) {
+          batch = await MedicineBatch.create(scopedPayload(req, {
+            medicineId: medicine._id,
+            batchNumber,
+            quantity: 0,
+            availableQuantity: 0,
+            purchasePrice: orderItem.purchasePrice,
+            sellingPrice: receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice,
+            mrp: orderItem.mrp,
+            expiryDate: receivedItem.expiryDate,
+            manufactureDate: receivedItem.manufactureDate || new Date(),
+            supplierId: purchaseOrder.supplierId,
+            supplierInvoice: receivedItem.invoiceNumber,
+            addedBy: req.user.id,
+          }));
+        }
+        await addToBatch({ scope, medicineId: medicine._id, batchId: batch._id, quantity: acceptedQty, actorId: req.user.id, adjustmentType: 'addition', reason: `GRN for ${purchaseOrder.orderNumber}`, referenceType: 'grn', referenceId: purchaseOrder._id });
+        appliedStocks.push({ medicineId: medicine._id, batchId: batch._id, quantity: acceptedQty, createdBatch });
+        batch.quantity = Number(batch.quantity || 0) + acceptedQty;
         batch.expiryDate = receivedItem.expiryDate;
         batch.purchasePrice = orderItem.purchasePrice;
         batch.sellingPrice = receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice;
-        batch.supplierInvoice = receivedItem.invoiceNumber || batch.supplierInvoice;
-        batch.isActive = batch.availableQuantity > 0;
+        batch.mrp = orderItem.mrp || batch.mrp;
+        batch.supplierId = purchaseOrder.supplierId;
+        batch.supplierInvoice = receivedItem.invoiceNumber || req.body.supplierInvoiceNumber || req.body.supplier_invoice_number || batch.supplierInvoice;
         await batch.save();
-      } else {
-        batch = await MedicineBatch.create(scopedPayload(req, {
-          medicineId: medicine._id,
-          batchNumber,
-          quantity: stockQty,
-          availableQuantity: stockQty,
-          purchasePrice: orderItem.purchasePrice,
-          sellingPrice: receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice,
-          expiryDate: receivedItem.expiryDate,
-          manufactureDate: receivedItem.manufactureDate || new Date(),
-          supplierId: purchaseOrder.supplierId,
-          supplierInvoice: receivedItem.invoiceNumber,
-          addedBy: req.user.id,
-        }));
-      }
-
-      const previousQuantity = Number(medicine.quantity || 0);
-      medicine.quantity = previousQuantity + stockQty;
-      await medicine.save();
-
-      if (stockQty > 0) {
-        await StockAdjustment.create(scopedPayload(req, {
-          medicineId: medicine._id,
-          batchId: batch._id,
-          previousQuantity,
-          adjustmentQuantity: stockQty,
-          newQuantity: medicine.quantity,
-          adjustmentType: 'addition',
-          reason: 'Purchase order received',
-          referenceType: 'purchase',
-          referenceId: purchaseOrder._id,
-          adjustedBy: req.user.id,
-        }));
       }
 
       orderItem.receivedQuantity = previouslyReceived + receivedQty;
       orderItem.damagedQuantity = Number(orderItem.damagedQuantity || 0) + damagedQty;
       orderItem.batchNumber = batchNumber;
       orderItem.expiryDate = receivedItem.expiryDate;
-      totalReceived += stockQty;
+      totalReceived += acceptedQty;
       totalDamaged += damagedQty;
+      acceptedValue += acceptedQty * Number(orderItem.purchasePrice || 0);
+      damagedValue += damagedQty * Number(orderItem.purchasePrice || 0);
+      grnItems.push({
+        purchaseOrderItemId: orderItem._id,
+        medicineId: medicine._id,
+        medicineName: medicine.medicineName,
+        batchId: batch?._id,
+        batchNumber,
+        orderedQuantity: orderItem.quantity,
+        receivedQuantity: receivedQty,
+        acceptedQuantity: acceptedQty,
+        damagedQuantity: damagedQty,
+        purchasePrice: orderItem.purchasePrice,
+        sellingPrice: receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice,
+        mrp: orderItem.mrp,
+        taxRate: orderItem.taxRate || 0,
+        expiryDate: receivedItem.expiryDate,
+        manufactureDate: receivedItem.manufactureDate || new Date(),
+      });
     }
 
+    createdGrn = await GoodsReceipt.create(scopedPayload(req, {
+      purchaseOrderId: purchaseOrder._id,
+      supplierId: purchaseOrder.supplierId,
+      supplierInvoiceNumber: req.body.supplierInvoiceNumber || req.body.supplier_invoice_number || receivedItems[0]?.invoiceNumber,
+      supplierInvoiceDate: req.body.supplierInvoiceDate || req.body.supplier_invoice_date,
+      items: grnItems,
+      acceptedValue: Number(acceptedValue.toFixed(2)),
+      damagedValue: Number(damagedValue.toFixed(2)),
+      notes,
+      receivedBy: req.user.id,
+    }));
+
+    purchaseOrder.grnIds.push(createdGrn._id);
     const totalOrdered = purchaseOrder.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
     const totalReceivedSoFar = purchaseOrder.items.reduce((sum, item) => sum + Number(item.receivedQuantity || 0), 0);
-    if (totalReceivedSoFar === 0) purchaseOrder.status = 'ordered';
-    else if (totalReceivedSoFar < totalOrdered) purchaseOrder.status = 'partially_received';
-    else {
-      purchaseOrder.status = 'received';
-      purchaseOrder.receivedDate = new Date();
-    }
-
+    purchaseOrder.status = totalReceivedSoFar < totalOrdered ? 'partially_received' : 'received';
+    if (purchaseOrder.status === 'received') purchaseOrder.receivedDate = new Date();
     purchaseOrder.receivedBy = req.user.id;
     if (notes) purchaseOrder.notes = notes;
     await purchaseOrder.save();
 
-    res.json({ success: true, purchaseOrder: legacyPurchaseOrder(purchaseOrder), summary: { totalReceived, totalDamaged, totalOrdered } });
+    res.json({ success: true, purchaseOrder: legacyPurchaseOrder(purchaseOrder), grn: createdGrn, summary: { totalReceived, totalDamaged, totalOrdered } });
+  } catch (error) {
+    // Compensate any stock added before a later batch/GRN/PO write failed.
+    if (req.tenant && appliedStocks.length) {
+      const scope = scopeFromRequest(req);
+      for (const stock of appliedStocks.reverse()) {
+        try {
+          await deductFromSpecificBatch({ scope, medicineId: stock.medicineId, batchId: stock.batchId, quantity: stock.quantity, actorId: req.user.id, adjustmentType: 'deduction', reason: 'Rollback failed GRN', referenceType: 'grn', referenceId: req.params.id });
+          await MedicineBatch.updateOne(scopedFilter(req, { _id: stock.batchId }), { $inc: { quantity: -stock.quantity } });
+          if (stock.createdBatch) {
+            const current = await MedicineBatch.findOne(scopedFilter(req, { _id: stock.batchId }));
+            if (current && Number(current.quantity || 0) <= 0 && Number(current.availableQuantity || 0) <= 0) await current.deleteOne();
+          }
+        } catch (rollbackError) {
+          console.error('GRN stock rollback failed:', rollbackError);
+        }
+      }
+    }
+    if (createdGrn?._id) {
+      try { await GoodsReceipt.deleteOne({ _id: createdGrn._id }); } catch (cleanupError) { console.error('GRN cleanup failed:', cleanupError); }
+    }
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getPurchaseOrderGrns = async (req, res) => {
+  try {
+    const order = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!order) return res.status(404).json({ success: false, message: 'Purchase order not found' });
+    const grns = await GoodsReceipt.find(scopedFilter(req, { purchaseOrderId: order._id })).populate('receivedBy', 'name email').sort({ receivedDate: -1 });
+    res.json({ success: true, grns });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
@@ -329,4 +395,45 @@ exports.getPurchaseOrderStats = async (req, res) => {
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
+};
+
+exports.markPurchaseOrderOrdered = async (req, res) => {
+  try {
+    const order = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!order) return res.status(404).json({ success: false, message: 'Purchase order not found' });
+    if (order.status !== 'approved') return res.status(400).json({ success: false, message: 'Only approved orders can be marked ordered' });
+    order.status = 'ordered';
+    await order.save();
+    res.json({ success: true, purchaseOrder: legacyPurchaseOrder(order) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+};
+
+exports.cancelPurchaseOrder = async (req, res) => {
+  try {
+    const order = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!order) return res.status(404).json({ success: false, message: 'Purchase order not found' });
+    if (['received', 'cancelled', 'returned'].includes(order.status) || order.items.some(item => Number(item.receivedQuantity || 0) > 0)) {
+      return res.status(400).json({ success: false, message: 'Received purchase orders cannot be cancelled' });
+    }
+    order.status = 'cancelled';
+    if (req.body.reason) order.notes = [order.notes, `Cancelled: ${req.body.reason}`].filter(Boolean).join('\n');
+    await order.save();
+    res.json({ success: true, purchaseOrder: legacyPurchaseOrder(order) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+};
+
+exports.recordPurchasePayment = async (req, res) => {
+  try {
+    const amount = Number(req.body.amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ success: false, message: 'A positive payment amount is required' });
+    const order = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!order) return res.status(404).json({ success: false, message: 'Purchase order not found' });
+    if (order.status === 'cancelled') return res.status(400).json({ success: false, message: 'Cancelled purchase orders cannot be paid' });
+    order.paidAmount = Math.min(Number(order.totalAmount || 0), Number(order.paidAmount || 0) + amount);
+    order.paymentStatus = order.paidAmount >= order.totalAmount ? 'paid' : order.paidAmount > 0 ? 'partial' : 'pending';
+    order.paymentMethod = req.body.paymentMethod || req.body.payment_method || order.paymentMethod;
+    order.paymentDate = new Date();
+    await order.save();
+    res.json({ success: true, purchaseOrder: legacyPurchaseOrder(order) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
 };

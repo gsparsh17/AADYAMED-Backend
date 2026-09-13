@@ -52,7 +52,15 @@ const medicineSchema = new mongoose.Schema({
   },
   taxRate: {
     type: Number,
-    default: 0
+    default: 0,
+    min: 0,
+    max: 100
+  },
+  // Retail/MRP prices in Indian pharmacies are commonly GST-inclusive.
+  // Set false only when sellingPrice is explicitly maintained tax-exclusive.
+  priceIncludesTax: {
+    type: Boolean,
+    default: true
   },
   discount: {
     type: Number,

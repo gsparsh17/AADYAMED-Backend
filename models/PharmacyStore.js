@@ -14,6 +14,8 @@ const pharmacyStoreSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   code: { type: String, required: true, trim: true, uppercase: true },
   licenseNumber: { type: String, trim: true },
+  gstin: { type: String, trim: true, uppercase: true },
+  drugLicenseNumber: { type: String, trim: true },
   email: { type: String, lowercase: true, trim: true },
   phone: String,
   address: {
