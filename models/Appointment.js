@@ -65,9 +65,20 @@ const appointmentSchema = new mongoose.Schema(
       required: true,
     },
 
-    // Video Consultation Link
+    // Legacy video meeting URL. Hidden from ordinary queries; Patch 4 serves
+    // join URLs only through the authorized consultation session endpoint.
     meetingLink: {
       type: String,
+      select: false,
+    },
+    videoProvider: {
+      type: String,
+      enum: ['jitsi', 'external'],
+      default: 'jitsi',
+    },
+    consultationSessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ConsultationSession',
     },
 
     // Location
@@ -275,6 +286,7 @@ appointmentSchema.index({ appointmentDate: 1, startTime: 1 });
 appointmentSchema.index({ doctorId: 1, appointmentDate: 1, startTime: 1 });
 appointmentSchema.index({ patientId: 1, appointmentDate: -1 });
 appointmentSchema.index({ status: 1, paymentStatus: 1 });
+appointmentSchema.index({ consultationSessionId: 1 });
 
 appointmentSchema.index(
   { location: '2dsphere' },

@@ -1,96 +1,72 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const medicineSchema = new mongoose.Schema({
-  medicineName: String,
-  genericName: String,
-  dosage: String,
-  frequency: String,
-  duration: String,
-  instructions: String,
-  quantity: Number,
-  unit: String,
-  notes: String
-});
+  medicineName: { type: String, trim: true },
+  genericName: { type: String, trim: true },
+  dosage: { type: String, trim: true },
+  frequency: { type: String, trim: true },
+  duration: { type: String, trim: true },
+  instructions: { type: String, trim: true },
+  quantity: { type: Number, min: 0 },
+  prescribedQuantity: { type: Number, min: 0 },
+  unit: { type: String, trim: true },
+  notes: { type: String, trim: true }
+}, { _id: true });
 
 const testSchema = new mongoose.Schema({
-  testName: String,
-  testCode: String,
-  instructions: String,
+  testName: { type: String, trim: true },
+  testCode: { type: String, trim: true },
+  instructions: { type: String, trim: true },
   fastingRequired: Boolean,
-  notes: String
-});
+  notes: { type: String, trim: true }
+}, { _id: true });
 
 const adviceSchema = new mongoose.Schema({
-  category: String,
-  advice: String,
-  priority: { type: String, enum: ['low', 'medium', 'high'] }
-});
+  category: { type: String, trim: true },
+  advice: { type: String, trim: true },
+  priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' }
+}, { _id: true });
+
+const exerciseSchema = new mongoose.Schema({
+  name: String,
+  description: String,
+  sets: Number,
+  reps: Number,
+  frequency: String,
+  duration: String,
+  instructions: String
+}, { _id: true });
 
 const prescriptionSchema = new mongoose.Schema({
-  appointmentId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Appointment',
-    required: true
-  },
-  patientId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'PatientProfile',
-    required: true
-  },
-  doctorId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'DoctorProfile'
-  },
-  physioId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'PhysiotherapistProfile'
-  },
-  professionalType: {
-    type: String,
-    enum: ['doctor', 'physio'],
-    required: true
-  },
-  
-  // Diagnosis
-  diagnosis: [String],
-  symptoms: [String],
-  notes: String,
-  
-  // Medications
+  appointmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', required: true, index: true },
+  patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'PatientProfile', required: true, index: true },
+  doctorId: { type: mongoose.Schema.Types.ObjectId, ref: 'DoctorProfile', index: true },
+  physioId: { type: mongoose.Schema.Types.ObjectId, ref: 'PhysiotherapistProfile', index: true },
+  professionalType: { type: String, enum: ['doctor', 'physio'], required: true },
+
+  diagnosis: [{ type: String, trim: true }],
+  symptoms: [{ type: String, trim: true }],
+  notes: { type: String, trim: true },
   medicines: [medicineSchema],
-  
-  // Tests
   labTests: [testSchema],
-  testInstructions: String,
-  
-  // Advice
+  testInstructions: { type: String, trim: true },
   advice: [adviceSchema],
+  patientInstructions: { type: String, trim: true },
   followUpDate: Date,
-  followUpInstructions: String,
-  
-  // Exercise Prescription (for physio)
-  exercises: [{
-    name: String,
-    description: String,
-    sets: Number,
-    reps: Number,
-    frequency: String,
-    duration: String,
-    instructions: String
-  }],
-  
-  // Digital Signature
+  followUpInstructions: { type: String, trim: true },
+  exercises: [exerciseSchema],
+
   digitalSignature: String,
-  issuedAt: {
-    type: Date,
-    default: Date.now
-  },
-  
-  // Status
+  issuedAt: Date,
+  issuedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+
   status: {
     type: String,
-    enum: ['draft', 'issued', 'dispensed', 'cancelled'],
-    default: 'draft'
+    enum: ['draft', 'issued', 'superseded', 'cancelled'],
+    default: 'draft',
+    index: true
   },
 
   pharmacyStatus: {
@@ -108,56 +84,40 @@ const prescriptionSchema = new mongoose.Schema({
     pharmacySaleId: mongoose.Schema.Types.ObjectId
   }],
   pharmacyNotes: String,
-  
-  // Pharmacy
-  pharmacyNotes: String,
-  dispensedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
+  dispensedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   dispensedAt: Date,
-  
-  // Validity
-  validityDays: {
-    type: Number,
-    default: 30
-  },
+
+  validityDays: { type: Number, default: 30, min: 1, max: 365 },
   expiresAt: Date,
-  
-  // Digital Copy
   prescriptionPdf: String,
   qrCode: String,
-  
-  // Metadata
-  prescriptionNumber: {
-    type: String,
-    unique: true
-  },
-  version: {
-    type: Number,
-    default: 1
-  },
-  previousVersion: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Prescription'
-  }
-}, {
-  timestamps: true
-});
+
+  prescriptionNumber: { type: String, unique: true, index: true },
+  version: { type: Number, default: 1, min: 1 },
+  previousVersion: { type: mongoose.Schema.Types.ObjectId, ref: 'Prescription' },
+  cancelledAt: Date,
+  cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  cancellationReason: String
+}, { timestamps: true });
 
 prescriptionSchema.index({ patientId: 1, issuedAt: -1 });
-prescriptionSchema.index({ appointmentId: 1 });
-prescriptionSchema.index({ prescriptionNumber: 1 });
+prescriptionSchema.index({ doctorId: 1, issuedAt: -1 });
+prescriptionSchema.index({ physioId: 1, issuedAt: -1 });
+prescriptionSchema.index({ appointmentId: 1, version: -1 });
 prescriptionSchema.index({ expiresAt: 1 });
 
-// Generate prescription number
-prescriptionSchema.pre('save', async function(next) {
+prescriptionSchema.pre('validate', function(next) {
   if (!this.prescriptionNumber) {
-    const count = await mongoose.model('Prescription').countDocuments();
-    this.prescriptionNumber = `RX${Date.now().toString().slice(-8)}${(count + 1).toString().padStart(4, '0')}`;
+    const day = new Date().toISOString().slice(2, 10).replace(/-/g, '');
+    const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+    this.prescriptionNumber = `RX${day}${suffix}`;
   }
-  if (!this.expiresAt && this.validityDays) {
-    this.expiresAt = new Date(this.issuedAt.getTime() + this.validityDays * 24 * 60 * 60 * 1000);
+
+  if (this.status === 'issued') {
+    this.issuedAt = this.issuedAt || new Date();
+    if (!this.expiresAt) {
+      this.expiresAt = new Date(this.issuedAt.getTime() + Number(this.validityDays || 30) * 24 * 60 * 60 * 1000);
+    }
   }
   next();
 });

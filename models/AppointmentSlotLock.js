@@ -14,6 +14,8 @@ const appointmentSlotLockSchema = new mongoose.Schema({
   appointmentId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Appointment',
+    // Normal non-unique index; do not request sparse=true because existing
+    // Patch-3 databases may already have appointmentId_1 without sparse.
     index: true,
   },
   dateKey: {
@@ -36,6 +38,4 @@ appointmentSlotLockSchema.index(
   { professionalType: 1, professionalId: 1, dateKey: 1, startTime: 1 },
   { unique: true, name: 'unique_professional_slot_lock' }
 );
-appointmentSlotLockSchema.index({ appointmentId: 1 }, { sparse: true });
-
 module.exports = mongoose.model('AppointmentSlotLock', appointmentSlotLockSchema);

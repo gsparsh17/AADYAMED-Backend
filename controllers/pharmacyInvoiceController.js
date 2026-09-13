@@ -58,7 +58,7 @@ const createInvoiceAndHandleStock = async (req, res) => {
 
       if (prescription_id) {
         await Prescription.findByIdAndUpdate(prescription_id, {
-          pharmacyStatus: 'fully_dispensed', status: 'dispensed', dispensedBy: req.user.id, dispensedAt: new Date()
+          pharmacyStatus: 'fully_dispensed', dispensedBy: req.user.id, dispensedAt: new Date()
         });
       }
       return res.status(201).json(createdInvoice);

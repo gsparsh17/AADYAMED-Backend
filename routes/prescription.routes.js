@@ -1,14 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const prescriptionController = require('../controllers/prescription.controller');
+const controller = require('../controllers/prescription.controller');
 const { protect } = require('../middlewares/auth');
 
 router.use(protect);
 
-router.post('/', prescriptionController.createPrescription);
-router.get('/patient/:id', prescriptionController.getPrescriptionsByPatientId);
-router.get('/', prescriptionController.getPrescriptions);
-router.get('/:id', prescriptionController.getPrescriptionById);
-router.put('/:id', prescriptionController.updatePrescription);
+router.post('/', controller.createPrescription);
+router.get('/', controller.getPrescriptions);
+router.get('/patient/:id', controller.getPrescriptionsByPatientId);
+router.get('/appointment/:appointmentId', controller.getByAppointment);
+router.get('/:id/pdf', controller.downloadPdf);
+router.post('/:id/issue', controller.issuePrescription);
+router.post('/:id/cancel', controller.cancelPrescription);
+router.get('/:id', controller.getPrescriptionById);
+router.patch('/:id', controller.updatePrescription);
+router.put('/:id', controller.updatePrescription); // backward-compatible alias
 
 module.exports = router;

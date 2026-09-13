@@ -10,6 +10,7 @@ const Notification = require('../models/Notification');
 const Calendar = require('../models/Calendar');
 const Invoice = require('../models/Invoice');
 const { addMinutes, getDoctorDailySlots } = require('../services/doctorAvailability.service');
+const { finalizeAppointment } = require('../services/appointmentCompletion.service');
 const {
   acquireSlotLock,
   attachAppointment,
@@ -19,17 +20,7 @@ const {
 // ========== HELPER FUNCTIONS ==========
 // ========== HELPER FUNCTIONS ==========
 // Return a dynamic Jitsi Meet link instead, as Google Meet blocks randomly generated IDs
-const generateMeetingLink = () => {
-  const chars = 'abcdefghijklmnopqrstuvwxyz';
-  const getRandomChars = (len) => {
-    let result = '';
-    for (let i = 0; i < len; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result;
-  };
-  return `https://meet.jit.si/${getRandomChars(12)}`; // Jitsi allows arbitrary room names
-};
+
 
 // ========== APPOINTMENT FUNCTIONS ==========
 
@@ -194,7 +185,6 @@ exports.createAppointment = async (req, res) => {
         endTime: addMinutes(startTime, duration),
         duration,
         type,
-        meetingLink: type === 'video' ? generateMeetingLink() : undefined,
         address: type === 'home' ? address : undefined,
         location: type === 'home' ? location : undefined,
         symptoms: Array.isArray(symptoms) ? symptoms : [],
@@ -800,7 +790,7 @@ exports.rescheduleAppointment = async (req, res) => {
 exports.completeAppointment = async (req, res) => {
   try {
     const { id } = req.params;
-    const { notes, followupRequired, followupDate } = req.body;
+    const { notes, followupRequired, followupDate, followUpNotes } = req.body;
 
     const appointment = await Appointment.findById(id);
     if (!appointment) {
@@ -809,10 +799,6 @@ exports.completeAppointment = async (req, res) => {
 
     if (appointment.status === 'cancelled') {
       return res.status(400).json({ success: false, error: 'Cannot complete cancelled appointment' });
-    }
-
-    if (appointment.status === 'completed') {
-      return res.status(400).json({ success: false, error: 'Appointment is already completed' });
     }
 
     let canComplete = false;
@@ -842,22 +828,45 @@ exports.completeAppointment = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Only the assigned professional can complete this appointment' });
     }
 
+    // Doctor/physio completion uses the same idempotent finalizer as the
+    // consultation-session endpoint. This prevents duplicate earnings/stats or
+    // invoices if the UI retries the request or both flows are used.
+    if (['doctor', 'physio'].includes(appointment.professionalType)) {
+      const result = await finalizeAppointment(appointment, {
+        notes,
+        followupRequired,
+        followUpDate: followupDate,
+        followUpNotes
+      });
+      return res.json({
+        success: true,
+        message: result.newlyCompleted ? 'Appointment completed successfully' : 'Appointment was already completed',
+        appointment: result.appointment,
+        invoice: result.invoice,
+        invoiceGenerated: Boolean(result.invoice),
+        alreadyCompleted: !result.newlyCompleted
+      });
+    }
+
+    // Keep pathology completion backward-compatible; consultation sessions are
+    // intentionally limited to doctor/physio appointments in Patch 4.
+    if (appointment.status === 'completed') {
+      return res.json({ success: true, message: 'Appointment was already completed', appointment, alreadyCompleted: true });
+    }
+
     appointment.status = 'completed';
     appointment.actualEndTime = new Date();
     appointment.professionalNotes = notes;
-    appointment.followupRequired = followupRequired || false;
-
-    if (followupRequired && followupDate) {
-      appointment.followupDate = new Date(followupDate);
-    }
-
+    appointment.followupRequired = Boolean(followupRequired);
+    if (followupRequired && followupDate) appointment.followupDate = new Date(followupDate);
+    if (followUpNotes !== undefined) appointment.followUpNotes = followUpNotes;
     await appointment.save();
 
     await updateProfessionalStats(appointment);
     await createInvoiceForAppointment(appointment);
     await sendCompletionNotification(appointment);
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Appointment completed successfully',
       appointment,
@@ -865,7 +874,7 @@ exports.completeAppointment = async (req, res) => {
     });
   } catch (error) {
     console.error('Error completing appointment:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 };
 

@@ -163,6 +163,7 @@ app.use('/api/patients', require('./routes/patientDirectory.routes')); // minima
 // Core Feature Routes
 app.use('/api/referral', require('./routes/referral.routes'));
 app.use('/api/appointment', require('./routes/appointment.routes'));
+app.use('/api/consultations', require('./routes/consultation.routes'));
 app.use('/api/prescription', require('./routes/prescription.routes'));
 app.use('/api/labtest', require('./routes/labtest.routes'));
 
@@ -362,6 +363,7 @@ app.get('/api/docs', (req, res) => {
       pathology: '/api/pathology',
       referral: '/api/referral',
       appointment: '/api/appointment',
+      consultation: '/api/consultations',
       prescription: '/api/prescription',
       labtest: '/api/labtest',
       commission: '/api/commission',
