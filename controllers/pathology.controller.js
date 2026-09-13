@@ -49,7 +49,14 @@ const sanitizeServices = (services) => {
       price: s.price !== undefined && s.price !== null ? Number(s.price) : undefined,
       fastingRequired: s.fastingRequired === true,
       reportTime: s.reportTime !== undefined && s.reportTime !== null ? Number(s.reportTime) : undefined,
-      sampleType: s.sampleType ? String(s.sampleType).trim() : undefined
+      sampleType: s.sampleType ? String(s.sampleType).trim() : undefined,
+      category: s.category ? String(s.category).trim() : undefined,
+      mrp: s.mrp !== undefined && s.mrp !== null ? Number(s.mrp) : (s.price !== undefined ? Number(s.price) : undefined),
+      fastingHours: s.fastingHours !== undefined && s.fastingHours !== null ? Number(s.fastingHours) : 0,
+      preparation: s.preparation ? String(s.preparation).trim() : undefined,
+      methodology: s.methodology ? String(s.methodology).trim() : undefined,
+      homeCollectionEligible: s.homeCollectionEligible !== false,
+      isActive: s.isActive !== false
     }))
     .filter((s) => s.testName && Number.isFinite(s.price));
 };
@@ -172,7 +179,7 @@ exports.getAllLabs = async (req, res) => {
 
     const labs = await PathologyProfile.find(filter)
       .select(
-        'labName profileImage phone email address homeCollectionAvailable homeCollectionCharges accreditation averageRating totalReviews services operatingHours'
+        'labName profileImage phone email address homeCollectionAvailable homeCollectionCharges homeCollectionPincodes accreditation averageRating totalReviews services packages operatingHours bookingSettings'
       )
       .sort({ averageRating: -1, createdAt: -1 })
       .skip(skip)
@@ -200,7 +207,7 @@ exports.getAllLabs = async (req, res) => {
 exports.getLabById = async (req, res) => {
   try {
     const lab = await PathologyProfile.findById(req.params.id).select(
-      'labName profileImage phone email website address homeCollectionAvailable homeCollectionCharges accreditation licenses operatingHours services averageRating totalReviews verificationStatus'
+      'labName profileImage phone email website address homeCollectionAvailable homeCollectionCharges homeCollectionPincodes accreditation licenses operatingHours services packages bookingSettings averageRating totalReviews verificationStatus'
     );
 
     if (!lab) return res.status(404).json({ success: false, error: 'Lab not found' });
@@ -320,7 +327,9 @@ exports.bookTestSlot = async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const { id } = req.params; // pathologyProfileId
-    const { date, startTime, endTime, tests, type = 'lab', notes } = req.body || {};
+    const { date, startTime, endTime, tests, type = 'lab', notes, collectionAddress } = req.body || {};
+    const collectionType = ['home', 'home_collection'].includes(type) ? 'home_collection' : 'lab_visit';
+    const appointmentType = collectionType === 'home_collection' ? 'home' : 'clinic';
 
     if (!date || !startTime || !endTime) {
       return res.status(400).json({ success: false, error: 'date, startTime, endTime are required' });
@@ -360,7 +369,7 @@ exports.bookTestSlot = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Lab is closed on selected date (holiday)' });
     }
 
-    if (type === 'home' && !lab.homeCollectionAvailable) {
+    if (collectionType === 'home_collection' && !lab.homeCollectionAvailable) {
       return res.status(400).json({ success: false, error: 'Home collection not available' });
     }
 
@@ -375,7 +384,8 @@ exports.bookTestSlot = async (req, res) => {
         return {
           testCode: t.testCode || svc?.testCode,
           testName: t.testName || svc?.testName || key,
-          price: Number.isFinite(Number(t.price)) ? Number(t.price) : (svc?.price || 0),
+          // SECURITY: price always comes from the lab catalog, never from the browser.
+          price: Number(svc?.price || 0),
           fastingRequired: t.fastingRequired === true || svc?.fastingRequired === true,
           sampleType: t.sampleType || svc?.sampleType,
           reportTime: Number.isFinite(Number(t.reportTime)) ? Number(t.reportTime) : svc?.reportTime
@@ -384,7 +394,7 @@ exports.bookTestSlot = async (req, res) => {
       .filter((t) => t.testName);
 
     const testsTotal = normalizedTests.reduce((sum, t) => sum + (Number(t.price) || 0), 0);
-    const homeFee = type === 'home' ? (lab.homeCollectionCharges || 0) : 0;
+    const homeFee = collectionType === 'home_collection' ? (lab.homeCollectionCharges || 0) : 0;
     const totalAmount = testsTotal + homeFee;
 
     const year = targetDay.getFullYear();
@@ -428,9 +438,17 @@ exports.bookTestSlot = async (req, res) => {
             appointmentDate: targetDay,
             startTime,
             endTime,
-            type, // lab | home
+            type: appointmentType,
+            address: collectionType === 'home_collection' ? String(collectionAddress || '').trim() : undefined,
             status: 'confirmed',
+            consultationFee: testsTotal,
+            homeVisitCharges: homeFee,
+            platformCommission: Math.round((totalAmount * Number(profileTxn.commissionRate || 0) / 100) * 100) / 100,
+            professionalEarning: Math.round((totalAmount - (totalAmount * Number(profileTxn.commissionRate || 0) / 100)) * 100) / 100,
             totalAmount,
+            paymentStatus: 'pending',
+            createdBy: req.user.id,
+            bookedBy: req.user.role === 'patient' ? 'patient' : 'admin',
             notes: notes || ''
           }
         ],
@@ -446,14 +464,19 @@ exports.bookTestSlot = async (req, res) => {
             patientId: patientProfileId,
             appointmentId: appointmentDoc._id,
             scheduledDate: targetDay,
+            scheduledTime: startTime,
             startTime,
             endTime,
-            type, // lab | home
+            type: collectionType,
+            collectionAddress: collectionType === 'home_collection' ? String(collectionAddress || '').trim() : undefined,
             tests: normalizedTests,
+            subtotal: testsTotal,
             totalAmount,
             collectionCharges: homeFee,
             status: 'scheduled',
-            notes: notes || ''
+            collectionStatus: collectionType === 'home_collection' ? 'unassigned' : 'not_required',
+            patientInstructions: notes || '',
+            statusHistory: [{ status: 'scheduled', note: 'Booked through legacy pathology endpoint', actorId: req.user.id, at: new Date() }]
           }
         ],
         { session }
@@ -502,7 +525,7 @@ exports.bookTestSlot = async (req, res) => {
         date: dateKeyLocal(targetDay),
         startTime,
         endTime,
-        type,
+        type: collectionType,
         totalAmount
       }
     });
@@ -616,6 +639,9 @@ exports.updateProfile = async (req, res) => {
       'services',
       'homeCollectionAvailable',
       'homeCollectionCharges',
+      'homeCollectionPincodes',
+      'homeCollectionRadiusKm',
+      'bookingSettings',
       'operatingHours',
       'accreditation',
       'licenses'
@@ -1287,7 +1313,11 @@ exports.updateLabByAdmin = async (req, res) => {
       'accreditation',
       'licenses',
       'address'
-    ];
+    ,
+      'homeCollectionPincodes',
+      'homeCollectionRadiusKm',
+      'bookingSettings',
+      'packages'];
 
     const $set = {};
     for (const k of allowed) {

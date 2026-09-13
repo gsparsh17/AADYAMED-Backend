@@ -18,9 +18,13 @@ exports.createLabTest = async (req, res) => {
     const patientId = req.user.profileId;
     
     // Validate prescription
-    const prescription = await Prescription.findById(prescriptionId);
+    const prescription = await Prescription.findOne({
+      _id: prescriptionId,
+      patientId,
+      status: { $in: ['issued', 'superseded'] }
+    });
     if (!prescription) {
-      return res.status(404).json({ message: 'Prescription not found' });
+      return res.status(404).json({ message: 'Issued prescription not found for this patient' });
     }
     
     // Validate pathology
@@ -86,14 +90,29 @@ exports.createLabTest = async (req, res) => {
 exports.getLabTestsByPatientId = async (req, res) => {
   try {
     const { id } = req.params;
-    const labTests = await LabTest.find({ patientId: id })
+    const filter = { patientId: id };
+
+    // Do not expose arbitrary patient diagnostics to any logged-in account.
+    if (req.user.role === 'patient') {
+      if (!req.user.profileId || String(req.user.profileId) !== String(id)) {
+        return res.status(403).json({ success: false, message: 'Not authorized' });
+      }
+    } else if (req.user.role === 'pathology') {
+      filter.pathologyId = req.user.profileId;
+    } else if (req.user.role === 'doctor' || req.user.role === 'physio') {
+      filter.doctorId = req.user.profileId;
+    } else if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    const labTests = await LabTest.find(filter)
       .sort({ scheduledDate: -1 })
       .populate('pathologyId', 'labName phone address')
       .populate('doctorId', 'name')
-      .populate('prescriptionId', 'prescriptionNumber');
-    res.json(labTests);
+      .populate('prescriptionId', 'prescriptionNumber status');
+    res.json({ success: true, labTests });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

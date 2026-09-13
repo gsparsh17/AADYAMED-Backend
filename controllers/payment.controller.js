@@ -38,6 +38,9 @@ async function loadPayableEntity(user, entityType, entityId) {
   if (entity.paymentStatus === 'paid') {
     return { error: 'This entity is already paid', status: 409 };
   }
+  if (entityType === 'labtest' && entity.status === 'cancelled') {
+    return { error: 'Cancelled diagnostic orders cannot be paid', status: 409 };
+  }
 
   return { entity, amount };
 }

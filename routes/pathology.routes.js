@@ -1,60 +1,36 @@
 const express = require('express');
 const router = express.Router();
-
 const pathologyController = require('../controllers/pathology.controller');
+const { protect, authorize } = require('../middlewares/auth');
 
-// adjust middleware names to your project
-const { protect } = require('../middlewares/auth');
-const { authorize } = require('../middlewares/auth');
-
-// ===================== PUBLIC (patients) =====================
+// Public discovery. Keep static paths before parameter routes.
 router.get('/', pathologyController.getAllLabs);
 router.get('/search/tests', pathologyController.searchTests);
-router.get('/:id', pathologyController.getLabById);
-router.get('/:id/test-slots', pathologyController.getPublicTestSlots);
 
-// booking (patient/admin)
-router.post('/:id/book', protect, authorize('patient', 'admin'), pathologyController.bookTestSlot);
+// Pathology-owned appointment compatibility endpoints must be registered before /:id.
+router.get('/appointments', protect, authorize('pathology'), pathologyController.getMyAppointments);
+router.get('/appointments/:id', protect, authorize('pathology'), pathologyController.getAppointmentByIdForPathology);
+router.patch('/appointments/:id/status', protect, authorize('pathology'), pathologyController.updateAppointmentStatusForPathology);
 
-// ===================== PATHOLOGY (/me) =====================
+// Pathology profile / scheduling compatibility endpoints.
 router.post('/me/profile', protect, authorize('pathology'), pathologyController.createProfile);
 router.get('/me/profile', protect, authorize('pathology'), pathologyController.getProfile);
 router.put('/me/profile', protect, authorize('pathology'), pathologyController.updateProfile);
-
 router.get('/me/test-slots', protect, authorize('pathology'), pathologyController.getTestSlots);
 router.put('/me/test-slots', protect, authorize('pathology'), pathologyController.updateTestSlots);
 router.post('/me/test-slots/bulk', protect, authorize('pathology'), pathologyController.bulkUpdateTestSlots);
-
 router.get('/me/tests', protect, authorize('pathology'), pathologyController.getLabTests);
 router.get('/me/tests/:id', protect, authorize('pathology'), pathologyController.getLabTestById);
 router.patch('/me/tests/:id/status', protect, authorize('pathology'), pathologyController.updateTestStatus);
 router.post('/me/tests/:id/report', protect, authorize('pathology'), pathologyController.uploadReport);
-
 router.get('/me/dashboard', protect, authorize('pathology'), pathologyController.getDashboardStats);
 
-// ✅ NEW: pathology appointments endpoints (the ones you requested)
-router.get(
-  '/appointments',
-  protect,
-  authorize('pathology'),
-  pathologyController.getMyAppointments
-);
+// Public detail/slots + legacy booking.
+router.get('/:id/test-slots', pathologyController.getPublicTestSlots);
+router.post('/:id/book', protect, authorize('patient', 'admin'), pathologyController.bookTestSlot);
+router.get('/:id', pathologyController.getLabById);
 
-router.get(
-  '/appointments/:id',
-  protect,
-  authorize('pathology'),
-  pathologyController.getAppointmentByIdForPathology
-);
-
-router.patch(
-  '/appointments/:id/status',
-  protect,
-  authorize('pathology'),
-  pathologyController.updateAppointmentStatusForPathology
-);
-
-// ===================== ADMIN =====================
+// Admin.
 router.put('/:id/admin', protect, authorize('admin'), pathologyController.updateLabByAdmin);
 router.delete('/:id/admin', protect, authorize('admin'), pathologyController.deleteLabByAdmin);
 

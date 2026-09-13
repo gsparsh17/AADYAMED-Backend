@@ -17,6 +17,7 @@ require('./models/DoctorProfile');
 require('./models/PhysiotherapistProfile');
 require('./models/PatientProfile');
 require('./models/PathologyProfile');
+require('./models/PathologyStaff');
 require('./models/Referral');
 require('./models/Appointment');
 require('./models/Prescription');
@@ -158,6 +159,7 @@ app.use('/api/admin', require('./routes/admin.routes'));
 app.use('/api/doctor', require('./routes/doctor.routes'));
 app.use('/api/physio', require('./routes/physio.routes'));
 app.use('/api/pathology', require('./routes/pathology.routes'));
+app.use('/api/diagnostics', require('./routes/diagnostics.routes'));
 app.use('/api/pharmacy', require('./routes/pharmacy.routes'));
 app.use('/api/tenant', require('./routes/tenant.routes'));
 
@@ -371,6 +373,7 @@ app.get('/api/docs', (req, res) => {
       physio: '/api/physio',
       patient: '/api/patient',
       pathology: '/api/pathology',
+      diagnostics: '/api/diagnostics',
       referral: '/api/referral',
       appointment: '/api/appointment',
       consultation: '/api/consultations',

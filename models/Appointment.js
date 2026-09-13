@@ -100,17 +100,20 @@ const appointmentSchema = new mongoose.Schema(
         type: String,
         enum: ['Point'],
         required: function () {
-          return this.type === 'home';
+          // Pathology home collection can be booked with a postal address even
+          // when browser GPS coordinates are unavailable. Doctor/physio home
+          // visits continue to require coordinates.
+          return this.type === 'home' && this.professionalType !== 'pathology';
         },
       },
       coordinates: {
         type: [Number],
         required: function () {
-          return this.type === 'home';
+          return this.type === 'home' && this.professionalType !== 'pathology';
         },
         validate: {
           validator: function (v) {
-            if (this.type !== 'home') return true;
+            if (this.type !== 'home' || this.professionalType === 'pathology') return true;
 
             return (
               Array.isArray(v) &&
