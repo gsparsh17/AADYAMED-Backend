@@ -4,6 +4,8 @@ const doctorController = require('../controllers/doctor.controller');
 const { protect, authorize } = require('../middlewares/auth');
 
 // ========== PUBLIC ROUTES ==========
+router.get('/meta', doctorController.getDoctorDirectoryMeta);
+router.get('/me/availability', protect, authorize('doctor'), doctorController.getMyAvailability);
 router.get('/specialization/:specialization', doctorController.getDoctorsBySpecialization);
 router.get('/:id/availability/weekly', doctorController.getWeeklyAvailability);
 router.get('/:id/availability', doctorController.getDoctorAvailability);

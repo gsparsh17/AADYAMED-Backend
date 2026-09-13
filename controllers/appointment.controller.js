@@ -9,6 +9,12 @@ const CommissionSettings = require('../models/CommissionSettings');
 const Notification = require('../models/Notification');
 const Calendar = require('../models/Calendar');
 const Invoice = require('../models/Invoice');
+const { addMinutes, getDoctorDailySlots } = require('../services/doctorAvailability.service');
+const {
+  acquireSlotLock,
+  attachAppointment,
+  releaseSlotLockForAppointment,
+} = require('../services/appointmentSlotLock.service');
 
 // ========== HELPER FUNCTIONS ==========
 // ========== HELPER FUNCTIONS ==========
@@ -29,7 +35,14 @@ const generateMeetingLink = () => {
 
 // Create a new appointment
 exports.createAppointment = async (req, res) => {
+  let slotLock = null;
+  let appointment = null;
+
   try {
+    if (req.user.role !== 'patient') {
+      return res.status(403).json({ success: false, error: 'Only patients can book appointments from this endpoint' });
+    }
+
     const {
       referralId,
       professionalId,
@@ -40,279 +53,231 @@ exports.createAppointment = async (req, res) => {
       address,
       location,
       symptoms,
-      reason
+      reason,
     } = req.body;
 
     if (!professionalId || !professionalType || !appointmentDate || !startTime) {
       return res.status(400).json({
         success: false,
-        error: 'Professional ID, professional type, appointment date, and start time are required'
+        error: 'Professional ID, professional type, appointment date, and start time are required',
       });
     }
+    if (!['doctor', 'physio', 'pathology'].includes(professionalType)) {
+      return res.status(400).json({ success: false, error: 'Invalid professional type' });
+    }
+    if (!['clinic', 'home', 'video'].includes(type)) {
+      return res.status(400).json({ success: false, error: 'Invalid consultation type' });
+    }
+    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(startTime)) {
+      return res.status(400).json({ success: false, error: 'Invalid time format. Use HH:MM (24-hour format)' });
+    }
+    if (type === 'home' && (!address || !location?.coordinates || location.coordinates.length !== 2)) {
+      return res.status(400).json({ success: false, error: 'Address and coordinates are required for home visits' });
+    }
 
-    // Get patient profile ID
     const patientProfile = await PatientProfile.findOne({ userId: req.user.id });
     if (!patientProfile) {
-      return res.status(404).json({
-        success: false,
-        error: 'Patient profile not found. Please complete your profile first.'
-      });
+      return res.status(404).json({ success: false, error: 'Patient profile not found. Please complete your profile first.' });
     }
-
     const patientId = patientProfile._id;
 
-    // ✅ UPDATED: include pathology
-    if (!['doctor', 'physio', 'pathology'].includes(professionalType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid professional type. Must be "doctor", "physio" or "pathology"'
-      });
-    }
-
-    // Get professional details and validate
     let professional;
-    let consultationFee;
+    let consultationFee = 0;
+    let duration = 30;
 
     if (professionalType === 'doctor') {
-      professional = await DoctorProfile.findById(professionalId)
-        .populate('userId', 'isVerified isActive');
-      if (!professional) {
-        return res.status(404).json({ success: false, error: 'Doctor not found' });
+      professional = await DoctorProfile.findById(professionalId).populate('userId', 'isVerified isActive');
+      if (!professional || professional.verificationStatus !== 'approved') {
+        return res.status(404).json({ success: false, error: 'Doctor is not available for booking' });
       }
-
-      if (!professional.userId?.isVerified || !professional.userId?.isActive) {
+      if (!professional.userId?.isVerified || professional.userId?.isActive === false) {
         return res.status(400).json({ success: false, error: 'Doctor is not available for appointments' });
       }
 
-      consultationFee = professional.consultationFee || 0;
-      if (type === 'home') {
-        consultationFee = (professional.homeVisitFee || professional.consultationFee || 0);
-      } else if (type === 'video') {
-        consultationFee = professional.videoCallFee || professional.consultationFee || 0;
-      } else {
-        consultationFee = professional.consultationFee || 0;
-      }
+      consultationFee = type === 'home'
+        ? Number(professional.homeVisitFee || professional.consultationFee || 0)
+        : type === 'video'
+          ? Number(professional.videoCallFee || professional.consultationFee || 0)
+          : Number(professional.consultationFee || 0);
+      duration = Number(professional.slotDurationMinutes || 30);
 
+      const daily = await getDoctorDailySlots(professional, appointmentDate, { type, duration });
+      const requestedSlot = daily.slots.find((slot) => slot.startTime === startTime && slot.isAvailable !== false);
+      if (!requestedSlot) {
+        return res.status(409).json({
+          success: false,
+          error: 'Selected time slot is no longer available. Please refresh availability and choose another slot.',
+          code: 'SLOT_UNAVAILABLE',
+        });
+      }
+      duration = requestedSlot.duration || duration;
     } else if (professionalType === 'physio') {
-      professional = await PhysiotherapistProfile.findById(professionalId)
-        .populate('userId', 'isVerified isActive');
-      if (!professional) {
-        return res.status(404).json({ success: false, error: 'Physiotherapist not found' });
-      }
-
-      if (!professional.userId?.isVerified || !professional.userId?.isActive) {
+      professional = await PhysiotherapistProfile.findById(professionalId).populate('userId', 'isVerified isActive');
+      if (!professional) return res.status(404).json({ success: false, error: 'Physiotherapist not found' });
+      if (!professional.userId?.isVerified || professional.userId?.isActive === false) {
         return res.status(400).json({ success: false, error: 'Physiotherapist is not available for appointments' });
       }
-
-      if (type === 'home') {
-        consultationFee = professional.homeVisitFee || 0;
-      } else if (type === 'video') {
-        consultationFee = professional.videoCallFee || professional.consultationFee || 0;
-      } else {
-        consultationFee = professional.consultationFee || 0;
+      consultationFee = type === 'home'
+        ? Number(professional.homeVisitFee || professional.consultationFee || 0)
+        : type === 'video'
+          ? Number(professional.videoCallFee || professional.consultationFee || 0)
+          : Number(professional.consultationFee || 0);
+      duration = 60;
+      if (!await checkAvailability(professionalId, professionalType, appointmentDate, startTime)) {
+        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
       }
-
     } else {
-      // ✅ NEW: pathology
-      professional = await PathologyProfile.findById(professionalId)
-        .populate('userId', 'isVerified isActive');
-      if (!professional) {
-        return res.status(404).json({ success: false, error: 'Pathology not found' });
+      professional = await PathologyProfile.findById(professionalId).populate('userId', 'isVerified isActive');
+      if (!professional) return res.status(404).json({ success: false, error: 'Pathology provider not found' });
+      if (!professional.userId?.isVerified || professional.userId?.isActive === false) {
+        return res.status(400).json({ success: false, error: 'Pathology provider is not available for appointments' });
       }
-
-      if (!professional.userId?.isVerified || !professional.userId?.isActive) {
-        return res.status(400).json({ success: false, error: 'Pathology is not available for appointments' });
-      }
-
-      // Adjust fee fields if your PathologyProfile differs
-      consultationFee = professional.consultationFee || 0;
-      if (type === 'home') {
-        consultationFee = (professional.homeVisitFee || professional.consultationFee || 0);
-      } else if (type === 'video') {
-        consultationFee = professional.videoCallFee || professional.consultationFee || 0;
+      consultationFee = Number(professional.consultationFee || 0);
+      duration = 30;
+      if (!await checkAvailability(professionalId, professionalType, appointmentDate, startTime)) {
+        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
       }
     }
 
-    // Validate referral if provided
     if (referralId) {
-      const referral = await Referral.findOne({
-        _id: referralId,
-        patientId: patientId
-      });
-
-      if (!referral) {
-        return res.status(404).json({
-          success: false,
-          error: 'Referral not found or does not belong to you'
-        });
-      }
-
+      const referral = await Referral.findOne({ _id: referralId, patientId });
+      if (!referral) return res.status(404).json({ success: false, error: 'Referral not found or does not belong to you' });
       if (referral.status !== 'professional_selected') {
-        return res.status(400).json({
-          success: false,
-          error: 'Referral is not in valid state for appointment booking'
-        });
+        return res.status(400).json({ success: false, error: 'Referral is not in a valid state for appointment booking' });
       }
     }
 
-    // Validate appointment date
-    const appointmentDateTime = new Date(appointmentDate);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (appointmentDateTime < today) {
-      return res.status(400).json({
-        success: false,
-        error: 'Appointment date cannot be in the past'
-      });
+    const appointmentDay = new Date(appointmentDate);
+    if (Number.isNaN(appointmentDay.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid appointment date' });
+    }
+    appointmentDay.setHours(0, 0, 0, 0);
+    const appointmentInstant = new Date(appointmentDay);
+    const [hour, minute] = startTime.split(':').map(Number);
+    appointmentInstant.setHours(hour, minute, 0, 0);
+    if (appointmentInstant <= new Date()) {
+      return res.status(400).json({ success: false, error: 'Appointment time must be in the future' });
     }
 
-    // Validate time format (HH:MM)
-    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-    if (!timeRegex.test(startTime)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid time format. Use HH:MM (24-hour format)'
-      });
-    }
-
-    // Check availability
-    const isAvailable = await checkAvailability(
-      professionalId,
-      professionalType,
-      appointmentDate,
-      startTime
-    );
-
-    if (!isAvailable) {
-      return res.status(400).json({
-        success: false,
-        error: 'Selected time slot is not available'
-      });
-    }
-
-    // Get commission settings
-    const settings = await CommissionSettings.findOne();
-    if (!settings) {
-      return res.status(500).json({
-        success: false,
-        error: 'Commission settings not configured'
-      });
-    }
-
-    const commissionRate =
-      professionalType === 'doctor'
-        ? (professional.commissionRate || settings.defaultDoctorCommission)
-        : professionalType === 'physio'
-          ? (professional.commissionRate || settings.defaultPhysioCommission)
-          : (professional.commissionRate || settings.defaultPathologyCommission || settings.defaultDoctorCommission);
-
+    const settings = await CommissionSettings.findOne().lean();
+    const defaultRate = professionalType === 'doctor'
+      ? Number(settings?.defaultDoctorCommission ?? 20)
+      : professionalType === 'physio'
+        ? Number(settings?.defaultPhysioCommission ?? 20)
+        : Number(settings?.defaultPathologyCommission ?? settings?.defaultDoctorCommission ?? 20);
+    const commissionRate = Number(professional.commissionRate ?? defaultRate);
     const platformCommission = Math.round((consultationFee * commissionRate) / 100);
     const professionalEarning = consultationFee - platformCommission;
 
-    // Determine appointment duration
-    const duration =
-      professionalType === 'doctor' ? 30 :
-      professionalType === 'physio' ? 60 :
-      30; // pathology default
+    const idField = professionalType === 'doctor'
+      ? 'doctorId'
+      : professionalType === 'physio'
+        ? 'physioId'
+        : 'pathologyId';
 
-    const idField =
-      professionalType === 'doctor'
-        ? 'doctorId'
-        : professionalType === 'physio'
-          ? 'physioId'
-          : 'pathologyId';
-
-    // Generate meeting link if type is video
-    const meetingLink = type === 'video' ? generateMeetingLink() : undefined;
-
-    // Create appointment
-    const appointment = await Appointment.create({
-      referralId,
-      patientId,
-      [idField]: professionalId,
+    slotLock = await acquireSlotLock({
       professionalType,
-      appointmentDate: appointmentDateTime,
+      professionalId,
+      appointmentDate: appointmentDay,
       startTime,
-      duration,
-      type,
-      meetingLink,
-      address: type === 'home' ? address : undefined,
-      location: type === 'home' ? location : undefined,
-      symptoms: symptoms || [],
-      reason: reason || '',
-      consultationFee,
-      platformCommission,
-      professionalEarning,
-      totalAmount: consultationFee,
-      status: 'pending',
-      paymentStatus: 'pending',
-      createdBy: req.user.id,
-      patientNotes: req.body.patientNotes
+      userId: req.user.id,
     });
 
-    // Update referral status if applicable
-    if (referralId) {
-      await Referral.findByIdAndUpdate(referralId, {
-        appointmentId: appointment._id,
-        status: 'appointment_booked',
-        selectedProfessional: {
-          professionalId,
-          professionalType,
-          consultationFee
-        }
+    try {
+      appointment = await Appointment.create({
+        referralId,
+        patientId,
+        [idField]: professionalId,
+        professionalType,
+        appointmentDate: appointmentDay,
+        startTime,
+        endTime: addMinutes(startTime, duration),
+        duration,
+        type,
+        meetingLink: type === 'video' ? generateMeetingLink() : undefined,
+        address: type === 'home' ? address : undefined,
+        location: type === 'home' ? location : undefined,
+        symptoms: Array.isArray(symptoms) ? symptoms : [],
+        reason: reason || '',
+        patientNotes: req.body.patientNotes || '',
+        consultationFee,
+        platformCommission,
+        professionalEarning,
+        totalAmount: consultationFee,
+        status: 'pending',
+        paymentStatus: 'pending',
+        createdBy: req.user.id,
+        bookedBy: 'patient',
+        deviceInfo: req.get('user-agent'),
+        ipAddress: req.ip,
       });
+      await attachAppointment(slotLock, appointment._id);
+    } catch (error) {
+      if (slotLock?._id) await slotLock.deleteOne().catch(() => {});
+      throw error;
     }
 
-    // Commission model mapping
-    const professionalModel =
-      professionalType === 'doctor'
+    // These are secondary effects. A successfully reserved appointment should not
+    // turn into an apparent failed booking because an analytics/calendar write failed.
+    try {
+      if (referralId) {
+        await Referral.findByIdAndUpdate(referralId, {
+          appointmentId: appointment._id,
+          status: 'appointment_booked',
+          selectedProfessional: { professionalId, professionalType, consultationFee },
+        });
+      }
+    } catch (error) {
+      console.error('Referral update failed after booking:', error);
+    }
+
+    try {
+      const professionalModel = professionalType === 'doctor'
         ? 'DoctorProfile'
         : professionalType === 'physio'
           ? 'PhysiotherapistProfile'
           : 'PathologyProfile';
+      await Commission.create({
+        appointmentId: appointment._id,
+        professionalId,
+        professionalModel,
+        professionalType,
+        patientId,
+        consultationFee,
+        platformCommission,
+        professionalEarning,
+        commissionRate,
+        payoutStatus: 'pending',
+        commissionCycle: {
+          month: new Date().getUTCMonth() + 1,
+          year: new Date().getUTCFullYear(),
+          cycleNumber: `${String(new Date().getUTCMonth() + 1).padStart(2, '0')}${new Date().getUTCFullYear()}`,
+        },
+        createdBy: req.user.id,
+      });
+    } catch (error) {
+      console.error('Commission creation failed after booking:', error);
+    }
 
-    await Commission.create({
-      appointmentId: appointment._id,
-      professionalId,
-      professionalModel,
-      professionalType,
-      patientId,
-      consultationFee,
-      platformCommission,
-      professionalEarning,
-      commissionRate,
-      payoutStatus: 'pending',
-      commissionCycle: {
-        month: new Date().getUTCMonth() + 1,
-        year: new Date().getUTCFullYear(),
-        cycleNumber: `${String(new Date().getUTCMonth() + 1).padStart(2, '0')}${new Date().getUTCFullYear()}`
-      },
-      createdBy: req.user.id
-    });
+    try { await updateCalendarForAppointment(appointment); } catch (error) { console.error('Calendar update failed:', error); }
+    try { await sendAppointmentNotifications(appointment, professional, patientProfile); } catch (error) { console.error('Appointment notification failed:', error); }
 
-    // Update calendar
-    await updateCalendarForAppointment(appointment);
-
-    // Send notifications
-    await sendAppointmentNotifications(appointment, professional, patientProfile);
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Appointment created successfully',
       appointment,
-      paymentRequired: consultationFee > 0
+      paymentRequired: consultationFee > 0,
     });
   } catch (error) {
-    console.error('Error creating appointment:', error.message);
-    res.status(500).json({
+    console.error('Error creating appointment:', error);
+    return res.status(error.statusCode || 500).json({
       success: false,
-      error: error.message
+      error: error.statusCode ? error.message : 'Failed to create appointment',
+      code: error.code,
     });
   }
 };
 
-// Get appointments (role-based)
 exports.getAppointmentsByPatientId = async (req, res) => {
   try {
     const { id } = req.params;
@@ -351,6 +316,7 @@ exports.getAppointments = async (req, res) => {
       startDate,
       endDate,
       professionalType,
+      sort,
       page = 1,
       limit = 20
     } = req.query;
@@ -411,7 +377,10 @@ exports.getAppointments = async (req, res) => {
     }
 
     if (status) {
-      filter.status = Array.isArray(status) ? { $in: status } : status;
+      const statuses = Array.isArray(status)
+        ? status
+        : String(status).split(',').map((value) => value.trim()).filter(Boolean);
+      filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
     }
     if (type) filter.type = type;
     if (professionalType) filter.professionalType = professionalType;
@@ -427,8 +396,9 @@ exports.getAppointments = async (req, res) => {
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
+    const sortDirection = String(sort || '').toLowerCase().endsWith(':desc') ? -1 : 1;
     let query = Appointment.find(filter)
-      .sort({ appointmentDate: 1, startTime: 1 })
+      .sort({ appointmentDate: sortDirection, startTime: sortDirection })
       .skip(skip)
       .limit(parseInt(limit));
 
@@ -453,7 +423,7 @@ exports.getAppointments = async (req, res) => {
         upcoming: await Appointment.countDocuments({
           ...filter,
           appointmentDate: { $gte: today },
-          status: { $in: ['pending', 'confirmed', 'accepted'] }
+          status: { $in: ['pending', 'confirmed', 'accepted', 'rescheduled', 'in_progress'] }
         }),
         completed: await Appointment.countDocuments({
           ...filter,
@@ -493,6 +463,9 @@ exports.getAppointmentById = async (req, res) => {
 
     const appointment = await Appointment.findById(id)
       .populate('patientId', 'name phone age gender bloodGroup address')
+      .populate('doctorId', 'name profileImage specialization clinicName clinicAddress consultationFee homeVisitFee videoCallFee')
+      .populate('physioId', 'name profileImage specialization clinicAddress consultationFee homeVisitFee videoCallFee')
+      .populate('pathologyId', 'labName name address phone email')
       .populate('referralId', 'requirement symptoms')
       .populate('prescriptionId', 'diagnosis medicines exercises instructions');
 
@@ -586,15 +559,13 @@ exports.updateAppointmentStatus = async (req, res) => {
     }
 
     if (notes) {
-      appointment.notes = appointment.notes || [];
-      appointment.notes.push({
-        note: notes,
-        addedBy: req.user.role,
-        addedAt: new Date()
-      });
+      appointment.consultationNotes = [appointment.consultationNotes, notes].filter(Boolean).join('\n');
     }
 
     await appointment.save();
+    if (['cancelled', 'rejected', 'no_show'].includes(appointment.status)) {
+      await releaseSlotLockForAppointment(appointment).catch((error) => console.error('Slot lock release failed:', error));
+    }
     await sendStatusUpdateNotification(appointment, oldStatus, appointment.status);
 
     res.json({
@@ -677,6 +648,7 @@ exports.cancelAppointment = async (req, res) => {
     appointment.cancellationFee = calculateCancellationFee(appointment);
 
     await appointment.save();
+    await releaseSlotLockForAppointment(appointment).catch((error) => console.error('Slot lock release failed:', error));
     await updateCalendarForCancellation(appointment);
     await sendCancellationNotification(appointment);
 
@@ -695,6 +667,7 @@ exports.cancelAppointment = async (req, res) => {
 
 // Reschedule appointment
 exports.rescheduleAppointment = async (req, res) => {
+  let newLock = null;
   try {
     const { id } = req.params;
     const { newDate, newTime, reason } = req.body;
@@ -702,20 +675,18 @@ exports.rescheduleAppointment = async (req, res) => {
     if (!newDate || !newTime) {
       return res.status(400).json({ success: false, error: 'New date and time are required' });
     }
+    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(newTime)) {
+      return res.status(400).json({ success: false, error: 'Invalid time format. Use HH:MM (24-hour format)' });
+    }
 
     const appointment = await Appointment.findById(id);
-    if (!appointment) {
-      return res.status(404).json({ success: false, error: 'Appointment not found' });
-    }
-
-    if (appointment.status === 'cancelled' || appointment.status === 'completed') {
+    if (!appointment) return res.status(404).json({ success: false, error: 'Appointment not found' });
+    if (['cancelled', 'completed', 'rejected'].includes(appointment.status)) {
       return res.status(400).json({ success: false, error: `Cannot reschedule ${appointment.status} appointment` });
     }
-
     if (appointment.rescheduleCount >= 2) {
       return res.status(400).json({ success: false, error: 'Maximum reschedule limit reached' });
     }
-
     if (req.user.role !== 'patient') {
       return res.status(403).json({ success: false, error: 'Only patients can reschedule appointments' });
     }
@@ -726,73 +697,106 @@ exports.rescheduleAppointment = async (req, res) => {
     }
 
     const newDateTime = new Date(newDate);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (newDateTime < today) {
-      return res.status(400).json({ success: false, error: 'New appointment date cannot be in the past' });
+    if (Number.isNaN(newDateTime.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid new appointment date' });
+    }
+    newDateTime.setHours(0, 0, 0, 0);
+    const newInstant = new Date(newDateTime);
+    const [hours, minutes] = newTime.split(':').map(Number);
+    newInstant.setHours(hours, minutes, 0, 0);
+    if (newInstant <= new Date()) {
+      return res.status(400).json({ success: false, error: 'New appointment time must be in the future' });
     }
 
-    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-    if (!timeRegex.test(newTime)) {
-      return res.status(400).json({ success: false, error: 'Invalid time format. Use HH:MM (24-hour format)' });
+    const professionalId = appointment.professionalType === 'doctor'
+      ? appointment.doctorId
+      : appointment.professionalType === 'physio'
+        ? appointment.physioId
+        : appointment.pathologyId;
+
+    const sameSlot = newDateTime.getTime() === new Date(appointment.appointmentDate).setHours(0, 0, 0, 0)
+      && newTime === appointment.startTime;
+    if (sameSlot) {
+      return res.status(400).json({ success: false, error: 'Please choose a different date or time' });
     }
 
-    const professionalId =
-      appointment.professionalType === 'doctor'
-        ? appointment.doctorId
-        : appointment.professionalType === 'physio'
-          ? appointment.physioId
-          : appointment.pathologyId;
+    if (appointment.professionalType === 'doctor') {
+      const doctor = await DoctorProfile.findById(professionalId);
+      if (!doctor || doctor.verificationStatus !== 'approved') {
+        return res.status(400).json({ success: false, error: 'Doctor is not available for rescheduling' });
+      }
+      const daily = await getDoctorDailySlots(doctor, newDate, { type: appointment.type, duration: appointment.duration });
+      if (!daily.slots.some((slot) => slot.startTime === newTime && slot.isAvailable !== false)) {
+        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
+      }
+    } else if (!await checkAvailability(professionalId, appointment.professionalType, newDate, newTime)) {
+      return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
+    }
 
-    const isAvailable = await checkAvailability(
+    newLock = await acquireSlotLock({
+      professionalType: appointment.professionalType,
       professionalId,
-      appointment.professionalType,
-      newDate,
-      newTime
-    );
+      appointmentDate: newDateTime,
+      startTime: newTime,
+      userId: req.user.id,
+    });
 
-    if (!isAvailable) {
-      return res.status(400).json({ success: false, error: 'Selected time slot is not available' });
-    }
-
-    const previousAppointment = {
-      originalDate: appointment.appointmentDate,
-      originalTime: appointment.startTime,
-      rescheduledDate: new Date(),
-      reason: reason || 'Rescheduled by patient'
+    const oldSnapshot = {
+      _id: appointment._id,
+      professionalType: appointment.professionalType,
+      doctorId: appointment.doctorId,
+      physioId: appointment.physioId,
+      pathologyId: appointment.pathologyId,
+      appointmentDate: appointment.appointmentDate,
+      startTime: appointment.startTime,
     };
-
-    appointment.previousAppointments = appointment.previousAppointments || [];
-    appointment.previousAppointments.push(previousAppointment);
-
     const oldDate = appointment.appointmentDate;
     const oldTime = appointment.startTime;
 
+    appointment.previousAppointments = appointment.previousAppointments || [];
+    appointment.previousAppointments.push({
+      originalDate: oldDate,
+      originalTime: oldTime,
+      rescheduledDate: new Date(),
+      reason: reason || 'Rescheduled by patient',
+    });
     appointment.appointmentDate = newDateTime;
     appointment.startTime = newTime;
+    appointment.endTime = addMinutes(newTime, appointment.duration || 30);
     appointment.rescheduleCount += 1;
-    appointment.rescheduleReason = reason;
+    appointment.rescheduleReason = reason || 'Rescheduled by patient';
     appointment.status = 'pending';
 
-    await appointment.save();
+    try {
+      await appointment.save();
+    } catch (error) {
+      await newLock.deleteOne().catch(() => {});
+      throw error;
+    }
 
-    await updateCalendarForReschedule(appointment, oldDate, oldTime);
-    await sendRescheduleNotification(appointment, oldDate, oldTime);
+    await releaseSlotLockForAppointment(oldSnapshot).catch((error) => console.error('Old slot lock release failed:', error));
+    await attachAppointment(newLock, appointment._id);
 
-    res.json({
+    await updateCalendarForReschedule(appointment, oldDate, oldTime).catch((error) => console.error('Calendar reschedule update failed:', error));
+    await sendRescheduleNotification(appointment, oldDate, oldTime).catch((error) => console.error('Reschedule notification failed:', error));
+
+    return res.json({
       success: true,
       message: 'Appointment rescheduled successfully',
       appointment,
-      rescheduleCount: appointment.rescheduleCount
+      rescheduleCount: appointment.rescheduleCount,
     });
   } catch (error) {
-    console.error('Error rescheduling appointment:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Error rescheduling appointment:', error);
+    if (newLock && !newLock.appointmentId) await newLock.deleteOne().catch(() => {});
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : 'Failed to reschedule appointment',
+      code: error.code,
+    });
   }
 };
 
-// Complete appointment
 exports.completeAppointment = async (req, res) => {
   try {
     const { id } = req.params;

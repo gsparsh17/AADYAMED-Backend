@@ -314,7 +314,7 @@ exports.updateAvailability = async (req, res) => {
           $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
           $lt: new Date(targetDate.setHours(23, 59, 59, 999))
         },
-        status: { $in: ['pending', 'confirmed', 'accepted'] }
+        status: { $in: ['pending', 'confirmed', 'accepted', 'in_progress'] }
       });
 
       if (existingAppointments.length > 0) {
@@ -465,7 +465,7 @@ exports.addBreak = async (req, res) => {
       },
       startTime: { $lte: endTime },
       endTime: { $gte: startTime },
-      status: { $in: ['pending', 'confirmed', 'accepted'] }
+      status: { $in: ['pending', 'confirmed', 'accepted', 'in_progress'] }
     });
 
     if (existingAppointments.length > 0) {
@@ -832,13 +832,13 @@ exports.getAvailableSlots = async (req, res) => {
     // Fetch real appointments (truth)
     const idField =
       professionalType === 'doctor' ? 'doctorId' :
-      professionalType === 'physio' ? 'physiotherapistId' :
+      professionalType === 'physio' ? 'physioId' :
       'pathologyId';
 
     const existingAppointments = await Appointment.find({
       [idField]: professionalId,
       appointmentDate: { $gte: targetDayStart, $lte: targetDayEnd },
-      status: { $in: ['pending', 'confirmed', 'accepted'] }
+      status: { $in: ['pending', 'confirmed', 'accepted', 'in_progress'] }
     }).select('startTime endTime status');
 
     console.log(`📅 Found ${existingAppointments.length} existing appointments for ${targetKey}`);
@@ -1009,7 +1009,7 @@ exports.bookSlot = async (req, res) => {
       // overlap
       startTime: { $lt: endTime },
       endTime: { $gt: startTime },
-      status: { $in: ['pending', 'confirmed', 'accepted'] }
+      status: { $in: ['pending', 'confirmed', 'accepted', 'in_progress'] }
     }).select('_id');
 
     if (existingAppointments.length > 0) {

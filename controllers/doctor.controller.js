@@ -4,6 +4,13 @@ const User = require('../models/User');
 const Calendar = require('../models/Calendar');
 const { initializeCalendarForMonth, updateDoctorInCalendar } = require('../jobs/calendarJob');
 const Appointment = require('../models/Appointment');
+const Feedback = require('../models/Feedback');
+const {
+  VALID_TYPES,
+  getConsultationTypes,
+  getDoctorDailySlots,
+  getNextAvailableSlot,
+} = require('../services/doctorAvailability.service');
 
 // ========== PUBLIC FUNCTIONS ==========
 
@@ -47,6 +54,7 @@ exports.createDoctor = async (req, res) => {
     const ca = body.clinicAddress || body.address || {};
     const clinicAddress = {
       address: ca.address || ca.street || '',
+      locality: ca.locality || ca.area || '',
       city: ca.city || '',
       state: ca.state || '',
       pincode: ca.pincode || '',
@@ -98,17 +106,29 @@ exports.createDoctor = async (req, res) => {
       licenseNumber: body.licenseNumber,
       licenseDocument: body.licenseDocument,
 
+      clinicName: body.clinicName || '',
       clinicAddress,
 
       consultationFee,
       homeVisitFee: Number.isNaN(homeVisitFee) ? 0 : homeVisitFee,
       videoCallFee: Number.isNaN(videoCallFee) ? 0 : videoCallFee,
+      clinicConsultationEnabled: body.clinicConsultationEnabled !== false,
+      homeVisitEnabled: body.homeVisitEnabled !== undefined ? Boolean(body.homeVisitEnabled) : (Number(homeVisitFee) > 0),
+      teleconsultationEnabled: body.teleconsultationEnabled !== undefined ? Boolean(body.teleconsultationEnabled) : (Number(videoCallFee) > 0),
+      slotDurationMinutes: body.slotDurationMinutes !== undefined ? Number(body.slotDurationMinutes) : 30,
+      bookingWindowDays: body.bookingWindowDays !== undefined ? Number(body.bookingWindowDays) : 60,
+      minimumNoticeMinutes: body.minimumNoticeMinutes !== undefined ? Number(body.minimumNoticeMinutes) : 60,
 
       availability,
 
       languages: Array.isArray(body.languages) ? body.languages : (body.languages ? [body.languages] : ['English']),
       about: body.about || '',
       services: Array.isArray(body.services) ? body.services : [],
+      registrationCouncil: body.registrationCouncil || '',
+      registrationYear: body.registrationYear ? Number(body.registrationYear) : undefined,
+      awards: Array.isArray(body.awards) ? body.awards : [],
+      memberships: Array.isArray(body.memberships) ? body.memberships : [],
+      acceptedInsurance: Array.isArray(body.acceptedInsurance) ? body.acceptedInsurance : [],
 
       contactNumber,
       emergencyContact: body.emergencyContact,
@@ -157,470 +177,367 @@ exports.getAllDoctors = async (req, res) => {
       page = 1,
       limit = 20,
       specialization,
-      verificationStatus,
       search,
+      q,
       minRating,
       maxFee,
-      city
+      minFee,
+      city,
+      locality,
+      gender,
+      language,
+      type = 'clinic',
+      sort = 'rating',
+      availabilityDate,
+      lat,
+      lng,
+      radiusKm = 25,
+      includeNextAvailable = 'true',
     } = req.query;
 
-    const filter = {};
+    const consultationType = VALID_TYPES.includes(type) ? type : 'clinic';
+    const filter = { verificationStatus: 'approved' };
+    const escaped = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-    if (specialization) filter.specialization = { $in: [specialization] };
+    if (specialization && specialization !== 'all') {
+      filter.specialization = { $regex: `^${escaped(specialization)}$`, $options: 'i' };
+    }
 
-    // Default: only approved doctors for public
-    filter.verificationStatus = verificationStatus || 'approved';
-
-    if (search) {
+    const searchTerm = String(q || search || '').trim();
+    if (searchTerm) {
+      const regex = { $regex: escaped(searchTerm), $options: 'i' };
       filter.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { specialization: { $regex: search, $options: 'i' } }
+        { name: regex },
+        { specialization: regex },
+        { services: regex },
+        { clinicName: regex },
+        { 'clinicAddress.city': regex },
+        { 'clinicAddress.locality': regex },
       ];
     }
 
-    if (minRating) filter.averageRating = { $gte: parseFloat(minRating) };
-    if (maxFee) filter.consultationFee = { $lte: parseFloat(maxFee) };
-    if (city) filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
+    if (city) filter['clinicAddress.city'] = { $regex: `^${escaped(city)}$`, $options: 'i' };
+    if (locality) filter['clinicAddress.locality'] = { $regex: escaped(locality), $options: 'i' };
+    if (gender) filter.gender = gender;
+    if (language) filter.languages = { $regex: `^${escaped(language)}$`, $options: 'i' };
+    if (minRating) filter.averageRating = { $gte: Number(minRating) || 0 };
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const feeField = consultationType === 'video'
+      ? 'videoCallFee'
+      : consultationType === 'home'
+        ? 'homeVisitFee'
+        : 'consultationFee';
+    if (minFee || maxFee) {
+      filter[feeField] = {};
+      if (minFee) filter[feeField].$gte = Number(minFee) || 0;
+      if (maxFee) filter[feeField].$lte = Number(maxFee) || 0;
+    }
 
-    const doctors = await DoctorProfile.find(filter)
-      // DoctorProfile has no password field; keep public-safe fields
-      .select(
-        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee videoCallFee languages about services verificationStatus averageRating totalReviews totalConsultations'
-      )
-      .populate('userId', 'email isVerified')
-      .sort({ averageRating: -1, createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
+    if (consultationType === 'video') {
+      filter.$and = [...(filter.$and || []), {
+        $or: [
+          { teleconsultationEnabled: true },
+          { teleconsultationEnabled: { $exists: false }, videoCallFee: { $gt: 0 } },
+        ],
+      }];
+    } else if (consultationType === 'home') {
+      filter.$and = [...(filter.$and || []), {
+        $or: [
+          { homeVisitEnabled: true },
+          { homeVisitEnabled: { $exists: false }, homeVisitFee: { $gt: 0 } },
+        ],
+      }];
+    } else {
+      filter.clinicConsultationEnabled = { $ne: false };
+    }
 
-    const total = await DoctorProfile.countDocuments(filter);
+    const latitude = Number(lat);
+    const longitude = Number(lng);
+    const radius = Math.max(1, Math.min(200, Number(radiusKm) || 25));
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      filter['clinicAddress.location'] = {
+        $geoWithin: {
+          $centerSphere: [[longitude, latitude], radius / 6378.1],
+        },
+      };
+    }
+
+    const sortMap = {
+      rating: { averageRating: -1, totalReviews: -1, experienceYears: -1 },
+      experience: { experienceYears: -1, averageRating: -1 },
+      fee_low: { [feeField]: 1, averageRating: -1 },
+      fee_high: { [feeField]: -1, averageRating: -1 },
+      newest: { createdAt: -1 },
+    };
+    const sortSpec = sortMap[sort] || sortMap.rating;
+
+    const safeLimit = Math.max(1, Math.min(50, Number(limit) || 20));
+    const safePage = Math.max(1, Number(page) || 1);
+    const fields = [
+      'name', 'profileImage', 'gender', 'specialization', 'qualifications', 'experienceYears',
+      'clinicName', 'clinicAddress', 'consultationFee', 'homeVisitFee', 'videoCallFee',
+      'clinicConsultationEnabled', 'homeVisitEnabled', 'teleconsultationEnabled',
+      'slotDurationMinutes', 'bookingWindowDays', 'minimumNoticeMinutes', 'availability',
+      'languages', 'about', 'services', 'averageRating', 'totalReviews', 'totalConsultations',
+      'registrationCouncil', 'registrationYear', 'awards', 'memberships', 'acceptedInsurance',
+    ].join(' ');
+
+    let doctors;
+    let total;
+
+    if (availabilityDate) {
+      const candidates = await DoctorProfile.find(filter).select(fields).sort(sortSpec).limit(300).lean();
+      const availabilityResults = await Promise.all(candidates.map(async (doctor) => {
+        try {
+          const daily = await getDoctorDailySlots(doctor, availabilityDate, { type: consultationType });
+          return daily.slots.length ? { doctor, daily } : null;
+        } catch {
+          return null;
+        }
+      }));
+      const available = availabilityResults.filter(Boolean);
+      total = available.length;
+      doctors = available.slice((safePage - 1) * safeLimit, safePage * safeLimit).map((item) => ({
+        ...item.doctor,
+        availableSlots: item.daily.slots.slice(0, 5),
+      }));
+    } else {
+      total = await DoctorProfile.countDocuments(filter);
+      doctors = await DoctorProfile.find(filter)
+        .select(fields)
+        .sort(sortSpec)
+        .skip((safePage - 1) * safeLimit)
+        .limit(safeLimit)
+        .lean();
+    }
+
+    const enriched = await Promise.all(doctors.map(async (doctor) => {
+      const result = {
+        ...doctor,
+        consultationTypes: getConsultationTypes(doctor),
+      };
+
+      if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        const coordinates = doctor.clinicAddress?.location?.coordinates;
+        if (Array.isArray(coordinates) && coordinates.length === 2) {
+          const toRad = (value) => value * Math.PI / 180;
+          const dLat = toRad(Number(coordinates[1]) - latitude);
+          const dLon = toRad(Number(coordinates[0]) - longitude);
+          const a = Math.sin(dLat / 2) ** 2
+            + Math.cos(toRad(latitude)) * Math.cos(toRad(Number(coordinates[1]))) * Math.sin(dLon / 2) ** 2;
+          result.distanceKm = Number((6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1));
+        }
+      }
+
+      if (includeNextAvailable !== 'false' && !availabilityDate) {
+        try {
+          result.nextAvailable = await getNextAvailableSlot(doctor, { type: consultationType, daysToScan: 14 });
+        } catch {
+          result.nextAvailable = null;
+        }
+      }
+      return result;
+    }));
 
     return res.json({
       success: true,
-      doctors,
+      doctors: enriched,
+      filters: { consultationType, specialization: specialization || null, city: city || null },
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: safePage,
+        limit: safeLimit,
         total,
-        pages: Math.ceil(total / limit)
-      }
+        pages: Math.ceil(total / safeLimit),
+      },
     });
   } catch (err) {
-    console.error('Error fetching doctors:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch doctors'
-    });
+    console.error('Error fetching doctors:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch doctors' });
   }
 };
 
-// Get doctor by ID (public)
 exports.getDoctorById = async (req, res) => {
   try {
-    const doctor = await DoctorProfile.findById(req.params.id)
+    const doctor = await DoctorProfile.findOne({
+      _id: req.params.id,
+      verificationStatus: 'approved',
+    })
       .select('-bankDetails -licenseDocument -adminNotes -commissionRate -pendingCommission -paidCommission')
-      .populate('userId', 'email isVerified');
+      .lean();
 
     if (!doctor) {
-      return res.status(404).json({
-        success: false,
-        error: 'Doctor not found'
-      });
+      return res.status(404).json({ success: false, error: 'Doctor not found or not available publicly' });
     }
 
-    const Appointment = require('../models/Appointment');
-    const upcomingAppointments = await Appointment.find({
-      doctorId: doctor._id,
-      professionalType: 'doctor',
-      appointmentDate: { $gte: new Date() },
-      status: { $in: ['confirmed', 'accepted'] }
-    })
-      .select('appointmentDate startTime type')
-      .sort({ appointmentDate: 1 })
-      .limit(5);
+    const [reviews, reviewStats] = await Promise.all([
+      Feedback.find({
+        professionalId: doctor._id,
+        professionalType: 'doctor',
+        status: 'approved',
+      })
+        .select('overallRating comments wouldRecommend professionalResponse createdAt patientId isAnonymous')
+        .populate('patientId', 'name')
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      Feedback.aggregate([
+        { $match: { professionalId: doctor._id, professionalType: 'doctor', status: 'approved' } },
+        { $group: { _id: '$overallRating', count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const ratingDistribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    reviewStats.forEach((item) => {
+      ratingDistribution[item._id] = item.count;
+    });
+
+    let nextAvailable = null;
+    try {
+      nextAvailable = await getNextAvailableSlot(doctor, { type: req.query.type || 'clinic', daysToScan: 14 });
+    } catch {
+      nextAvailable = null;
+    }
+
+    const safeReviews = reviews.map((review) => ({
+      ...review,
+      patientId: review.isAnonymous ? null : review.patientId,
+    }));
 
     return res.json({
       success: true,
       doctor: {
-        ...doctor.toObject(),
-        upcomingAppointments
-      }
+        ...doctor,
+        consultationTypes: getConsultationTypes(doctor),
+        nextAvailable,
+      },
+      reviews: safeReviews,
+      ratingDistribution,
     });
   } catch (err) {
-    console.error('Error fetching doctor:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch doctor details'
-    });
+    console.error('Error fetching doctor:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch doctor details' });
   }
 };
 
-// Get doctors by specialization (public)
 exports.getDoctorsBySpecialization = async (req, res) => {
-  try {
-    const { specialization } = req.params;
-    const { city, minRating, maxFee, page = 1, limit = 20 } = req.query;
-
-    const filter = {
-      verificationStatus: 'approved'
-    };
-
-    // ✅ Only filter specialization if it's not "all"
-    if (specialization !== 'all') {
-      filter.specialization = { $in: [specialization] };
-    }
-
-    if (city) filter['clinicAddress.city'] = { $regex: city, $options: 'i' };
-    if (minRating) filter.averageRating = { $gte: parseFloat(minRating) };
-    if (maxFee) filter.consultationFee = { $lte: parseFloat(maxFee) };
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const doctors = await DoctorProfile.find(filter)
-      .select('name profileImage specialization averageRating consultationFee homeVisitFee videoCallFee clinicAddress availability totalConsultations')
-      .sort({ averageRating: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await DoctorProfile.countDocuments(filter);
-
-    return res.json({
-      success: true,
-      specialization,
-      count: doctors.length,
-      doctors,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
-  } catch (err) {
-    console.error('Error fetching doctors by specialization:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch doctors'
-    });
-  }
+  req.query = { ...req.query, specialization: req.params.specialization };
+  return exports.getAllDoctors(req, res);
 };
 
-// In doctor.controller.js, add this new function:
 exports.getWeeklyAvailability = async (req, res) => {
   try {
-    const { id } = req.params;
-    
-    const doctor = await DoctorProfile.findById(id)
-      .select('availability name consultationFee homeVisitFee');
-    
-    if (!doctor) {
-      return res.status(404).json({
-        success: false,
-        error: 'Doctor not found'
-      });
-    }
-    
-    // Return the weekly schedule template directly from doctor profile
-    return res.json({
-      success: true,
-      availability: doctor.availability || [], // This is your weekly template
-      doctorName: doctor.name,
-      consultationFee: doctor.consultationFee,
-      homeVisitFee: doctor.homeVisitFee
-    });
-    
-  } catch (err) {
-    console.error('Error fetching weekly availability:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch weekly availability'
-    });
-  }
-};
-// Get doctor's availability (public)
-exports.getDoctorAvailability = async (req, res) => {
-  try {
-    const { id } = req.params;     // doctor profile id
-    const { date } = req.query;    // YYYY-MM-DD
-
-    // ---- Helpers ----
-    const dateKeyLocal = (d) => {
-      const x = new Date(d);
-      const y = x.getFullYear();
-      const m = String(x.getMonth() + 1).padStart(2, '0');
-      const dd = String(x.getDate()).padStart(2, '0');
-      return `${y}-${m}-${dd}`;
-    };
-
-    const timeToMinutes = (t) => {
-      const [hh, mm] = String(t || "00:00").split(":").map(Number);
-      return hh * 60 + mm;
-    };
-
-    const minutesToHHMM = (mins) => {
-      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
-      const mm = String(mins % 60).padStart(2, '0');
-      return `${hh}:${mm}`;
-    };
-
-    const overlaps = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && aEnd > bStart;
-
-    const clampInterval = (s, e, min, max) => ({
-      start: Math.max(min, s),
-      end: Math.min(max, e)
-    });
-
-    const isValidInterval = (iv) => iv && Number.isFinite(iv.start) && Number.isFinite(iv.end) && iv.end > iv.start;
-
-    // Merge overlapping/adjacent intervals
-    const mergeIntervals = (intervals) => {
-      const arr = (intervals || []).filter(isValidInterval).sort((a, b) => a.start - b.start);
-      if (!arr.length) return [];
-      const out = [arr[0]];
-      for (let i = 1; i < arr.length; i++) {
-        const prev = out[out.length - 1];
-        const cur = arr[i];
-        if (cur.start <= prev.end) {
-          prev.end = Math.max(prev.end, cur.end);
-        } else {
-          out.push({ ...cur });
-        }
-      }
-      return out;
-    };
-
-    // Subtract busy intervals from a [start,end) base interval
-    const subtractIntervals = (baseStart, baseEnd, busyMerged) => {
-      let cursor = baseStart;
-      const free = [];
-      for (const b of busyMerged) {
-        if (b.end <= cursor) continue;
-        if (b.start >= baseEnd) break;
-
-        const bs = Math.max(b.start, baseStart);
-        const be = Math.min(b.end, baseEnd);
-
-        if (bs > cursor) free.push({ start: cursor, end: bs });
-        cursor = Math.max(cursor, be);
-      }
-      if (cursor < baseEnd) free.push({ start: cursor, end: baseEnd });
-      return free;
-    };
-
-    const sumMinutes = (intervals) => (intervals || []).reduce((acc, iv) => acc + (iv.end - iv.start), 0);
-
-    // ---- Validate target date ----
-    const targetDate = date ? new Date(date) : new Date();
-    if (isNaN(targetDate.getTime())) {
-      return res.status(400).json({ success: false, error: 'Invalid date format' });
-    }
-
-    const targetDayStart = new Date(targetDate);
-    targetDayStart.setHours(0, 0, 0, 0);
-
-    const targetDayEnd = new Date(targetDate);
-    targetDayEnd.setHours(23, 59, 59, 999);
-
-    const year = targetDayStart.getFullYear();
-    const month = targetDayStart.getMonth() + 1;
-    const targetKey = dateKeyLocal(targetDayStart);
-
-    // ---- Fetch doctor profile ----
-    const doctor = await DoctorProfile.findById(id)
-      .select('name consultationFee homeVisitFee verificationStatus userId')
-      .populate('userId', 'isVerified isActive');
+    const doctor = await DoctorProfile.findOne({ _id: req.params.id, verificationStatus: 'approved' })
+      .select('availability name consultationFee homeVisitFee videoCallFee slotDurationMinutes bookingWindowDays minimumNoticeMinutes clinicConsultationEnabled homeVisitEnabled teleconsultationEnabled');
 
     if (!doctor) {
       return res.status(404).json({ success: false, error: 'Doctor not found' });
     }
 
-    if (doctor.verificationStatus !== 'approved') {
-      return res.status(400).json({ success: false, error: 'Doctor profile is not approved' });
-    }
-
-    // Optional extra gating
-    if (!doctor.userId?.isVerified || doctor.userId?.isActive === false) {
-      return res.status(400).json({
-        success: false,
-        error: 'Doctor is not available for appointments'
-      });
-    }
-
-    // ---- Calendar lookup (source of truth) ----
-    let calendar = await Calendar.findOne({ year, month });
-    if (!calendar && typeof initializeCalendarForMonth === "function") {
-      calendar = await initializeCalendarForMonth(year, month);
-    }
-
-    const emptyResponse = (dayName) => res.json({
+    return res.json({
       success: true,
-      date: targetKey,
-      dayName,
-      isAvailable: false,
-      slots: [],
+      availability: doctor.availability || [],
       doctorName: doctor.name,
       consultationFee: doctor.consultationFee,
-      homeVisitFee: doctor.homeVisitFee
+      homeVisitFee: doctor.homeVisitFee,
+      videoCallFee: doctor.videoCallFee,
+      consultationTypes: getConsultationTypes(doctor),
+      slotDurationMinutes: doctor.slotDurationMinutes || 30,
+      bookingWindowDays: doctor.bookingWindowDays || 60,
+      minimumNoticeMinutes: doctor.minimumNoticeMinutes || 60,
     });
+  } catch (err) {
+    console.error('Error fetching weekly availability:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch weekly availability' });
+  }
+};
 
-    if (!calendar || !Array.isArray(calendar.days)) {
-      return emptyResponse(targetDayStart.toLocaleDateString('en-US', { weekday: 'long' }));
+exports.getMyAvailability = async (req, res) => {
+  try {
+    const doctor = await DoctorProfile.findOne({ userId: req.user.id })
+      .select('availability name consultationFee homeVisitFee videoCallFee slotDurationMinutes bookingWindowDays minimumNoticeMinutes clinicConsultationEnabled homeVisitEnabled teleconsultationEnabled');
+
+    if (!doctor) {
+      return res.status(404).json({ success: false, error: 'Doctor profile not found' });
     }
-
-    const day = calendar.days.find(d => dateKeyLocal(d.date) === targetKey);
-    if (!day) {
-      return emptyResponse(targetDayStart.toLocaleDateString('en-US', { weekday: 'long' }));
-    }
-
-    const professionalSchedule = (day.professionals || []).find(p =>
-      String(p.professionalId) === String(id) && p.professionalType === 'doctor'
-    );
-
-    if (!professionalSchedule || !professionalSchedule.isAvailable) {
-      return res.json({
-        success: true,
-        date: targetKey,
-        dayName: day.dayName,
-        isAvailable: false,
-        slots: [],
-        doctorName: doctor.name,
-        consultationFee: doctor.consultationFee,
-        homeVisitFee: doctor.homeVisitFee
-      });
-    }
-
-    const workingHours = professionalSchedule.workingHours || [];
-    const breaks = professionalSchedule.breaks || [];
-    const bookedSlots = professionalSchedule.bookedSlots || [];
-
-    if (!workingHours.length) {
-      return res.json({
-        success: true,
-        date: targetKey,
-        dayName: day.dayName,
-        isAvailable: false,
-        slots: [],
-        doctorName: doctor.name,
-        consultationFee: doctor.consultationFee,
-        homeVisitFee: doctor.homeVisitFee
-      });
-    }
-
-    // ---- Appointment truth (avoid stale calendar) ----
-    const existingAppointments = await Appointment.find({
-      doctorId: id,
-      appointmentDate: { $gte: targetDayStart, $lte: targetDayEnd },
-      status: { $in: ['pending', 'confirmed', 'accepted'] }
-    }).select('startTime endTime status');
-
-    // ---- Build busy intervals (global for the day) ----
-    const busyRaw = [];
-
-    // Breaks
-    for (const br of breaks) {
-      const s = timeToMinutes(br.startTime);
-      const e = timeToMinutes(br.endTime);
-      if (e > s) busyRaw.push({ start: s, end: e, source: 'break' });
-    }
-
-    // Calendar bookedSlots (ignore cancelled)
-    for (const b of bookedSlots) {
-      if ((b.status || 'booked') === 'cancelled') continue;
-      const s = timeToMinutes(b.startTime);
-      const e = b.endTime ? timeToMinutes(b.endTime) : (s + 30); // fallback
-      if (e > s) busyRaw.push({ start: s, end: e, source: 'calendar' });
-    }
-
-    // Real appointments
-    for (const a of existingAppointments) {
-      const s = timeToMinutes(a.startTime);
-      const e = timeToMinutes(a.endTime);
-      if (e > s) busyRaw.push({ start: s, end: e, source: 'appointment' });
-    }
-
-    // We merge by time (drop source at merge-level, but keep if you want detail)
-    const busyMerged = mergeIntervals(busyRaw.map(({ start, end }) => ({ start, end })));
-
-    // ---- Build working hour blocks with free/busy ----
-    const slotBlocks = workingHours.map((wh) => {
-      const whStart = timeToMinutes(wh.startTime);
-      const whEnd = timeToMinutes(wh.endTime);
-
-      if (whEnd <= whStart) return null;
-
-      // Busy intervals limited to this working block
-      const busyInBlock = busyMerged
-        .map((b) => clampInterval(b.start, b.end, whStart, whEnd))
-        .filter(isValidInterval);
-
-      const busyInBlockMerged = mergeIntervals(busyInBlock);
-
-      // Free intervals within the block
-      const freeInBlock = subtractIntervals(whStart, whEnd, busyInBlockMerged);
-      const freeInBlockMerged = mergeIntervals(freeInBlock);
-
-      const busyMinutes = sumMinutes(busyInBlockMerged);
-      const freeMinutes = sumMinutes(freeInBlockMerged);
-
-      const hasFree = freeMinutes > 0;
-
-      // Keep response structure similar + add free/busy
-      const slotType = wh.type || "clinic"; // if you store type per WH, keep it; else default clinic
-      const fee = slotType === "home" ? doctor.homeVisitFee : doctor.consultationFee;
-
-      return {
-        startTime: wh.startTime,
-        endTime: wh.endTime,
-        type: slotType,
-        maxPatients: Number.isFinite(wh.maxPatients) ? wh.maxPatients : 1,
-
-        // IMPORTANT: block is "booked" only if fully covered (no free time)
-        isBooked: !hasFree,
-        isAvailable: hasFree,
-
-        fee,
-
-        // NEW: for UI + debugging
-        busyMinutes,
-        freeMinutes,
-        busyIntervals: busyInBlockMerged.map(iv => ({
-          startTime: minutesToHHMM(iv.start),
-          endTime: minutesToHHMM(iv.end)
-        })),
-        freeIntervals: freeInBlockMerged.map(iv => ({
-          startTime: minutesToHHMM(iv.start),
-          endTime: minutesToHHMM(iv.end)
-        }))
-      };
-    }).filter(Boolean);
 
     return res.json({
       success: true,
-      date: targetKey,
-      dayName: day.dayName,
-
-      // day is available if ANY block has any free time
-      isAvailable: slotBlocks.some(s => s.isAvailable),
-
-      slots: slotBlocks,
+      availability: doctor.availability || [],
       doctorName: doctor.name,
       consultationFee: doctor.consultationFee,
-      homeVisitFee: doctor.homeVisitFee
+      homeVisitFee: doctor.homeVisitFee,
+      videoCallFee: doctor.videoCallFee,
+      consultationTypes: getConsultationTypes(doctor),
+      slotDurationMinutes: doctor.slotDurationMinutes || 30,
+      bookingWindowDays: doctor.bookingWindowDays || 60,
+      minimumNoticeMinutes: doctor.minimumNoticeMinutes || 60,
     });
   } catch (err) {
-    console.error('Error fetching doctor availability:', err.message);
-    return res.status(500).json({
+    console.error('Error fetching own availability:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch availability' });
+  }
+};
+
+exports.getDoctorAvailability = async (req, res) => {
+  try {
+    const doctor = await DoctorProfile.findOne({ _id: req.params.id, verificationStatus: 'approved' })
+      .select('name availability consultationFee homeVisitFee videoCallFee clinicConsultationEnabled homeVisitEnabled teleconsultationEnabled slotDurationMinutes bookingWindowDays minimumNoticeMinutes');
+
+    if (!doctor) {
+      return res.status(404).json({ success: false, error: 'Doctor not found' });
+    }
+
+    const daily = await getDoctorDailySlots(doctor, req.query.date || new Date(), {
+      type: req.query.type || 'clinic',
+      duration: req.query.duration,
+      includeUnavailable: req.query.includeUnavailable === 'true',
+    });
+
+    return res.json({
+      success: true,
+      ...daily,
+      availableSlots: daily.slots.filter((slot) => slot.isAvailable !== false),
+      doctorName: doctor.name,
+      consultationFee: doctor.consultationFee,
+      homeVisitFee: doctor.homeVisitFee,
+      videoCallFee: doctor.videoCallFee,
+      consultationTypes: getConsultationTypes(doctor),
+    });
+  } catch (err) {
+    console.error('Error fetching doctor availability:', err);
+    return res.status(err.statusCode || 500).json({
       success: false,
-      error: 'Failed to fetch availability'
+      error: err.statusCode ? err.message : 'Failed to fetch availability',
     });
   }
 };
 
+exports.getDoctorDirectoryMeta = async (req, res) => {
+  try {
+    const base = { verificationStatus: 'approved' };
+    const [specializations, cities, localities, languages] = await Promise.all([
+      DoctorProfile.distinct('specialization', base),
+      DoctorProfile.distinct('clinicAddress.city', base),
+      DoctorProfile.distinct('clinicAddress.locality', base),
+      DoctorProfile.distinct('languages', base),
+    ]);
 
+    const clean = (items) => items.filter(Boolean).map(String).sort((a, b) => a.localeCompare(b));
+    return res.json({
+      success: true,
+      specializations: clean(specializations),
+      cities: clean(cities),
+      localities: clean(localities),
+      languages: clean(languages),
+      consultationTypes: VALID_TYPES,
+      sortOptions: ['rating', 'experience', 'fee_low', 'fee_high', 'newest'],
+    });
+  } catch (err) {
+    console.error('Error fetching doctor directory metadata:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch doctor directory metadata' });
+  }
+};
 
-// Get current doctor's profile  GET /doctor/me/profile
 exports.getProfile = async (req, res) => {
   try {
     const doctor = await DoctorProfile.findOne({ userId: req.user.id })

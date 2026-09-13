@@ -182,6 +182,7 @@ const appointmentSchema = new mongoose.Schema(
     paymentDate: Date,
 
     cancellationReason: String,
+    cancelledAt: Date,
 
     cancelledBy: {
       type: String,
@@ -205,8 +206,13 @@ const appointmentSchema = new mongoose.Schema(
         appointmentId: mongoose.Schema.Types.ObjectId,
         date: Date,
         reason: String,
+        originalDate: Date,
+        originalTime: String,
+        rescheduledDate: Date,
       },
     ],
+
+    rescheduleReason: String,
 
     followUpDate: Date,
     followUpNotes: String,
@@ -221,9 +227,15 @@ const appointmentSchema = new mongoose.Schema(
       ref: 'Appointment',
     },
 
+    respondedBy: String,
+    respondedAt: Date,
+
     actualStartTime: Date,
     actualEndTime: Date,
     consultationNotes: String,
+    professionalNotes: String,
+    patientNotes: String,
+    followupRequired: { type: Boolean, default: false },
 
     prescriptionId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -237,6 +249,8 @@ const appointmentSchema = new mongoose.Schema(
         sentAt: Date,
       },
     ],
+
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
     bookedBy: {
       type: String,
@@ -258,6 +272,8 @@ appointmentSchema.index({ physioId: 1, status: 1 });
 appointmentSchema.index({ pathologyId: 1, status: 1 });
 
 appointmentSchema.index({ appointmentDate: 1, startTime: 1 });
+appointmentSchema.index({ doctorId: 1, appointmentDate: 1, startTime: 1 });
+appointmentSchema.index({ patientId: 1, appointmentDate: -1 });
 appointmentSchema.index({ status: 1, paymentStatus: 1 });
 
 appointmentSchema.index(

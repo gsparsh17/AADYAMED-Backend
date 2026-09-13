@@ -1,5 +1,7 @@
 const Feedback = require('../models/Feedback');
 const Appointment = require('../models/Appointment');
+const DoctorProfile = require('../models/DoctorProfile');
+const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 
 exports.submitFeedback = async (req, res) => {
   try {
@@ -28,7 +30,7 @@ exports.submitFeedback = async (req, res) => {
     }
     
     // Check if user is the patient from the appointment
-    if (appointment.patientId._id.toString() !== req.user.profileId) {
+    if (appointment.patientId._id.toString() !== String(req.user.profileId)) {
       return res.status(403).json({ message: 'Only the patient can submit feedback for this appointment' });
     }
     
@@ -211,7 +213,7 @@ exports.addProfessionalResponse = async (req, res) => {
     }
     
     // Check if user is the professional being reviewed
-    if (feedback.professionalId.toString() !== req.user.profileId) {
+    if (feedback.professionalId.toString() !== String(req.user.profileId)) {
       return res.status(403).json({ message: 'Not authorized' });
     }
     

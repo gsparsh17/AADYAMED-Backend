@@ -13,7 +13,7 @@ const availabilitySlotSchema = new mongoose.Schema({
   slots: [{
     startTime: { type: String, required: true }, // "09:00"
     endTime: { type: String, required: true },
-    type: { type: String, enum: ['clinic', 'home'], default: 'clinic' },
+    type: { type: String, enum: ['clinic', 'home', 'video', 'all'], default: 'clinic' },
     maxPatients: { type: Number, default: 1 },
     isBooked: { type: Boolean, default: false }
   }]
@@ -48,8 +48,11 @@ const doctorProfileSchema = new mongoose.Schema({
   licenseNumber: { type: String, required: true },
   licenseDocument: String,
 
+  clinicName: String,
+
   clinicAddress: {
     address: String,
+    locality: String,
     city: String,
     state: String,
     pincode: String,
@@ -63,11 +66,23 @@ const doctorProfileSchema = new mongoose.Schema({
   homeVisitFee: { type: Number, default: 0 },
   videoCallFee: { type: Number, default: 0 },
 
+  clinicConsultationEnabled: { type: Boolean, default: true },
+  homeVisitEnabled: { type: Boolean, default: false },
+  teleconsultationEnabled: { type: Boolean, default: false },
+  slotDurationMinutes: { type: Number, default: 30, min: 5, max: 180 },
+  bookingWindowDays: { type: Number, default: 60, min: 1, max: 365 },
+  minimumNoticeMinutes: { type: Number, default: 60, min: 0, max: 10080 },
+
   availability: [availabilitySlotSchema],
 
   languages: [String],
   about: String,
   services: [String],
+  registrationCouncil: String,
+  registrationYear: Number,
+  awards: [{ title: String, year: Number }],
+  memberships: [String],
+  acceptedInsurance: [String],
 
   verificationStatus: {
     type: String,
@@ -103,6 +118,9 @@ const doctorProfileSchema = new mongoose.Schema({
 /* ------------------ Indexes ------------------ */
 doctorProfileSchema.index({ 'clinicAddress.location': '2dsphere' });
 doctorProfileSchema.index({ specialization: 1, verificationStatus: 1 });
+doctorProfileSchema.index({ 'clinicAddress.city': 1, verificationStatus: 1 });
+doctorProfileSchema.index({ 'clinicAddress.locality': 1, verificationStatus: 1 });
+doctorProfileSchema.index({ languages: 1, verificationStatus: 1 });
 doctorProfileSchema.index({ averageRating: -1 });
 
 /* ------------------ Exports ------------------ */
