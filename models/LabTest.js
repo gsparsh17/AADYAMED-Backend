@@ -96,6 +96,9 @@ const labTestSchema = new mongoose.Schema({
     default: 'pending'
   },
   paymentId: String,
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  paymentDate: Date,
   
   // Status
   status: {

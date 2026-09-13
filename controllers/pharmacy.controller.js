@@ -34,7 +34,8 @@ exports.createPharmacyProfile = async (req, res) => {
     // Update user's profileCompleted status
     await User.findByIdAndUpdate(req.user.id, {
       profileCompleted: true,
-      profileId: profile._id
+      profileId: profile._id,
+      profileModel: 'PharmacyProfile'
     });
 
     res.status(201).json({

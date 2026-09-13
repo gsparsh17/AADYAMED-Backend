@@ -9,6 +9,7 @@ router.use(authorize('admin', 'pharmacy'));
 router.post('/', purchaseOrderController.createPurchaseOrder);
 router.get('/', purchaseOrderController.getAllPurchaseOrders);
 router.get('/stats', purchaseOrderController.getPurchaseOrderStats);
+router.get('/:id', purchaseOrderController.getPurchaseOrderById);
 router.post('/:id/approve', purchaseOrderController.approvePurchaseOrder);
 router.post('/:id/receive', purchaseOrderController.receivePurchaseOrder);
 

@@ -1,170 +1,234 @@
 const PharmacyInvoice = require('../models/pharmacyInvoiceModel');
 const Medicine = require('../models/Medicine');
-const mongoose = require('mongoose');
-const PDFDocument = require('pdfkit'); // ADD: Import pdfkit
+const PDFDocument = require('pdfkit');
 const Prescription = require('../models/Prescription');
 
-const createInvoiceAndHandleStock = async (req, res) => {
-  // ADDED: Receive the prescription_id
-  const { prescription_id, patient_id, doctor_id, items, total_amount, payment_mode } = req.body;
+const roundMoney = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
-  if (!items || items.length === 0) {
-    return res.status(400).json({ message: 'Invoice must contain at least one item.' });
+const createInvoiceAndHandleStock = async (req, res) => {
+  const {
+    prescription_id,
+    patient_id,
+    doctor_id,
+    items,
+    payment_mode = 'Cash'
+  } = req.body;
+
+  if (!patient_id) {
+    return res.status(400).json({ success: false, message: 'patient_id is required.' });
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ success: false, message: 'Invoice must contain at least one item.' });
+  }
+
+  const normalizedItems = items.map(item => ({
+    medicine_id: item.medicine_id,
+    name: item.name,
+    quantity: Number(item.quantity),
+    price: Number(item.price)
+  }));
+
+  if (normalizedItems.some(item => !item.medicine_id || !item.name || !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
+    return res.status(400).json({ success: false, message: 'One or more invoice items are invalid.' });
   }
 
   try {
-    // 1. Create the new invoice
-    const invoice = new PharmacyInvoice({
-      patient_id,
-      doctor_id,
-      items,
-      total_amount,
-      payment_mode,
-    });
-    const createdInvoice = await invoice.save();
+    const medicineIds = normalizedItems.map(item => item.medicine_id);
+    const medicines = await Medicine.find({ _id: { $in: medicineIds }, isActive: true });
+    const medicineMap = new Map(medicines.map(m => [String(m._id), m]));
 
-    // 2. Update the stock for each medicine sold
-    for (const item of items) {
-      await Medicine.updateOne(
-        { _id: item.medicine_id },
-        { $inc: { stock_quantity: -item.quantity } }
+    for (const item of normalizedItems) {
+      const medicine = medicineMap.get(String(item.medicine_id));
+      if (!medicine) {
+        return res.status(400).json({ success: false, message: `Medicine ${item.name} is not available.` });
+      }
+      if (medicine.quantity < item.quantity) {
+        return res.status(409).json({
+          success: false,
+          message: `Insufficient stock for ${medicine.medicineName}. Available: ${medicine.quantity}`
+        });
+      }
+    }
+
+    const serverTotal = roundMoney(normalizedItems.reduce((sum, item) => sum + item.quantity * item.price, 0));
+    const decremented = [];
+
+    try {
+      for (const item of normalizedItems) {
+        const result = await Medicine.updateOne(
+          { _id: item.medicine_id, isActive: true, quantity: { $gte: item.quantity } },
+          { $inc: { quantity: -item.quantity } }
+        );
+        if (result.modifiedCount !== 1) {
+          throw new Error(`Stock changed while processing ${item.name}. Please retry.`);
+        }
+        decremented.push(item);
+      }
+
+      const createdInvoice = await PharmacyInvoice.create({
+        prescription_id: prescription_id || undefined,
+        patient_id,
+        doctor_id: doctor_id || undefined,
+        items: normalizedItems,
+        total_amount: serverTotal,
+        payment_mode,
+        status: 'Paid',
+        created_by: req.user.id
+      });
+
+      if (prescription_id) {
+        await Prescription.findByIdAndUpdate(prescription_id, {
+          pharmacyStatus: 'fully_dispensed',
+          status: 'dispensed',
+          dispensedBy: req.user.id,
+          dispensedAt: new Date()
+        });
+      }
+
+      return res.status(201).json(createdInvoice);
+    } catch (writeError) {
+      // Best-effort rollback for stock decrements when a later write fails.
+      await Promise.allSettled(
+        decremented.map(item => Medicine.updateOne(
+          { _id: item.medicine_id },
+          { $inc: { quantity: item.quantity } }
+        ))
       );
+      throw writeError;
     }
-
-    // 3. ADDED: Delete the original prescription
-    if (prescription_id) {
-        await Prescription.findByIdAndDelete(prescription_id);
-    }
-    
-    res.status(201).json(createdInvoice);
-
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error: Could not process invoice.' });
+    console.error('Pharmacy invoice error:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Could not process invoice.' });
   }
 };
-
 
 const downloadInvoicePDF = async (req, res) => {
   try {
-    const invoice = await PharmacyInvoice.findById(req.params.id).populate('patient_id');
+    const invoice = await PharmacyInvoice.findById(req.params.id)
+      .populate('patient_id', 'name firstName lastName phone')
+      .populate('doctor_id', 'name specialization');
+
     if (!invoice) {
-      return res.status(404).json({ message: 'Invoice not found.' });
+      return res.status(404).json({ success: false, message: 'Invoice not found.' });
     }
 
     const doc = new PDFDocument({ margin: 50 });
-
-    // Set response headers to trigger download
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=invoice-${invoice._id}.pdf`);
-
-    // Pipe the PDF document directly to the response stream
+    res.setHeader('Content-Disposition', `attachment; filename=pharmacy-invoice-${invoice._id}.pdf`);
     doc.pipe(res);
 
-    // --- Add Content to the PDF ---
-    // Header
+    const patientName = invoice.patient_id?.name || [invoice.patient_id?.firstName, invoice.patient_id?.lastName].filter(Boolean).join(' ') || 'Patient';
+
     doc.fontSize(20).font('Helvetica-Bold').text('Pharmacy Invoice', { align: 'center' });
     doc.moveDown();
-
-    // Patient & Invoice Details
-    doc.fontSize(12).font('Helvetica');
+    doc.fontSize(11).font('Helvetica');
     doc.text(`Invoice ID: ${invoice._id}`);
-    doc.text(`Patient: ${invoice.patient_id.first_name} ${invoice.patient_id.last_name}`);
-    doc.text(`Date: ${new Date(invoice.createdAt).toLocaleDateString()}`);
+    doc.text(`Patient: ${patientName}`);
+    doc.text(`Date: ${new Date(invoice.createdAt).toLocaleDateString('en-IN')}`);
+    doc.text(`Payment: ${invoice.payment_mode}`);
     doc.moveDown(2);
 
-    // Table Header
-    const tableTop = doc.y;
     doc.font('Helvetica-Bold');
-    doc.text('Medicine', 50, tableTop);
-    doc.text('Qty', 300, tableTop, { width: 90, align: 'right' });
-    doc.text('Price', 400, tableTop, { width: 90, align: 'right' });
-    doc.font('Helvetica');
+    doc.text('Medicine', 50);
+    doc.text('Qty', 300, doc.y - 14, { width: 60, align: 'right' });
+    doc.text('Price', 380, doc.y - 14, { width: 80, align: 'right' });
+    doc.text('Amount', 470, doc.y - 14, { width: 80, align: 'right' });
     doc.moveDown();
-    
-    // Table Rows
+    doc.font('Helvetica');
+
     invoice.items.forEach(item => {
       const y = doc.y;
-      doc.text(item.name, 50, y);
-      doc.text(item.quantity, 300, y, { width: 90, align: 'right' });
-      doc.text(`$${item.price.toFixed(2)}`, 400, y, { width: 90, align: 'right' });
+      doc.text(item.name, 50, y, { width: 230 });
+      doc.text(String(item.quantity), 300, y, { width: 60, align: 'right' });
+      doc.text(`INR ${item.price.toFixed(2)}`, 380, y, { width: 80, align: 'right' });
+      doc.text(`INR ${(item.quantity * item.price).toFixed(2)}`, 470, y, { width: 80, align: 'right' });
       doc.moveDown();
     });
-    
-    // Total
-    doc.font('Helvetica-Bold').fontSize(14);
-    doc.text(`Total: $${invoice.total_amount.toFixed(2)}`, 300, doc.y + 20, { align: 'right' });
 
-    // Finalize the PDF and end the stream
+    doc.moveDown();
+    doc.font('Helvetica-Bold').fontSize(13)
+      .text(`Total: INR ${invoice.total_amount.toFixed(2)}`, { align: 'right' });
     doc.end();
-
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error: Could not generate PDF.' });
+    console.error('Invoice PDF error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Could not generate PDF.' });
+    } else {
+      res.end();
+    }
   }
 };
 
-
 const getAllPharmacyInvoices = async (req, res) => {
   try {
-    const invoices = await PharmacyInvoice.find({})
-      .populate('patient_id', 'first_name last_name') // Get patient's name
-      .sort({ createdAt: -1 }); // Show newest first
-    res.status(200).json(invoices);
+    const { page = 1, limit = 20, status } = req.query;
+    const filter = status ? { status } : {};
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+
+    const [invoices, total] = await Promise.all([
+      PharmacyInvoice.find(filter)
+        .populate('patient_id', 'name firstName lastName phone')
+        .sort({ createdAt: -1 })
+        .skip((safePage - 1) * safeLimit)
+        .limit(safeLimit),
+      PharmacyInvoice.countDocuments(filter)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      invoices,
+      pagination: { page: safePage, limit: safeLimit, total, pages: Math.ceil(total / safeLimit) }
+    });
   } catch (error) {
-    res.status(500).json({ message: 'Server Error: Could not fetch invoices.' });
+    res.status(500).json({ success: false, message: 'Could not fetch invoices.' });
   }
 };
 
 const getPharmacyInvoiceById = async (req, res) => {
   try {
     const invoice = await PharmacyInvoice.findById(req.params.id)
-      .populate('patient_id') // Get full patient details
-      .populate('doctor_id', 'first_name last_name'); // Get doctor's name
+      .populate('patient_id')
+      .populate('doctor_id', 'name specialization');
 
     if (!invoice) {
-      return res.status(404).json({ message: 'Invoice not found.' });
+      return res.status(404).json({ success: false, message: 'Invoice not found.' });
     }
-    res.status(200).json(invoice);
+    res.status(200).json({ success: true, invoice });
   } catch (error) {
-    res.status(500).json({ message: 'Server Error: Could not fetch invoice details.' });
+    res.status(500).json({ success: false, message: 'Could not fetch invoice details.' });
   }
 };
-
 
 const getMonthlyRevenue = async (req, res) => {
   try {
     const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const year = Number(req.query.year) || now.getFullYear();
+    const month = Number(req.query.month) || now.getMonth() + 1;
+    const startOfMonth = new Date(year, month - 1, 1);
+    const endOfMonth = new Date(year, month, 1);
 
     const result = await PharmacyInvoice.aggregate([
-      {
-        $match: {
-          status: 'Paid',
-          createdAt: { $gte: startOfMonth, $lte: endOfMonth }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: '$total_amount' }
-        }
-      }
+      { $match: { status: 'Paid', createdAt: { $gte: startOfMonth, $lt: endOfMonth } } },
+      { $group: { _id: null, totalRevenue: { $sum: '$total_amount' }, invoiceCount: { $sum: 1 } } }
     ]);
 
-    const totalRevenue = result.length > 0 ? result[0].totalRevenue : 0;
-    res.status(200).json({ totalRevenue });
-
+    res.status(200).json({
+      success: true,
+      totalRevenue: result[0]?.totalRevenue || 0,
+      invoiceCount: result[0]?.invoiceCount || 0,
+      year,
+      month
+    });
   } catch (error) {
-    res.status(500).json({ message: 'Server Error: Could not calculate revenue.' });
+    res.status(500).json({ success: false, message: 'Could not calculate revenue.' });
   }
 };
 
 module.exports = {
   createInvoiceAndHandleStock,
   downloadInvoicePDF,
-  getAllPharmacyInvoices,    // ADDED export
-  getPharmacyInvoiceById,    // ADDED export
-  getMonthlyRevenue,
+  getAllPharmacyInvoices,
+  getPharmacyInvoiceById,
+  getMonthlyRevenue
 };

@@ -316,11 +316,26 @@ exports.createAppointment = async (req, res) => {
 exports.getAppointmentsByPatientId = async (req, res) => {
   try {
     const { id } = req.params;
-    // We can restrict it to only appointments involving this doctor if needed, but the UI might want the doctor to see the full patient history.
-    // We will just return the appointments.
-    const appointments = await Appointment.find({ patientId: id })
+    const filter = { patientId: id };
+
+    if (req.user.role === 'patient') {
+      if (!req.user.profileId || String(req.user.profileId) !== String(id)) {
+        return res.status(403).json({ success: false, error: 'Not authorized to view this patient history' });
+      }
+    } else if (req.user.role === 'doctor') {
+      filter.doctorId = req.user.profileId;
+    } else if (req.user.role === 'physio') {
+      filter.physioId = req.user.profileId;
+    } else if (req.user.role === 'pathology') {
+      filter.pathologyId = req.user.profileId;
+    } else if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Not authorized to view patient appointments' });
+    }
+
+    const appointments = await Appointment.find(filter)
       .populate('doctorId', 'name specialization')
       .populate('physioId', 'name services')
+      .populate('pathologyId', 'labName')
       .sort({ appointmentDate: -1 });
     return res.json(appointments);
   } catch (error) {

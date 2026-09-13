@@ -65,9 +65,23 @@ exports.createPrescription = async (req, res) => {
 exports.getPrescriptionsByPatientId = async (req, res) => {
   try {
     const { id } = req.params;
-    const prescriptions = await Prescription.find({ patientId: id })
+    const filter = { patientId: id };
+
+    if (req.user.role === 'patient') {
+      if (!req.user.profileId || String(req.user.profileId) !== String(id)) {
+        return res.status(403).json({ message: 'Not authorized to view this patient prescription history' });
+      }
+    } else if (req.user.role === 'doctor') {
+      filter.doctorId = req.user.profileId;
+    } else if (req.user.role === 'physio') {
+      filter.physioId = req.user.profileId;
+    } else if (!['admin', 'pharmacy'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const prescriptions = await Prescription.find(filter)
       .sort({ issuedAt: -1 })
-      .populate('patientId', 'name age gender')
+      .populate('patientId', 'name age gender phone')
       .populate('doctorId', 'name specialization')
       .populate('physioId', 'name specialization')
       .populate('appointmentId', 'appointmentDate type');
@@ -88,6 +102,10 @@ exports.getPrescriptions = async (req, res) => {
     } else if (['doctor', 'physio'].includes(req.user.role)) {
       filter[req.user.role === 'doctor' ? 'doctorId' : 'physioId'] = req.user.profileId;
       filter.professionalType = req.user.role;
+    } else if (req.user.role === 'pharmacy') {
+      // Pharmacy can view issued prescriptions for dispensing. Store-level scoping is Phase 1.
+      filter.status = { $in: ['issued', 'active', 'dispensed'] };
+      if (patientId) filter.patientId = patientId;
     } else if (req.user.role === 'admin') {
       if (patientId) filter.patientId = patientId;
     } else {
@@ -186,14 +204,14 @@ function canCreatePrescription(user, appointment) {
   console.log(appointment, user.role)
   if (user.role === 'doctor' && 
       appointment.professionalType === 'doctor' &&
-      // appointment.doctorId?.toString() === user.profileId &&
+      String(appointment.doctorId) === String(user.profileId) &&
       appointment.status === 'confirmed') {
     return true;
   }
   
   if (user.role === 'physio' &&
       appointment.professionalType === 'physio' &&
-      // appointment.physioId?.toString() === user.profileId &&
+      String(appointment.physioId) === String(user.profileId) &&
       appointment.status === 'confirmed') {
     return true;
   }
@@ -202,14 +220,14 @@ function canCreatePrescription(user, appointment) {
 }
 
 function canViewPrescription(user, prescription) {
-  if (user.role === 'admin') return true;
+  if (user.role === 'admin' || user.role === 'pharmacy') return true;
   if (user.role === 'patient' && 
       prescription.patientId._id.toString() === user.profileId.toString()) {
     return true;
   }
   
-  if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId.toString()) ||
-      (user.role === 'physio' && prescription.physioId?._id.toString() === user.profileId.toString())) {
+  if ((user.role === 'doctor' && String(prescription.doctorId?._id || prescription.doctorId) === String(user.profileId).toString()) ||
+      (user.role === 'physio' && String(prescription.physioId?._id || prescription.physioId) === String(user.profileId).toString())) {
     return true;
   }
   
@@ -219,8 +237,8 @@ function canViewPrescription(user, prescription) {
 function canUpdatePrescription(user, prescription) {
   if (user.role === 'admin') return true;
   
-  if ((user.role === 'doctor' && prescription.doctorId?._id.toString() === user.profileId) ||
-      (user.role === 'physio' && prescription.physioId?._id.toString() === user.profileId)) {
+  if ((user.role === 'doctor' && String(prescription.doctorId?._id || prescription.doctorId) === String(user.profileId)) ||
+      (user.role === 'physio' && String(prescription.physioId?._id || prescription.physioId) === String(user.profileId))) {
     return true;
   }
   

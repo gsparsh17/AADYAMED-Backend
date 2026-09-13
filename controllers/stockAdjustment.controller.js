@@ -1,5 +1,6 @@
 const StockAdjustment = require('../models/StockAdjustment');
 const Medicine = require('../models/Medicine');
+const MedicineBatch = require('../models/MedicineBatch');
 
 exports.getAllAdjustments = async (req, res) => {
   try {
@@ -63,15 +64,23 @@ exports.getAllAdjustments = async (req, res) => {
 
 exports.createAdjustment = async (req, res) => {
   try {
-    const { 
-      medicineId, 
-      batchId, 
-      adjustmentQuantity, 
-      adjustmentType, 
-      reason, 
-      notes 
-    } = req.body;
-    
+    const medicineId = req.body.medicineId || req.body.medicine_id;
+    const batchId = req.body.batchId || req.body.batch_id;
+    let adjustmentQuantity = Number(req.body.adjustmentQuantity ?? req.body.adjustment_quantity ?? req.body.quantity);
+    let adjustmentType = String(req.body.adjustmentType || req.body.adjustment_type || 'correction').toLowerCase();
+    const reason = req.body.reason;
+    const notes = req.body.notes;
+
+    const typeAliases = { expiry: 'expiry', expired: 'expiry', damage: 'damage', damaged: 'damage', theft: 'theft', deduction: 'deduction', addition: 'addition', correction: 'correction', transfer: 'transfer' };
+    adjustmentType = typeAliases[adjustmentType] || 'correction';
+    if (['expiry', 'damage', 'theft', 'deduction'].includes(adjustmentType) && adjustmentQuantity > 0) {
+      adjustmentQuantity *= -1;
+    }
+
+    if (!medicineId || !Number.isFinite(adjustmentQuantity) || adjustmentQuantity === 0) {
+      return res.status(400).json({ message: 'medicineId and a non-zero adjustment quantity are required' });
+    }
+
     const medicine = await Medicine.findById(medicineId);
     if (!medicine) {
       return res.status(404).json({ message: 'Medicine not found' });

@@ -9,6 +9,7 @@ router.use(protect);
 router.post('/', authorize('admin', 'pharmacy', 'doctor', 'physio'), pharmacySaleController.createSale);
 router.get('/', authorize('admin', 'pharmacy', 'patient'), pharmacySaleController.getAllSales);
 router.get('/report', authorize('admin', 'pharmacy'), pharmacySaleController.getSalesReport);
+router.get('/stats/today', authorize('admin', 'pharmacy'), pharmacySaleController.getTodaySalesStats);
 router.get('/:id', authorize('admin', 'pharmacy'), pharmacySaleController.getSaleById);
 router.post('/:id/dispense', authorize('admin', 'pharmacy'), pharmacySaleController.dispenseSale);
 

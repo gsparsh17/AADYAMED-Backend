@@ -1,5 +1,5 @@
 const Customer = require('../models/Customer');
-const Sale = require('../models/Sale');
+const Sale = require('../models/PharmacySale');
 const Invoice = require('../models/Invoice');
 
 // Create customer (without purchase logic)
@@ -90,7 +90,7 @@ exports.getAllCustomers = async (req, res) => {
     if (is_active !== undefined) filter.is_active = is_active === 'true';
 
     const customers = await Customer.find(filter)
-      .populate('patient_id', 'first_name last_name patientId')
+      .populate('patient_id', 'firstName lastName patientId')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -114,7 +114,7 @@ exports.getCustomerById = async (req, res) => {
     const { id } = req.params;
 
     const customer = await Customer.findById(id)
-      .populate('patient_id', 'first_name last_name patientId date_of_birth gender');
+      .populate('patient_id', 'firstName lastName patientId dateOfBirth gender');
 
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
@@ -123,26 +123,26 @@ exports.getCustomerById = async (req, res) => {
     // Get customer's sales history
     const sales = await Sale.find({ 
       $or: [
-        { patient_id: customer.patient_id },
-        { customer_phone: customer.phone }
+        { patientId: customer.patient_id },
+        { customerPhone: customer.phone }
       ]
     })
     .populate('items.medicine_id', 'name strength')
-    .sort({ sale_date: -1 })
+    .sort({ saleDate: -1 })
     .limit(10);
 
     // Get customer's invoice history
     const invoices = await Invoice.find({
       $or: [
-        { patient_id: customer.patient_id },
-        { customer_phone: customer.phone }
+        { patientId: customer.patient_id },
+        { customerPhone: customer.phone }
       ]
     })
-    .sort({ issue_date: -1 })
+    .sort({ invoiceDate: -1 })
     .limit(10);
 
     // Calculate total spent
-    const totalSpent = sales.reduce((total, sale) => total + sale.total_amount, 0);
+    const totalSpent = sales.reduce((total, sale) => total + sale.totalAmount, 0);
 
     res.status(200).json({
       customer,
@@ -221,7 +221,7 @@ exports.getCustomerStatistics = async (req, res) => {
     const recentCustomers = await Customer.find({ is_active: true })
       .sort({ createdAt: -1 })
       .limit(5)
-      .populate('patient_id', 'first_name last_name');
+      .populate('patient_id', 'firstName lastName');
 
     res.status(200).json({
       total_customers: totalCustomers,

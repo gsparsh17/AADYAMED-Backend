@@ -1,31 +1,20 @@
-// const express = require('express');
-// const router = express.Router();
-// // Updated import to the new controller file name
-// const { createInvoiceAndHandleStock } = require('../controllers/pharmacyInvoiceController.js');
-
-// router.post('/from-prescription', createInvoiceAndHandleStock);
-
-// module.exports = router;
-
 const express = require('express');
 const router = express.Router();
-
-// ADD THIS: Import the download function along with the create function
-const { 
+const { protect, authorize } = require('../middlewares/auth');
+const {
   createInvoiceAndHandleStock,
   downloadInvoicePDF,
   getAllPharmacyInvoices,
   getPharmacyInvoiceById,
-  getMonthlyRevenue 
-} = require('../controllers/pharmacyInvoiceController.js');
+  getMonthlyRevenue
+} = require('../controllers/pharmacyInvoiceController');
 
-// router.post('/', createInvoice);
+router.use(protect, authorize('admin', 'pharmacy'));
+
 router.get('/stats/monthly-revenue', getMonthlyRevenue);
 router.get('/', getAllPharmacyInvoices);
 router.post('/from-prescription', createInvoiceAndHandleStock);
-
-router.get('/:id', getPharmacyInvoiceById);
-// ADD THIS: The route for downloading the PDF
 router.get('/:id/download', downloadInvoicePDF);
+router.get('/:id', getPharmacyInvoiceById);
 
 module.exports = router;

@@ -131,7 +131,7 @@ purchaseOrderSchema.index({ supplierId: 1, status: 1 });
 purchaseOrderSchema.index({ orderDate: -1 });
 
 // Generate order number
-purchaseOrderSchema.pre('save', async function(next) {
+purchaseOrderSchema.pre('validate', async function(next) {
   if (!this.orderNumber) {
     const count = await mongoose.model('PurchaseOrder').countDocuments();
     const date = new Date();

@@ -4,6 +4,7 @@ const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 const PatientProfile = require('../models/PatientProfile');
 const PathologyProfile = require('../models/PathologyProfile');
+const PharmacyProfile = require('../models/PharmacyProfile');
 const { generateToken }= require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
 const { default: mongoose } = require('mongoose');
@@ -91,7 +92,7 @@ exports.register = async (req, res) => {
     });
     
     // Generate email verification token
-    const verificationToken = user.cr;
+    const verificationToken = user.createEmailVerificationToken();
     await user.save();
     
     // Send verification email
@@ -344,11 +345,11 @@ async function resolveProfileForUser(user) {
   // Role-first lookup (fast path)
   const roleToModel = {
     doctor: { Model: DoctorProfile, modelName: 'DoctorProfile' },
-    physiotherapist: { Model: PhysiotherapistProfile, modelName: 'PhysiotherapistProfile' },
+    physio: { Model: PhysiotherapistProfile, modelName: 'PhysiotherapistProfile' },
     patient: { Model: PatientProfile, modelName: 'PatientProfile' },
     pathology: { Model: PathologyProfile, modelName: 'PathologyProfile' },
     // pharmacy is required lazily because you required it elsewhere too
-    pharmacy: { Model: require('../models/Pharmacy'), modelName: 'Pharmacy' }
+    pharmacy: { Model: PharmacyProfile, modelName: 'PharmacyProfile' }
   };
 
   const primary = roleToModel[user.role];
@@ -363,7 +364,7 @@ async function resolveProfileForUser(user) {
     { Model: PhysiotherapistProfile, modelName: 'PhysiotherapistProfile' },
     { Model: PatientProfile, modelName: 'PatientProfile' },
     { Model: PathologyProfile, modelName: 'PathologyProfile' },
-    { Model: require('../models/Pharmacy'), modelName: 'Pharmacy' }
+    { Model: PharmacyProfile, modelName: 'PharmacyProfile' }
   ];
 
   for (const m of scanModels) {
@@ -586,24 +587,22 @@ exports.completeProfile = async (req, res) => {
         break;
         
       case 'pharmacy':
-        const Pharmacy = require('../models/Pharmacy');
-        
         if (!profileData.licenseNumber) {
           return res.status(400).json({
             success: false,
             error: 'Pharmacy license number is required'
           });
         }
-        
-        profile = await Pharmacy.create({
+
+        profile = await PharmacyProfile.create({
+          ...profileData,
           userId,
-          name: profileData.pharmacyName || user.name,
+          pharmacyName: profileData.pharmacyName || user.name,
           licenseNumber: profileData.licenseNumber,
           email: user.email,
-          phone: user.phone,
-          address: profileData.address
+          phone: profileData.phone || user.phone
         });
-        profileModel = 'Pharmacy';
+        profileModel = 'PharmacyProfile';
         break;
         
       default:

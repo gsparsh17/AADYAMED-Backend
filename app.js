@@ -7,6 +7,7 @@ const mongoSanitize = require('express-mongo-sanitize');
 const xss = require('xss-clean');
 const compression = require('compression');
 require('dotenv').config();
+const { protect, authorize } = require('./middlewares/auth');
 
 const app = express();
 
@@ -54,13 +55,25 @@ app.use(xss());
 // Compression
 app.use(compression());
 
-// Rate limiting
-// const limiter = rateLimit({
-//   windowMs: 15 * 60 * 1000, // 15 minutes
-//   max: 100, // limit each IP to 100 requests per windowMs
-//   message: 'Too many requests from this IP, please try again after 15 minutes'
-// });
-// app.use('/api');
+// Rate limiting for API endpoints. Auth is intentionally stricter below.
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.API_RATE_LIMIT_MAX || 500),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many requests. Please try again later.' }
+});
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX || 30),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many authentication attempts. Please try again later.' }
+});
+app.use('/api', apiLimiter);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/forgot-password', authLimiter);
+app.use('/api/auth/resend-verification', authLimiter);
 
 // Logging
 if (process.env.NODE_ENV === 'development') {
@@ -144,6 +157,7 @@ app.use('/api/pharmacy', require('./routes/pharmacy.routes'));
 
 // Patient Routes
 app.use('/api/patient', require('./routes/patient.routes'));
+app.use('/api/patients', require('./routes/patientDirectory.routes')); // minimal protected directory/search
 
 // Core Feature Routes
 app.use('/api/referral', require('./routes/referral.routes'));
@@ -170,6 +184,25 @@ app.use('/api/supplier', require('./routes/supplier.routes'));
 app.use('/api/purchase-order', require('./routes/purchaseOrder.routes'));
 app.use('/api/pharmacy-sale', require('./routes/pharmacySale.routes'));
 app.use('/api/stock-adjustment', require('./routes/stockAdjustment.routes'));
+
+// Compatibility aliases used by the current frontend. These point to the same
+// protected routers and can be removed later after the frontend is fully normalized.
+app.use('/api/doctors', require('./routes/doctor.routes'));
+app.use('/api/prescriptions', require('./routes/prescription.routes'));
+app.use('/api/invoices', require('./routes/invoice.routes'));
+app.use('/api/medicines', require('./routes/medicine.routes'));
+app.use('/api/batches', require('./routes/batch.routes'));
+app.use('/api/suppliers', require('./routes/supplier.routes'));
+app.use('/api/orders/purchase', require('./routes/purchaseOrder.routes'));
+app.use('/api/orders/purchase-orders', require('./routes/purchaseOrder.routes'));
+app.use('/api/orders/sale', require('./routes/pharmacySale.routes'));
+app.use('/api/sales', require('./routes/pharmacySale.routes'));
+app.use('/api/stock-adjustments', require('./routes/stockAdjustment.routes'));
+
+// Previously present route files that were unreachable from app.js.
+// Only routes that are compatible with the current model layer are mounted here.
+app.use('/api/customers', require('./routes/customer.routes'));
+app.use('/api/pharmacy-invoices', require('./routes/pharmacyInvoice.routes'));
 
 // --- ADDITIONAL SYSTEM HEALTH ENDPOINTS ---
 
@@ -231,7 +264,7 @@ app.get('/health', async (req, res) => {
 });
 
 // Calendar system status endpoint
-app.get('/api/system/calendar-status', async (req, res) => {
+app.get('/api/system/calendar-status', protect, authorize('admin'), async (req, res) => {
   try {
     const calendarJobs = require('./jobs/calendarJob');
     
@@ -272,7 +305,7 @@ app.get('/api/system/calendar-status', async (req, res) => {
 });
 
 // Manual calendar initialization endpoint (for debugging)
-app.post('/api/system/initialize-calendar', async (req, res) => {
+app.post('/api/system/initialize-calendar', protect, authorize('admin'), async (req, res) => {
   try {
     const calendarJobs = require('./jobs/calendarJob');
     

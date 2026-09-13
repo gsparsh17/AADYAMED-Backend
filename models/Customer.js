@@ -30,7 +30,7 @@ const customerSchema = new mongoose.Schema({
   },
   patient_id: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Patient',
+    ref: 'PatientProfile',
     sparse: true // Allows null values but ensures uniqueness if provided
   },
   

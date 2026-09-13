@@ -7,14 +7,18 @@ const StockAdjustment = require('../models/StockAdjustment');
 
 exports.createSale = async (req, res) => {
   try {
-    const { 
-      customerType, 
-      patientId, 
-      prescriptionId, 
-      items, 
-      paymentMethod,
-      notes 
-    } = req.body;
+    const customerType = req.body.customerType || req.body.customer_type || 'walkin';
+    const patientId = req.body.patientId || req.body.patient_id;
+    const prescriptionId = req.body.prescriptionId || req.body.prescription_id;
+    const paymentMethodRaw = req.body.paymentMethod || req.body.payment_method || 'cash';
+    const paymentMethod = String(paymentMethodRaw).toLowerCase();
+    const notes = req.body.notes;
+    const items = (req.body.items || []).map(item => ({
+      ...item,
+      medicineId: item.medicineId || item.medicine_id,
+      batchId: item.batchId || item.batch_id,
+      quantity: Number(item.quantity || 0),
+    }));
     
     let customerDetails = {};
     
@@ -27,15 +31,15 @@ exports.createSale = async (req, res) => {
       customerDetails = {
         customerName: patient.name,
         customerPhone: patient.phone,
-        customerEmail: patient.userId.email,
+        customerEmail: patient.email,
         customerAddress: patient.address
       };
     } else {
       customerDetails = {
-        customerName: req.body.customerName,
-        customerPhone: req.body.customerPhone,
-        customerEmail: req.body.customerEmail,
-        customerAddress: req.body.customerAddress
+        customerName: req.body.customerName || req.body.customer_name,
+        customerPhone: req.body.customerPhone || req.body.customer_phone,
+        customerEmail: req.body.customerEmail || req.body.customer_email,
+        customerAddress: req.body.customerAddress || req.body.customer_address
       };
     }
     
@@ -300,6 +304,35 @@ exports.getSaleById = async (req, res) => {
     sale.items = itemsWithBatch;
     
     res.json({ success: true, sale });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getTodaySalesStats = async (req, res) => {
+  try {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    const [result] = await PharmacySale.aggregate([
+      { $match: { saleDate: { $gte: start, $lt: end }, status: { $ne: 'cancelled' } } },
+      {
+        $group: {
+          _id: null,
+          totalSales: { $sum: '$totalAmount' },
+          totalTransactions: { $sum: 1 },
+          totalItems: { $sum: { $sum: '$items.quantity' } },
+        },
+      },
+    ]);
+
+    res.json({
+      totalSales: result?.totalSales || 0,
+      totalTransactions: result?.totalTransactions || 0,
+      totalItems: result?.totalItems || 0,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

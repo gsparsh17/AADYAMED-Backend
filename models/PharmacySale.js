@@ -159,7 +159,7 @@ pharmacySaleSchema.index({ saleDate: -1 });
 pharmacySaleSchema.index({ patientId: 1, prescriptionId: 1 });
 
 // Generate sale number
-pharmacySaleSchema.pre('save', async function(next) {
+pharmacySaleSchema.pre('validate', async function(next) {
   if (!this.saleNumber) {
     const count = await mongoose.model('PharmacySale').countDocuments();
     const date = new Date();
