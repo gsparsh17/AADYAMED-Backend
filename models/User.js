@@ -22,7 +22,7 @@ const userSchema = new mongoose.Schema({
   // Role Management
   role: {
     type: String,
-    enum: ['admin', 'doctor', 'physio', 'patient', 'pathology', 'pharmacy'],
+    enum: ['admin', 'doctor', 'physio', 'patient', 'pathology', 'pharmacy', 'mr'],
     required: [true, 'Role is required'],
     default: 'patient'
   },
@@ -80,7 +80,7 @@ const userSchema = new mongoose.Schema({
   },
   profileModel: {
     type: String,
-    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PatientProfile', 'PathologyProfile', 'PharmacyProfile', null],
+    enum: ['DoctorProfile', 'PhysiotherapistProfile', 'PatientProfile', 'PathologyProfile', 'PharmacyProfile', 'MRProfile', null],
     default: null
   },
   

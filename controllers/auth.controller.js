@@ -5,6 +5,7 @@ const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 const PatientProfile = require('../models/PatientProfile');
 const PathologyProfile = require('../models/PathologyProfile');
 const PharmacyProfile = require('../models/PharmacyProfile');
+const MRProfile = require('../models/MRProfile');
 const { generateToken }= require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
 const { default: mongoose } = require('mongoose');
@@ -350,7 +351,8 @@ async function resolveProfileForUser(user) {
     patient: { Model: PatientProfile, modelName: 'PatientProfile' },
     pathology: { Model: PathologyProfile, modelName: 'PathologyProfile' },
     // pharmacy is required lazily because you required it elsewhere too
-    pharmacy: { Model: PharmacyProfile, modelName: 'PharmacyProfile' }
+    pharmacy: { Model: PharmacyProfile, modelName: 'PharmacyProfile' },
+    mr: { Model: MRProfile, modelName: 'MRProfile' }
   };
 
   const primary = roleToModel[user.role];
@@ -365,7 +367,8 @@ async function resolveProfileForUser(user) {
     { Model: PhysiotherapistProfile, modelName: 'PhysiotherapistProfile' },
     { Model: PatientProfile, modelName: 'PatientProfile' },
     { Model: PathologyProfile, modelName: 'PathologyProfile' },
-    { Model: PharmacyProfile, modelName: 'PharmacyProfile' }
+    { Model: PharmacyProfile, modelName: 'PharmacyProfile' },
+    { Model: MRProfile, modelName: 'MRProfile' }
   ];
 
   for (const m of scanModels) {
@@ -476,7 +479,9 @@ exports.login = async (req, res) => {
         organizationId: user.organizationId || null,
         organizationRole: user.organizationRole || null,
         pharmacyStoreIds: user.pharmacyStoreIds || [],
-        defaultPharmacyStoreId: user.defaultPharmacyStoreId || null
+        defaultPharmacyStoreId: user.defaultPharmacyStoreId || null,
+        fieldRole: user.role === 'mr' ? (profile?.designation || null) : null,
+        fieldEmployeeCode: user.role === 'mr' ? (profile?.employeeCode || null) : null
       },
       profile,
       nextStep: resolvedProfileId ? null : 'complete-profile'
@@ -779,6 +784,18 @@ exports.updateProfile = async (req, res) => {
         profile = await Pharmacy.findOneAndUpdate(
           { userId },
           updates,
+          { new: true, runValidators: true }
+        );
+        break;
+      case 'MRProfile':
+        // Reporting hierarchy, designation and territory assignment are managed
+        // through /api/mr. Only non-hierarchy self-service fields are editable here.
+        profile = await MRProfile.findOneAndUpdate(
+          { userId },
+          { $set: {
+            ...(updates.productLine !== undefined ? { productLine: updates.productLine } : {}),
+            ...(updates.notes !== undefined ? { notes: updates.notes } : {})
+          } },
           { new: true, runValidators: true }
         );
         break;

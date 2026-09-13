@@ -43,6 +43,19 @@ require('./models/EPharmacyPrescriptionUpload');
 require('./models/EPharmacyCoupon');
 require('./models/EPharmacyOrder');
 
+// Medical Representative / field-force models
+require('./models/MRProfile');
+require('./models/MRTerritory');
+require('./models/MRAccount');
+require('./models/MRVisit');
+require('./models/MRAttendance');
+require('./models/MRTourPlan');
+require('./models/MRExpense');
+require('./models/MRTarget');
+require('./models/MRPOB');
+require('./models/MRSampleLedger');
+require('./models/MRDetailingContent');
+
 // Middleware - Security
 app.use(helmet()); // Set security headers
 app.use(cors({
@@ -162,6 +175,7 @@ app.use('/api/pathology', require('./routes/pathology.routes'));
 app.use('/api/diagnostics', require('./routes/diagnostics.routes'));
 app.use('/api/pharmacy', require('./routes/pharmacy.routes'));
 app.use('/api/tenant', require('./routes/tenant.routes'));
+app.use('/api/mr', require('./routes/mr.routes'));
 
 // Patient Routes
 app.use('/api/patient', require('./routes/patient.routes'));
