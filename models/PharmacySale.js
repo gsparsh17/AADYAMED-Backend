@@ -182,7 +182,6 @@ const pharmacySaleSchema = new mongoose.Schema({
   timestamps: true
 });
 
-pharmacySaleSchema.index({ saleNumber: 1 });
 pharmacySaleSchema.index({ customerPhone: 1 });
 pharmacySaleSchema.index({ saleDate: -1 });
 pharmacySaleSchema.index({ patientId: 1, prescriptionId: 1 });

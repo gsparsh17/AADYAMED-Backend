@@ -36,6 +36,11 @@ require('./models/Supplier');
 require('./models/PurchaseOrder');
 require('./models/PharmacySale');
 require('./models/StockAdjustment');
+require('./models/EPharmacyAddress');
+require('./models/EPharmacyCart');
+require('./models/EPharmacyPrescriptionUpload');
+require('./models/EPharmacyCoupon');
+require('./models/EPharmacyOrder');
 
 // Middleware - Security
 app.use(helmet()); // Set security headers
@@ -201,6 +206,7 @@ app.use('/api/orders/sale', require('./routes/pharmacySale.routes'));
 app.use('/api/sales', require('./routes/pharmacySale.routes'));
 app.use('/api/stock-adjustments', require('./routes/stockAdjustment.routes'));
 app.use('/api/pharmacy-erp', require('./routes/inventory.routes'));
+app.use('/api/epharmacy', require('./routes/ePharmacy.routes'));
 app.use('/api/stock-transfers', require('./routes/stockTransfer.routes'));
 app.use('/api/pharmacy-returns', require('./routes/pharmacyReturn.routes'));
 app.use('/api/grns', require('./routes/goodsReceipt.routes'));

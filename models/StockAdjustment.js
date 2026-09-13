@@ -33,7 +33,7 @@ const stockAdjustmentSchema = new mongoose.Schema({
   // Adjustment Details
   adjustmentType: {
     type: String,
-    enum: ['addition', 'deduction', 'damage', 'expiry', 'theft', 'correction', 'transfer'],
+    enum: ['addition', 'deduction', 'damage', 'expiry', 'theft', 'correction', 'transfer', 'return'],
     required: true
   },
   reason: String,
@@ -41,7 +41,7 @@ const stockAdjustmentSchema = new mongoose.Schema({
   // Reference
   referenceType: {
     type: String,
-    enum: ['sale', 'purchase', 'prescription', 'return', 'manual', 'transfer', 'grn', 'stocktake', 'other']
+    enum: ['sale', 'purchase', 'prescription', 'return', 'manual', 'transfer', 'grn', 'stocktake', 'online_order', 'other']
   },
   referenceId: mongoose.Schema.Types.ObjectId,
   sourceStoreId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore' },

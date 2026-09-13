@@ -2,10 +2,12 @@ const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const Appointment = require('../models/Appointment');
 const LabTest = require('../models/LabTest');
+const EPharmacyOrder = require('../models/EPharmacyOrder');
 
 const ENTITY_MODELS = {
   appointment: Appointment,
   labtest: LabTest,
+  pharmacy_order: EPharmacyOrder,
 };
 
 function getRazorpay() {
@@ -131,6 +133,14 @@ exports.verifyPayment = async (req, res) => {
     entity.paymentId = payment_id;
     entity.razorpayPaymentId = payment_id;
     entity.paymentDate = new Date();
+    if (entityType === 'pharmacy_order') {
+      entity.orderStatus = entity.prescriptionRequired && entity.prescriptionStatus === 'pending_review'
+        ? 'prescription_review'
+        : 'placed';
+      if (Array.isArray(entity.statusHistory)) {
+        entity.statusHistory.push({ status: entity.orderStatus, note: 'Online payment verified', actorId: req.user.id, at: new Date() });
+      }
+    }
     await entity.save();
 
     await sendPaymentConfirmation(req.user.id, entityType, entityId);

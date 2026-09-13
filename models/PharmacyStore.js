@@ -37,6 +37,17 @@ const pharmacyStoreSchema = new mongoose.Schema({
     expiryAlertDays: { type: Number, default: 30 },
     lowStockThreshold: { type: Number, default: 10 }
   },
+  ecommerce: {
+    enabled: { type: Boolean, default: true },
+    serviceablePincodes: [{ type: String, trim: true }],
+    minOrderAmount: { type: Number, default: 0, min: 0 },
+    deliveryFee: { type: Number, default: 0, min: 0 },
+    freeDeliveryThreshold: { type: Number, default: 0, min: 0 },
+    codEnabled: { type: Boolean, default: true },
+    onlinePaymentEnabled: { type: Boolean, default: true },
+    estimatedDeliveryMinutes: { type: Number, default: 120, min: 15 },
+    allowReturns: { type: Boolean, default: true }
+  },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 }, { timestamps: true });
