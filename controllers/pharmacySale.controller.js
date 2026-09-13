@@ -4,14 +4,14 @@ const MedicineBatch = require('../models/MedicineBatch');
 const Prescription = require('../models/Prescription');
 const PatientProfile = require('../models/PatientProfile');
 const StockAdjustment = require('../models/StockAdjustment');
+const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
 
 exports.createSale = async (req, res) => {
   try {
     const customerType = req.body.customerType || req.body.customer_type || 'walkin';
     const patientId = req.body.patientId || req.body.patient_id;
     const prescriptionId = req.body.prescriptionId || req.body.prescription_id;
-    const paymentMethodRaw = req.body.paymentMethod || req.body.payment_method || 'cash';
-    const paymentMethod = String(paymentMethodRaw).toLowerCase();
+    const paymentMethod = String(req.body.paymentMethod || req.body.payment_method || 'cash').toLowerCase();
     const notes = req.body.notes;
     const items = (req.body.items || []).map(item => ({
       ...item,
@@ -19,15 +19,13 @@ exports.createSale = async (req, res) => {
       batchId: item.batchId || item.batch_id,
       quantity: Number(item.quantity || 0),
     }));
-    
+
+    if (!items.length) return res.status(400).json({ message: 'At least one medicine is required' });
+
     let customerDetails = {};
-    
-    // Validate patient if provided
     if (patientId) {
       const patient = await PatientProfile.findById(patientId);
-      if (!patient) {
-        return res.status(404).json({ message: 'Patient not found' });
-      }
+      if (!patient) return res.status(404).json({ message: 'Patient not found' });
       customerDetails = {
         customerName: patient.name,
         customerPhone: patient.phone,
@@ -42,52 +40,38 @@ exports.createSale = async (req, res) => {
         customerAddress: req.body.customerAddress || req.body.customer_address
       };
     }
-    
-    // Validate prescription if provided
+
     let prescriptionDetails = {};
     if (prescriptionId) {
       const prescription = await Prescription.findById(prescriptionId);
-      if (!prescription) {
-        return res.status(404).json({ message: 'Prescription not found' });
-      }
+      if (!prescription) return res.status(404).json({ message: 'Prescription not found' });
       prescriptionDetails = {
         prescriptionRequired: true,
         prescriptionNumber: prescription.prescriptionNumber,
         prescribingDoctor: prescription.doctorId?.name || prescription.physioId?.name
       };
-      
-      // Check if already fully dispensed
       if (prescription.pharmacyStatus === 'fully_dispensed') {
         return res.status(400).json({ message: 'Prescription already fully dispensed' });
       }
     }
-    
-    // Validate items and check stock
+
     let subtotal = 0;
     const validatedItems = [];
-    
     for (const item of items) {
-      const medicine = await Medicine.findById(item.medicineId);
-      if (!medicine || !medicine.isActive) {
-        return res.status(400).json({ message: `Medicine ${item.medicineId} not available` });
+      if (!item.medicineId || !Number.isFinite(item.quantity) || item.quantity <= 0) {
+        return res.status(400).json({ message: 'Each sale item needs a valid medicine and positive quantity' });
       }
-      
+      const medicine = await Medicine.findOne(scopedFilter(req, { _id: item.medicineId, isActive: true }));
+      if (!medicine) return res.status(400).json({ message: `Medicine ${item.medicineId} is not available in the selected store` });
       if (medicine.quantity < item.quantity) {
-        return res.status(400).json({ 
-          message: `Insufficient stock for ${medicine.medicineName}. Available: ${medicine.quantity}` 
-        });
+        return res.status(400).json({ message: `Insufficient stock for ${medicine.medicineName}. Available: ${medicine.quantity}` });
       }
-      
-      // Check prescription requirement
       if (medicine.prescriptionRequired && !prescriptionId) {
-        return res.status(400).json({ 
-          message: `Prescription required for ${medicine.medicineName}` 
-        });
+        return res.status(400).json({ message: `Prescription required for ${medicine.medicineName}` });
       }
-      
+
       const itemTotal = item.quantity * medicine.sellingPrice;
       subtotal += itemTotal;
-      
       validatedItems.push({
         medicineId: medicine._id,
         medicineName: medicine.medicineName,
@@ -99,12 +83,10 @@ exports.createSale = async (req, res) => {
         totalAmount: itemTotal
       });
     }
-    
-    const tax = validatedItems.reduce((sum, item) => 
-      sum + (item.totalAmount * item.taxRate / 100), 0);
+
+    const tax = validatedItems.reduce((sum, item) => sum + (item.totalAmount * item.taxRate / 100), 0);
     const totalAmount = subtotal + tax;
-    
-    const sale = await PharmacySale.create({
+    const sale = await PharmacySale.create(scopedPayload(req, {
       customerType,
       patientId: patientId || undefined,
       prescriptionId: prescriptionId || undefined,
@@ -114,68 +96,67 @@ exports.createSale = async (req, res) => {
       subtotal,
       tax,
       totalAmount,
-      paidAmount: totalAmount, // Assume full payment for now
+      paidAmount: totalAmount,
       balanceAmount: 0,
       paymentMethod,
       paymentStatus: 'paid',
       status: 'draft',
       notes,
       createdBy: req.user.id
-    });
-    
+    }));
+
     res.status(201).json({ success: true, sale });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.dispenseSale = async (req, res) => {
   try {
-    const sale = await PharmacySale.findById(req.params.id);
-    
-    if (!sale) {
-      return res.status(404).json({ message: 'Sale not found' });
-    }
-    
-    if (sale.status !== 'draft') {
-      return res.status(400).json({ message: 'Only draft sales can be dispensed' });
-    }
-    
-    // Process each item
+    const sale = await PharmacySale.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!sale) return res.status(404).json({ message: 'Sale not found in the selected store' });
+    if (sale.status !== 'draft') return res.status(400).json({ message: 'Only draft sales can be dispensed' });
+
+    // Preflight stock validation avoids partially mutating one item before a later item fails.
+    const medicinesById = new Map();
     for (const item of sale.items) {
-      const medicine = await Medicine.findById(item.medicineId);
-      if (!medicine) continue;
-      
-      // Find batches (FIFO - First In First Out)
-      const batches = await MedicineBatch.find({
+      const medicine = await Medicine.findOne(scopedFilter(req, { _id: item.medicineId, isActive: true }));
+      if (!medicine || medicine.quantity < item.quantity) {
+        return res.status(400).json({ message: `Insufficient stock for ${item.medicineName}` });
+      }
+      const availableAcrossBatches = await MedicineBatch.aggregate([
+        { $match: scopedFilter(req, { medicineId: medicine._id, isActive: true, isExpired: false }) },
+        { $group: { _id: null, quantity: { $sum: '$availableQuantity' } } }
+      ]);
+      if ((availableAcrossBatches[0]?.quantity || 0) < item.quantity) {
+        return res.status(400).json({ message: `Insufficient non-expired batch stock for ${medicine.medicineName}` });
+      }
+      medicinesById.set(String(medicine._id), medicine);
+    }
+
+    for (const item of sale.items) {
+      const medicine = medicinesById.get(String(item.medicineId));
+      const batches = await MedicineBatch.find(scopedFilter(req, {
         medicineId: medicine._id,
         isActive: true,
         isExpired: false,
         availableQuantity: { $gt: 0 }
-      }).sort({ expiryDate: 1 });
-      
+      })).sort({ expiryDate: 1 });
+
       let remainingQty = item.quantity;
-      
       for (const batch of batches) {
         if (remainingQty <= 0) break;
-        
         const deductQty = Math.min(remainingQty, batch.availableQuantity);
-        
-        // Update batch
+        const previousBatchQuantity = batch.availableQuantity;
         batch.availableQuantity -= deductQty;
-        if (batch.availableQuantity === 0) {
-          batch.isActive = false;
-        }
+        batch.isActive = batch.availableQuantity > 0;
         await batch.save();
-        
-        // Update item with batch info
-        item.batchId = batch._id;
-        
-        // Record stock adjustment
-        await StockAdjustment.create({
+
+        if (!item.batchId) item.batchId = batch._id;
+        await StockAdjustment.create(scopedPayload(req, {
           medicineId: medicine._id,
           batchId: batch._id,
-          previousQuantity: batch.availableQuantity + deductQty,
+          previousQuantity: previousBatchQuantity,
           adjustmentQuantity: -deductQty,
           newQuantity: batch.availableQuantity,
           adjustmentType: 'deduction',
@@ -183,129 +164,77 @@ exports.dispenseSale = async (req, res) => {
           referenceType: 'sale',
           referenceId: sale._id,
           adjustedBy: req.user.id
-        });
-        
+        }));
         remainingQty -= deductQty;
       }
-      
-      if (remainingQty > 0) {
-        return res.status(400).json({ 
-          message: `Insufficient stock for ${medicine.medicineName}` 
-        });
-      }
-      
-      // Update medicine total quantity
+
       medicine.quantity -= item.quantity;
       await medicine.save();
     }
-    
-    // Update sale status
+
     sale.status = 'dispensed';
     sale.dispensedBy = req.user.id;
     sale.dispensedAt = new Date();
     await sale.save();
-    
-    // Update prescription if linked
-    if (sale.prescriptionId) {
-      await updatePrescriptionDispense(sale);
-    }
-    
+    if (sale.prescriptionId) await updatePrescriptionDispense(sale);
     res.json({ success: true, sale });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.getAllSales = async (req, res) => {
   try {
-    const { 
-      status, 
-      customerType,
-      startDate,
-      endDate,
-      patientId,
-      page = 1, 
-      limit = 20 
-    } = req.query;
-    
-    const filter = {};
+    const { status, customerType, startDate, endDate, patientId, page = 1, limit = 20 } = req.query;
+    const filter = scopedFilter(req);
     if (status) filter.status = status;
     if (customerType) filter.customerType = customerType;
     if (patientId) filter.patientId = patientId;
-    if (startDate && endDate) {
-      filter.saleDate = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate)
-      };
-    }
-    
+    if (startDate && endDate) filter.saleDate = { $gte: new Date(startDate), $lte: new Date(endDate) };
+
+    const pageNumber = Math.max(1, Number(page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(limit) || 20));
     const sales = await PharmacySale.find(filter)
       .populate('patientId', 'name phone')
       .populate('prescriptionId', 'prescriptionNumber')
       .populate('createdBy', 'name email')
       .sort({ saleDate: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
-    
+      .skip((pageNumber - 1) * pageSize)
+      .limit(pageSize);
     const total = await PharmacySale.countDocuments(filter);
-    
-    // Calculate totals
     const totals = await PharmacySale.aggregate([
       { $match: filter },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: '$totalAmount' },
-          totalTax: { $sum: '$tax' },
-          count: { $sum: 1 }
-        }
-      }
+      { $group: { _id: null, totalSales: { $sum: '$totalAmount' }, totalTax: { $sum: '$tax' }, count: { $sum: 1 } } }
     ]);
-    
+
     res.json({
       success: true,
       sales,
       totals: totals[0] || { totalSales: 0, totalTax: 0, count: 0 },
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) }
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.getSaleById = async (req, res) => {
   try {
-    const sale = await PharmacySale.findById(req.params.id)
+    const sale = await PharmacySale.findOne(scopedFilter(req, { _id: req.params.id }))
       .populate('patientId')
       .populate('prescriptionId')
       .populate('createdBy', 'name email')
       .populate('dispensedBy', 'name email');
-    
-    if (!sale) {
-      return res.status(404).json({ message: 'Sale not found' });
-    }
-    
-    // Get batch details for items
-    const itemsWithBatch = [];
-    for (const item of sale.items) {
-      if (item.batchId) {
-        const batch = await MedicineBatch.findById(item.batchId);
-        itemsWithBatch.push({ ...item.toObject(), batchDetails: batch });
-      } else {
-        itemsWithBatch.push(item);
-      }
-    }
-    
-    sale.items = itemsWithBatch;
-    
-    res.json({ success: true, sale });
+    if (!sale) return res.status(404).json({ message: 'Sale not found in the selected store' });
+
+    const saleObject = sale.toObject();
+    saleObject.items = await Promise.all(sale.items.map(async item => {
+      const batch = item.batchId ? await MedicineBatch.findOne(scopedFilter(req, { _id: item.batchId })) : null;
+      return { ...item.toObject(), batchDetails: batch };
+    }));
+    res.json({ success: true, sale: saleObject });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -315,61 +244,28 @@ exports.getTodaySalesStats = async (req, res) => {
     start.setHours(0, 0, 0, 0);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
-
     const [result] = await PharmacySale.aggregate([
-      { $match: { saleDate: { $gte: start, $lt: end }, status: { $ne: 'cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: '$totalAmount' },
-          totalTransactions: { $sum: 1 },
-          totalItems: { $sum: { $sum: '$items.quantity' } },
-        },
-      },
+      { $match: scopedFilter(req, { saleDate: { $gte: start, $lt: end }, status: { $ne: 'cancelled' } }) },
+      { $group: { _id: null, totalSales: { $sum: '$totalAmount' }, totalTransactions: { $sum: 1 }, totalItems: { $sum: { $sum: '$items.quantity' } } } }
     ]);
-
-    res.json({
-      totalSales: result?.totalSales || 0,
-      totalTransactions: result?.totalTransactions || 0,
-      totalItems: result?.totalItems || 0,
-    });
+    res.json({ totalSales: result?.totalSales || 0, totalTransactions: result?.totalTransactions || 0, totalItems: result?.totalItems || 0 });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.getSalesReport = async (req, res) => {
   try {
     const { groupBy = 'day', startDate, endDate } = req.query;
-    
-    const matchStage = { status: 'dispensed' };
-    if (startDate && endDate) {
-      matchStage.saleDate = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate)
-      };
-    }
-    
+    const matchStage = scopedFilter(req, { status: 'dispensed' });
+    if (startDate && endDate) matchStage.saleDate = { $gte: new Date(startDate), $lte: new Date(endDate) };
+
     let groupStage;
-    if (groupBy === 'day') {
+    if (groupBy === 'month') {
       groupStage = {
-        _id: {
-          year: { $year: '$saleDate' },
-          month: { $month: '$saleDate' },
-          day: { $dayOfMonth: '$saleDate' }
-        },
+        _id: { year: { $year: '$saleDate' }, month: { $month: '$saleDate' } },
         totalSales: { $sum: '$totalAmount' },
-        totalItems: { $sum: { $size: '$items' } },
-        count: { $sum: 1 }
-      };
-    } else if (groupBy === 'month') {
-      groupStage = {
-        _id: {
-          year: { $year: '$saleDate' },
-          month: { $month: '$saleDate' }
-        },
-        totalSales: { $sum: '$totalAmount' },
-        totalItems: { $sum: { $size: '$items' } },
+        totalItems: { $sum: '$items.quantity' },
         count: { $sum: 1 }
       };
     } else if (groupBy === 'medicine') {
@@ -380,42 +276,38 @@ exports.getSalesReport = async (req, res) => {
         totalAmount: { $sum: { $multiply: ['$items.quantity', '$items.sellingPrice'] } },
         count: { $sum: 1 }
       };
+    } else {
+      groupStage = {
+        _id: { year: { $year: '$saleDate' }, month: { $month: '$saleDate' }, day: { $dayOfMonth: '$saleDate' } },
+        totalSales: { $sum: '$totalAmount' },
+        totalItems: { $sum: '$items.quantity' },
+        count: { $sum: 1 }
+      };
     }
-    
+
     const report = await PharmacySale.aggregate([
       { $match: matchStage },
       { $unwind: '$items' },
       { $group: groupStage },
-      { $sort: { totalSales: -1 } },
-      { $limit: 20 }
+      { $sort: { totalSales: -1, totalAmount: -1 } },
+      { $limit: 50 }
     ]);
-    
-    // Get top customers
     const topCustomers = await PharmacySale.aggregate([
       { $match: matchStage },
-      {
-        $group: {
-          _id: '$customerPhone',
-          customerName: { $first: '$customerName' },
-          totalSpent: { $sum: '$totalAmount' },
-          totalVisits: { $sum: 1 }
-        }
-      },
+      { $group: { _id: '$customerPhone', customerName: { $first: '$customerName' }, totalSpent: { $sum: '$totalAmount' }, totalVisits: { $sum: 1 } } },
       { $sort: { totalSpent: -1 } },
       { $limit: 10 }
     ]);
-    
     res.json({ success: true, report, topCustomers });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
-// Helper function to update prescription dispense status
 async function updatePrescriptionDispense(sale) {
   const prescription = await Prescription.findById(sale.prescriptionId);
   if (!prescription) return;
-  
+
   const dispensedItems = sale.items.map(item => ({
     medicineId: item.medicineId,
     batchId: item.batchId,
@@ -425,20 +317,11 @@ async function updatePrescriptionDispense(sale) {
     dispensedBy: sale.dispensedBy,
     pharmacySaleId: sale._id
   }));
-  
   prescription.dispensedItems = prescription.dispensedItems.concat(dispensedItems);
-  
-  // Check if all prescribed medicines are dispensed
   const prescribedMedicines = prescription.medicines || [];
   const dispensedCount = prescription.dispensedItems.length;
-  
-  if (dispensedCount === 0) {
-    prescription.pharmacyStatus = 'not_dispensed';
-  } else if (dispensedCount < prescribedMedicines.length) {
-    prescription.pharmacyStatus = 'partially_dispensed';
-  } else {
-    prescription.pharmacyStatus = 'fully_dispensed';
-  }
-  
+  if (dispensedCount === 0) prescription.pharmacyStatus = 'not_dispensed';
+  else if (dispensedCount < prescribedMedicines.length) prescription.pharmacyStatus = 'partially_dispensed';
+  else prescription.pharmacyStatus = 'fully_dispensed';
   await prescription.save();
 }

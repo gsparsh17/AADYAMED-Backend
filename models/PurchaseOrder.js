@@ -37,6 +37,9 @@ const purchaseOrderItemSchema = new mongoose.Schema({
 });
 
 const purchaseOrderSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
+
   orderNumber: {
     type: String,
     required: true,
@@ -129,6 +132,7 @@ const purchaseOrderSchema = new mongoose.Schema({
 purchaseOrderSchema.index({ orderNumber: 1 });
 purchaseOrderSchema.index({ supplierId: 1, status: 1 });
 purchaseOrderSchema.index({ orderDate: -1 });
+purchaseOrderSchema.index({ organizationId: 1, storeId: 1, orderDate: -1 });
 
 // Generate order number
 purchaseOrderSchema.pre('validate', async function(next) {

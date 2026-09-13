@@ -7,6 +7,15 @@ const pharmacyProfileSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    index: true
+  },
+  defaultStoreId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PharmacyStore'
+  },
   pharmacyName: {
     type: String,
     required: true
@@ -127,5 +136,6 @@ const pharmacyProfileSchema = new mongoose.Schema({
 pharmacyProfileSchema.index({ 'address.location': '2dsphere' });
 pharmacyProfileSchema.index({ verificationStatus: 1 });
 pharmacyProfileSchema.index({ pharmacyName: 'text' });
+pharmacyProfileSchema.index({ organizationId: 1 });
 
 module.exports = mongoose.model('PharmacyProfile', pharmacyProfileSchema);

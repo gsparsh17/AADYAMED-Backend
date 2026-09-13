@@ -2,6 +2,9 @@ const Appointment = require('../models/Appointment');
 const Invoice = require('../models/Invoice');
 const Commission = require('../models/Commission');
 const CommissionSettings = require('../models/CommissionSettings');
+const PharmacySale = require('../models/PharmacySale');
+const LabTest = require('../models/LabTest');
+const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
 
 exports.generateAppointmentBill = async (req, res) => {
   try {
@@ -134,7 +137,7 @@ exports.generatePharmacyBill = async (req, res) => {
   try {
     const { pharmacySaleId } = req.params;
     
-    const pharmacySale = await PharmacySale.findById(pharmacySaleId)
+    const pharmacySale = await PharmacySale.findOne(scopedFilter(req, { _id: pharmacySaleId }))
       .populate('patientId', 'name phone email address');
     
     if (!pharmacySale) {
@@ -142,7 +145,7 @@ exports.generatePharmacyBill = async (req, res) => {
     }
     
     // Check if invoice already exists
-    const existingInvoice = await Invoice.findOne({ pharmacySaleId });
+    const existingInvoice = await Invoice.findOne(scopedFilter(req, { pharmacySaleId }));
     if (existingInvoice) {
       return res.json({ success: true, invoice: existingInvoice });
     }
@@ -174,7 +177,7 @@ exports.generatePharmacyBill = async (req, res) => {
     };
     
     // Create invoice
-    const invoice = await Invoice.create({
+    const invoice = await Invoice.create(scopedPayload(req, {
       invoiceType: 'pharmacy',
       pharmacySaleId,
       patientId: pharmacySale.patientId?._id,
@@ -189,7 +192,7 @@ exports.generatePharmacyBill = async (req, res) => {
       status: pharmacySale.paymentStatus === 'paid' ? 'paid' : 'sent',
       paymentMethod: pharmacySale.paymentStatus === 'paid' ? pharmacySale.paymentMethod : undefined,
       createdBy: req.user.id
-    });
+    }));
     
     res.json({ success: true, invoice });
   } catch (error) {

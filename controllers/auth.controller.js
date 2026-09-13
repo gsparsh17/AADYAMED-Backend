@@ -8,6 +8,7 @@ const PharmacyProfile = require('../models/PharmacyProfile');
 const { generateToken }= require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
 const { default: mongoose } = require('mongoose');
+const { provisionPharmacyTenant } = require('../services/pharmacyTenant.service');
 
 // ========== HELPER FUNCTIONS ==========
 
@@ -471,7 +472,11 @@ exports.login = async (req, res) => {
         profileModel: resolvedProfileModel,
 
         status: user.status,
-        preferences: user.preferences
+        preferences: user.preferences,
+        organizationId: user.organizationId || null,
+        organizationRole: user.organizationRole || null,
+        pharmacyStoreIds: user.pharmacyStoreIds || [],
+        defaultPharmacyStoreId: user.defaultPharmacyStoreId || null
       },
       profile,
       nextStep: resolvedProfileId ? null : 'complete-profile'
@@ -617,6 +622,13 @@ exports.completeProfile = async (req, res) => {
     user.profileId = profile._id;
     user.profileModel = profileModel;
     await user.save();
+
+    // Pharmacy profiles immediately get an organization + default store. This keeps
+    // old one-pharmacy accounts compatible while enabling branch-level isolation.
+    let pharmacyTenant = null;
+    if (user.role === 'pharmacy') {
+      pharmacyTenant = await provisionPharmacyTenant(user, profile);
+    }
     
     // Send notification to admin for professional verification
     if (['doctor', 'physio', 'pathology'].includes(user.role)) {
@@ -645,6 +657,7 @@ exports.completeProfile = async (req, res) => {
       success: true,
       message: 'Profile completed successfully',
       profile,
+      ...(pharmacyTenant ? { organization: pharmacyTenant.organization, defaultStore: pharmacyTenant.store } : {}),
       nextSteps: getNextSteps(user.role, profile.verificationStatus)
     });
     

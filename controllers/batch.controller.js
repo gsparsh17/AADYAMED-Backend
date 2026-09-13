@@ -1,6 +1,8 @@
 const MedicineBatch = require('../models/MedicineBatch');
 const Medicine = require('../models/Medicine');
+const Supplier = require('../models/Supplier');
 const StockAdjustment = require('../models/StockAdjustment');
+const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
 
 const normalizeBatchPayload = (body = {}) => ({
   medicineId: body.medicineId || body.medicine_id,
@@ -36,40 +38,27 @@ const withLegacyBatchFields = batch => {
 
 exports.getAllBatches = async (req, res) => {
   try {
-    const { 
-      medicineId, 
-      isExpired, 
-      isActive,
-      page = 1, 
-      limit = 20 
-    } = req.query;
-    
-    const filter = {};
+    const { medicineId, isExpired, isActive, page = 1, limit = 20 } = req.query;
+    const filter = scopedFilter(req);
     if (medicineId) filter.medicineId = medicineId;
     if (isExpired !== undefined) filter.isExpired = isExpired === 'true';
     if (isActive !== undefined) filter.isActive = isActive === 'true';
-    
+
     const batches = await MedicineBatch.find(filter)
       .populate('medicineId', 'medicineName genericName')
       .populate('supplierId', 'name companyName')
       .sort({ expiryDate: 1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
-    
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit));
+
     const total = await MedicineBatch.countDocuments(filter);
-    
     res.json({
       success: true,
       batches: batches.map(withLegacyBatchFields),
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) }
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -80,18 +69,27 @@ exports.createBatch = async (req, res) => {
       return res.status(400).json({ message: 'medicineId, batchNumber, quantity, expiryDate, purchasePrice and sellingPrice are required' });
     }
 
-    const medicine = await Medicine.findById(payload.medicineId);
-    if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
+    const medicine = await Medicine.findOne(scopedFilter(req, { _id: payload.medicineId }));
+    if (!medicine) return res.status(404).json({ message: 'Medicine not found in the selected store' });
 
-    const existing = await MedicineBatch.findOne({ medicineId: payload.medicineId, batchNumber: payload.batchNumber, isActive: true });
-    if (existing) return res.status(409).json({ message: 'Batch number already exists for this medicine' });
+    if (payload.supplierId) {
+      const supplier = await Supplier.findOne(scopedFilter(req, { _id: payload.supplierId, isActive: true }));
+      if (!supplier) return res.status(400).json({ message: 'Supplier does not belong to the selected store' });
+    }
 
-    const batch = await MedicineBatch.create({ ...payload, addedBy: req.user.id });
+    const existing = await MedicineBatch.findOne(scopedFilter(req, {
+      medicineId: payload.medicineId,
+      batchNumber: payload.batchNumber,
+      isActive: true
+    }));
+    if (existing) return res.status(409).json({ message: 'Batch number already exists for this medicine in the selected store' });
+
+    const batch = await MedicineBatch.create(scopedPayload(req, { ...payload, addedBy: req.user.id }));
     const previousQuantity = medicine.quantity;
     medicine.quantity += payload.availableQuantity;
     await medicine.save();
 
-    await StockAdjustment.create({
+    await StockAdjustment.create(scopedPayload(req, {
       medicineId: medicine._id,
       batchId: batch._id,
       previousQuantity,
@@ -101,82 +99,95 @@ exports.createBatch = async (req, res) => {
       reason: 'Batch created',
       referenceType: 'purchase',
       adjustedBy: req.user.id
-    });
+    }));
 
     res.status(201).json({ success: true, batch: withLegacyBatchFields(batch), medicine });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.getBatchesByMedicine = async (req, res) => {
   try {
-    const batches = await MedicineBatch.find({ medicineId: req.params.medicineId, isActive: true })
+    const medicine = await Medicine.exists(scopedFilter(req, { _id: req.params.medicineId }));
+    if (!medicine) return res.status(404).json({ message: 'Medicine not found in the selected store' });
+
+    const batches = await MedicineBatch.find(scopedFilter(req, {
+      medicineId: req.params.medicineId,
+      isActive: true
+    }))
       .populate('supplierId', 'name companyName')
       .sort({ expiryDate: 1 });
     res.json(batches.map(withLegacyBatchFields));
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.updateBatch = async (req, res) => {
   try {
-    const batch = await MedicineBatch.findByIdAndUpdate(
-      req.params.id,
-      normalizeBatchPayload(req.body),
+    const current = await MedicineBatch.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!current) return res.status(404).json({ message: 'Batch not found in the selected store' });
+
+    const normalized = normalizeBatchPayload(req.body);
+    const update = Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== undefined && !(typeof value === 'number' && Number.isNaN(value))));
+    delete update.quantity;
+    delete update.availableQuantity;
+    delete update.medicineId;
+
+    if (update.supplierId) {
+      const supplier = await Supplier.exists(scopedFilter(req, { _id: update.supplierId }));
+      if (!supplier) return res.status(400).json({ message: 'Supplier does not belong to the selected store' });
+    }
+
+    const batch = await MedicineBatch.findOneAndUpdate(
+      scopedFilter(req, { _id: req.params.id }),
+      { $set: update },
       { new: true, runValidators: true }
     );
-    
-    if (!batch) {
-      return res.status(404).json({ message: 'Batch not found' });
-    }
-    
     res.json({ success: true, batch: withLegacyBatchFields(batch) });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.adjustBatchQuantity = async (req, res) => {
   try {
-    const { quantity, reason, adjustmentType } = req.body;
-    
-    const batch = await MedicineBatch.findById(req.params.id);
-    if (!batch) {
-      return res.status(404).json({ message: 'Batch not found' });
+    const quantity = Number(req.body.quantity);
+    const { reason, adjustmentType } = req.body;
+    if (!Number.isFinite(quantity) || quantity === 0) {
+      return res.status(400).json({ message: 'A non-zero numeric quantity is required' });
     }
-    
-    const previousQuantity = batch.availableQuantity;
+
+    const batch = await MedicineBatch.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!batch) return res.status(404).json({ message: 'Batch not found in the selected store' });
+
+    const previousBatchQuantity = batch.availableQuantity;
     batch.availableQuantity += quantity;
-    
-    if (batch.availableQuantity < 0) {
-      return res.status(400).json({ message: 'Insufficient stock' });
-    }
-    
+    if (batch.availableQuantity < 0) return res.status(400).json({ message: 'Insufficient stock' });
+    batch.isActive = batch.availableQuantity > 0;
     await batch.save();
-    
-    // Update medicine total quantity
-    const medicine = await Medicine.findById(batch.medicineId);
-    if (medicine) {
-      medicine.quantity += quantity;
-      await medicine.save();
-    }
-    
-    // Record adjustment
-    await StockAdjustment.create({
+
+    const medicine = await Medicine.findOne(scopedFilter(req, { _id: batch.medicineId }));
+    if (!medicine) return res.status(409).json({ message: 'Batch references a medicine outside the selected store' });
+    const previousMedicineQuantity = medicine.quantity;
+    medicine.quantity += quantity;
+    if (medicine.quantity < 0) return res.status(400).json({ message: 'Insufficient medicine stock' });
+    await medicine.save();
+
+    await StockAdjustment.create(scopedPayload(req, {
       medicineId: batch.medicineId,
       batchId: batch._id,
-      previousQuantity,
+      previousQuantity: previousMedicineQuantity,
       adjustmentQuantity: quantity,
-      newQuantity: batch.availableQuantity,
+      newQuantity: medicine.quantity,
       adjustmentType: adjustmentType || 'correction',
       reason,
       adjustedBy: req.user.id
-    });
-    
-    res.json({ success: true, batch, medicine });
+    }));
+
+    res.json({ success: true, batch: withLegacyBatchFields(batch), medicine });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };

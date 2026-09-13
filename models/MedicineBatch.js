@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 
 const medicineBatchSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
+
   medicineId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Medicine',
@@ -80,6 +83,7 @@ const medicineBatchSchema = new mongoose.Schema({
   timestamps: true
 });
 
+medicineBatchSchema.index({ organizationId: 1, storeId: 1, medicineId: 1, batchNumber: 1 }, { unique: true, partialFilterExpression: { organizationId: { $type: 'objectId' }, storeId: { $type: 'objectId' } } });
 medicineBatchSchema.index({ medicineId: 1, batchNumber: 1 });
 medicineBatchSchema.index({ expiryDate: 1 });
 medicineBatchSchema.index({ isExpired: 1, isActive: 1 });

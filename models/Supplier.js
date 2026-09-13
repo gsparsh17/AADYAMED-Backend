@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 
 const supplierSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
+
   name: {
     type: String,
     required: true,
@@ -83,5 +86,6 @@ const supplierSchema = new mongoose.Schema({
 
 supplierSchema.index({ name: 'text', companyName: 'text' });
 supplierSchema.index({ isActive: 1 });
+supplierSchema.index({ organizationId: 1, storeId: 1, isActive: 1, name: 1 });
 
 module.exports = mongoose.model('Supplier', supplierSchema);

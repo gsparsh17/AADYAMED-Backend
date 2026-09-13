@@ -4,6 +4,7 @@ const Medicine = require('../models/Medicine');
 const MedicineBatch = require('../models/MedicineBatch');
 const Supplier = require('../models/Supplier');
 const StockAdjustment = require('../models/StockAdjustment');
+const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
 
 function normalizeItem(item = {}) {
   return {
@@ -39,6 +40,8 @@ function legacyPurchaseOrder(order) {
   obj.total_amount = obj.totalAmount;
   obj.paid_amount = obj.paidAmount;
   obj.payment_status = obj.paymentStatus;
+  obj.store_id = obj.storeId;
+  obj.organization_id = obj.organizationId;
   obj.items = (obj.items || []).map((item) => ({
     ...item,
     medicine_id: item.medicineId,
@@ -64,31 +67,21 @@ exports.createPurchaseOrder = async (req, res) => {
     if (!supplierId || !mongoose.isValidObjectId(supplierId)) {
       return res.status(400).json({ success: false, message: 'Valid supplier is required' });
     }
-    if (!items.length) {
-      return res.status(400).json({ success: false, message: 'At least one purchase item is required' });
-    }
+    if (!items.length) return res.status(400).json({ success: false, message: 'At least one purchase item is required' });
 
-    const supplier = await Supplier.findById(supplierId);
-    if (!supplier || !supplier.isActive) {
-      return res.status(400).json({ success: false, message: 'Invalid supplier' });
-    }
+    const supplier = await Supplier.findOne(scopedFilter(req, { _id: supplierId, isActive: true }));
+    if (!supplier) return res.status(400).json({ success: false, message: 'Supplier does not belong to the selected store' });
 
     let subtotal = 0;
     const validatedItems = [];
-
     for (const item of items) {
       if (!item.medicineId || !mongoose.isValidObjectId(item.medicineId) || item.quantity <= 0 || item.purchasePrice < 0) {
         return res.status(400).json({ success: false, message: 'Invalid medicine, quantity or purchase price' });
       }
+      const medicine = await Medicine.findOne(scopedFilter(req, { _id: item.medicineId, isActive: true }));
+      if (!medicine) return res.status(400).json({ success: false, message: `Medicine ${item.medicineId} is not in the selected store` });
 
-      const medicine = await Medicine.findById(item.medicineId);
-      if (!medicine) {
-        return res.status(400).json({ success: false, message: `Medicine ${item.medicineId} not found` });
-      }
-
-      const itemTotal = item.quantity * item.purchasePrice;
-      subtotal += itemTotal;
-
+      subtotal += item.quantity * item.purchasePrice;
       validatedItems.push({
         medicineId: medicine._id,
         medicineName: medicine.medicineName,
@@ -103,8 +96,7 @@ exports.createPurchaseOrder = async (req, res) => {
 
     const tax = Number((subtotal * 0.18).toFixed(2));
     const totalAmount = Number((subtotal + tax).toFixed(2));
-
-    const purchaseOrder = await PurchaseOrder.create({
+    const purchaseOrder = await PurchaseOrder.create(scopedPayload(req, {
       supplierId,
       items: validatedItems,
       expectedDeliveryDate,
@@ -114,11 +106,11 @@ exports.createPurchaseOrder = async (req, res) => {
       notes,
       status: 'draft',
       createdBy: req.user.id,
-    });
+    }));
 
     res.status(201).json({ success: true, purchaseOrder: legacyPurchaseOrder(purchaseOrder) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
@@ -126,8 +118,7 @@ exports.getAllPurchaseOrders = async (req, res) => {
   try {
     const { status, startDate, endDate, page = 1, limit = 20 } = req.query;
     const supplierId = req.query.supplierId || req.query.supplier_id || req.query.supplier;
-
-    const filter = {};
+    const filter = scopedFilter(req);
     if (status) filter.status = status;
     if (supplierId) filter.supplierId = supplierId;
     if (startDate || endDate) {
@@ -138,166 +129,150 @@ exports.getAllPurchaseOrders = async (req, res) => {
 
     const pageNumber = Math.max(1, parseInt(page, 10) || 1);
     const pageSize = Math.min(200, Math.max(1, parseInt(limit, 10) || 20));
-
     const purchaseOrders = await PurchaseOrder.find(filter)
       .populate('supplierId', 'name companyName phone')
       .populate('createdBy', 'name email')
       .sort({ orderDate: -1 })
       .skip((pageNumber - 1) * pageSize)
       .limit(pageSize);
-
     const total = await PurchaseOrder.countDocuments(filter);
     const normalized = purchaseOrders.map(legacyPurchaseOrder);
 
     res.json({
       success: true,
       purchaseOrders: normalized,
-      // Compatibility for existing list screens.
       orders: normalized,
-      pagination: {
-        page: pageNumber,
-        limit: pageSize,
-        total,
-        pages: Math.ceil(total / pageSize),
-      },
+      pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) },
       totalPages: Math.ceil(total / pageSize),
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
 exports.getPurchaseOrderById = async (req, res) => {
   try {
-    const purchaseOrder = await PurchaseOrder.findById(req.params.id)
+    const purchaseOrder = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }))
       .populate('supplierId', 'name companyName phone email address')
       .populate('createdBy', 'name email')
       .populate('approvedBy', 'name email')
       .populate('receivedBy', 'name email');
-
-    if (!purchaseOrder) {
-      return res.status(404).json({ success: false, message: 'Purchase order not found' });
-    }
+    if (!purchaseOrder) return res.status(404).json({ success: false, message: 'Purchase order not found in the selected store' });
 
     const normalized = legacyPurchaseOrder(purchaseOrder);
     res.json({ success: true, purchaseOrder: normalized, order: normalized });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
 exports.approvePurchaseOrder = async (req, res) => {
   try {
-    const purchaseOrder = await PurchaseOrder.findById(req.params.id);
-    if (!purchaseOrder) {
-      return res.status(404).json({ success: false, message: 'Purchase order not found' });
-    }
+    const purchaseOrder = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!purchaseOrder) return res.status(404).json({ success: false, message: 'Purchase order not found in the selected store' });
     if (!['draft', 'pending'].includes(purchaseOrder.status)) {
       return res.status(400).json({ success: false, message: 'Only draft or pending orders can be approved' });
     }
-
     purchaseOrder.status = 'approved';
     purchaseOrder.approvedBy = req.user.id;
     await purchaseOrder.save();
-
     res.json({ success: true, purchaseOrder: legacyPurchaseOrder(purchaseOrder) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
 exports.receivePurchaseOrder = async (req, res) => {
   try {
-    const rawReceivedItems = req.body.receivedItems || req.body.received_items || [];
-    const rawDamagedItems = req.body.damagedItems || req.body.damaged_items || [];
-    const receivedItems = rawReceivedItems.map(normalizeReceiveItem);
-    const damagedItems = rawDamagedItems.map(normalizeReceiveItem);
+    const receivedItems = (req.body.receivedItems || req.body.received_items || []).map(normalizeReceiveItem);
+    const damagedItems = (req.body.damagedItems || req.body.damaged_items || []).map(normalizeReceiveItem);
     const { notes } = req.body;
+    if (!receivedItems.length) return res.status(400).json({ success: false, message: 'At least one received item is required' });
 
-    if (!receivedItems.length) {
-      return res.status(400).json({ success: false, message: 'At least one received item is required' });
-    }
-
-    const purchaseOrder = await PurchaseOrder.findById(req.params.id);
-    if (!purchaseOrder) {
-      return res.status(404).json({ success: false, message: 'Purchase order not found' });
-    }
+    const purchaseOrder = await PurchaseOrder.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!purchaseOrder) return res.status(404).json({ success: false, message: 'Purchase order not found in the selected store' });
     if (!['approved', 'ordered', 'partially_received'].includes(purchaseOrder.status)) {
       return res.status(400).json({ success: false, message: 'Order must be approved or ordered before receiving stock' });
     }
 
     let totalReceived = 0;
     let totalDamaged = 0;
-
     for (const receivedItem of receivedItems) {
       const orderItem = purchaseOrder.items.id(receivedItem.itemId);
-      if (!orderItem) {
-        return res.status(400).json({ success: false, message: `Purchase order item ${receivedItem.itemId} not found` });
-      }
+      if (!orderItem) return res.status(400).json({ success: false, message: `Purchase order item ${receivedItem.itemId} not found` });
 
       const previouslyReceived = Number(orderItem.receivedQuantity || 0);
       const remainingOrdered = Math.max(0, Number(orderItem.quantity) - previouslyReceived);
       const receivedQty = Number(receivedItem.quantity || 0);
-      const damagedQty = Number(damagedItems.find((d) => String(d.itemId) === String(receivedItem.itemId))?.quantity || 0);
-
+      const damagedQty = Number(damagedItems.find(d => String(d.itemId) === String(receivedItem.itemId))?.quantity || 0);
       if (receivedQty <= 0 || receivedQty > remainingOrdered) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid received quantity for ${orderItem.medicineName}. Remaining: ${remainingOrdered}`,
-        });
+        return res.status(400).json({ success: false, message: `Invalid received quantity for ${orderItem.medicineName}. Remaining: ${remainingOrdered}` });
       }
-      if (!receivedItem.expiryDate) {
-        return res.status(400).json({ success: false, message: `Expiry date is required for ${orderItem.medicineName}` });
+      if (damagedQty < 0 || damagedQty > receivedQty) {
+        return res.status(400).json({ success: false, message: `Invalid damaged quantity for ${orderItem.medicineName}` });
       }
+      if (!receivedItem.expiryDate) return res.status(400).json({ success: false, message: `Expiry date is required for ${orderItem.medicineName}` });
 
-      const medicine = await Medicine.findById(orderItem.medicineId);
-      if (!medicine) {
-        return res.status(400).json({ success: false, message: `Medicine ${orderItem.medicineName} not found` });
-      }
+      const medicine = await Medicine.findOne(scopedFilter(req, { _id: orderItem.medicineId }));
+      if (!medicine) return res.status(400).json({ success: false, message: `Medicine ${orderItem.medicineName} is not in the selected store` });
 
-      const batch = await MedicineBatch.create({
-        medicineId: medicine._id,
-        batchNumber: receivedItem.batchNumber || orderItem.batchNumber || `BATCH-${Date.now()}-${medicine._id.toString().slice(-4)}`,
-        quantity: receivedQty,
-        availableQuantity: receivedQty,
-        purchasePrice: orderItem.purchasePrice,
-        sellingPrice: receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice,
-        expiryDate: receivedItem.expiryDate,
-        manufactureDate: receivedItem.manufactureDate || new Date(),
-        supplierId: purchaseOrder.supplierId,
-        supplierInvoice: receivedItem.invoiceNumber,
-        addedBy: req.user.id,
-      });
+      const stockQty = receivedQty - damagedQty;
+      const batchNumber = receivedItem.batchNumber || orderItem.batchNumber || `BATCH-${Date.now()}-${medicine._id.toString().slice(-4)}`;
+      let batch = await MedicineBatch.findOne(scopedFilter(req, { medicineId: medicine._id, batchNumber }));
+      if (batch) {
+        batch.quantity += stockQty;
+        batch.availableQuantity += stockQty;
+        batch.expiryDate = receivedItem.expiryDate;
+        batch.purchasePrice = orderItem.purchasePrice;
+        batch.sellingPrice = receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice;
+        batch.supplierInvoice = receivedItem.invoiceNumber || batch.supplierInvoice;
+        batch.isActive = batch.availableQuantity > 0;
+        await batch.save();
+      } else {
+        batch = await MedicineBatch.create(scopedPayload(req, {
+          medicineId: medicine._id,
+          batchNumber,
+          quantity: stockQty,
+          availableQuantity: stockQty,
+          purchasePrice: orderItem.purchasePrice,
+          sellingPrice: receivedItem.sellingPrice || orderItem.sellingPrice || medicine.sellingPrice,
+          expiryDate: receivedItem.expiryDate,
+          manufactureDate: receivedItem.manufactureDate || new Date(),
+          supplierId: purchaseOrder.supplierId,
+          supplierInvoice: receivedItem.invoiceNumber,
+          addedBy: req.user.id,
+        }));
+      }
 
       const previousQuantity = Number(medicine.quantity || 0);
-      medicine.quantity = previousQuantity + receivedQty;
+      medicine.quantity = previousQuantity + stockQty;
       await medicine.save();
 
-      await StockAdjustment.create({
-        medicineId: medicine._id,
-        batchId: batch._id,
-        previousQuantity,
-        adjustmentQuantity: receivedQty,
-        newQuantity: medicine.quantity,
-        adjustmentType: 'addition',
-        reason: 'Purchase order received',
-        referenceType: 'purchase',
-        referenceId: purchaseOrder._id,
-        adjustedBy: req.user.id,
-      });
+      if (stockQty > 0) {
+        await StockAdjustment.create(scopedPayload(req, {
+          medicineId: medicine._id,
+          batchId: batch._id,
+          previousQuantity,
+          adjustmentQuantity: stockQty,
+          newQuantity: medicine.quantity,
+          adjustmentType: 'addition',
+          reason: 'Purchase order received',
+          referenceType: 'purchase',
+          referenceId: purchaseOrder._id,
+          adjustedBy: req.user.id,
+        }));
+      }
 
       orderItem.receivedQuantity = previouslyReceived + receivedQty;
       orderItem.damagedQuantity = Number(orderItem.damagedQuantity || 0) + damagedQty;
-      orderItem.batchNumber = receivedItem.batchNumber || orderItem.batchNumber;
+      orderItem.batchNumber = batchNumber;
       orderItem.expiryDate = receivedItem.expiryDate;
-
-      totalReceived += receivedQty;
+      totalReceived += stockQty;
       totalDamaged += damagedQty;
     }
 
     const totalOrdered = purchaseOrder.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
     const totalReceivedSoFar = purchaseOrder.items.reduce((sum, item) => sum + Number(item.receivedQuantity || 0), 0);
-
     if (totalReceivedSoFar === 0) purchaseOrder.status = 'ordered';
     else if (totalReceivedSoFar < totalOrdered) purchaseOrder.status = 'partially_received';
     else {
@@ -309,13 +284,9 @@ exports.receivePurchaseOrder = async (req, res) => {
     if (notes) purchaseOrder.notes = notes;
     await purchaseOrder.save();
 
-    res.json({
-      success: true,
-      purchaseOrder: legacyPurchaseOrder(purchaseOrder),
-      summary: { totalReceived, totalDamaged, totalOrdered },
-    });
+    res.json({ success: true, purchaseOrder: legacyPurchaseOrder(purchaseOrder), summary: { totalReceived, totalDamaged, totalOrdered } });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
@@ -323,28 +294,18 @@ exports.getPurchaseOrderStats = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const supplierId = req.query.supplierId || req.query.supplier_id || req.query.supplier;
-    const matchStage = { status: { $ne: 'cancelled' } };
-
+    const matchStage = scopedFilter(req, { status: { $ne: 'cancelled' } });
     if (startDate || endDate) {
       matchStage.orderDate = {};
       if (startDate) matchStage.orderDate.$gte = new Date(startDate);
       if (endDate) matchStage.orderDate.$lte = new Date(endDate);
     }
-    if (supplierId && mongoose.isValidObjectId(supplierId)) {
-      matchStage.supplierId = new mongoose.Types.ObjectId(supplierId);
-    }
+    if (supplierId && mongoose.isValidObjectId(supplierId)) matchStage.supplierId = new mongoose.Types.ObjectId(supplierId);
 
     const [stats, topSuppliers, totals] = await Promise.all([
       PurchaseOrder.aggregate([
         { $match: matchStage },
-        {
-          $group: {
-            _id: { month: { $month: '$orderDate' }, year: { $year: '$orderDate' } },
-            totalOrders: { $sum: 1 },
-            totalAmount: { $sum: '$totalAmount' },
-            averageOrderValue: { $avg: '$totalAmount' },
-          },
-        },
+        { $group: { _id: { month: { $month: '$orderDate' }, year: { $year: '$orderDate' } }, totalOrders: { $sum: 1 }, totalAmount: { $sum: '$totalAmount' }, averageOrderValue: { $avg: '$totalAmount' } } },
         { $sort: { '_id.year': -1, '_id.month': -1 } },
       ]),
       PurchaseOrder.aggregate([
@@ -360,17 +321,12 @@ exports.getPurchaseOrderStats = async (req, res) => {
     ]);
 
     for (const supplier of topSuppliers) {
-      const details = await Supplier.findById(supplier._id).select('name');
+      const details = await Supplier.findOne(scopedFilter(req, { _id: supplier._id })).select('name');
       supplier.supplierName = details?.name || 'Unknown';
     }
 
-    res.json({
-      success: true,
-      stats,
-      topSuppliers,
-      summary: totals[0] || { totalOrders: 0, totalAmount: 0 },
-    });
+    res.json({ success: true, stats, topSuppliers, summary: totals[0] || { totalOrders: 0, totalAmount: 0 } });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };

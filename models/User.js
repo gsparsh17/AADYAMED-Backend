@@ -27,6 +27,26 @@ const userSchema = new mongoose.Schema({
     default: 'patient'
   },
   
+  // Multi-tenant organization / pharmacy store access
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    index: true
+  },
+  organizationRole: {
+    type: String,
+    enum: ['owner', 'admin', 'manager', 'pharmacist', 'cashier', 'inventory', 'viewer'],
+    default: null
+  },
+  pharmacyStoreIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PharmacyStore'
+  }],
+  defaultPharmacyStoreId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PharmacyStore'
+  },
+
   // Basic Profile Info (collected during registration)
   name: {
     type: String,
@@ -118,6 +138,8 @@ userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ role: 1, isActive: 1 });
 userSchema.index({ phone: 1 });
 userSchema.index({ createdAt: -1 });
+userSchema.index({ organizationId: 1, role: 1, isActive: 1 });
+userSchema.index({ pharmacyStoreIds: 1 });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {

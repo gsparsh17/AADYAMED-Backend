@@ -2,15 +2,18 @@ const express = require('express');
 const router = express.Router();
 const pharmacySaleController = require('../controllers/pharmacySale.controller');
 const { protect, authorize } = require('../middlewares/auth');
+const { resolvePharmacyTenant } = require('../middlewares/pharmacyTenant');
+const { requireOrganizationRole } = require('../middlewares/organizationAccess');
 
 router.use(protect);
+router.use(authorize('admin', 'pharmacy'));
+router.use(resolvePharmacyTenant);
 
-// Different access levels
-router.post('/', authorize('admin', 'pharmacy', 'doctor', 'physio'), pharmacySaleController.createSale);
-router.get('/', authorize('admin', 'pharmacy', 'patient'), pharmacySaleController.getAllSales);
-router.get('/report', authorize('admin', 'pharmacy'), pharmacySaleController.getSalesReport);
-router.get('/stats/today', authorize('admin', 'pharmacy'), pharmacySaleController.getTodaySalesStats);
-router.get('/:id', authorize('admin', 'pharmacy'), pharmacySaleController.getSaleById);
-router.post('/:id/dispense', authorize('admin', 'pharmacy'), pharmacySaleController.dispenseSale);
+router.post('/', requireOrganizationRole('owner','admin','manager','pharmacist','cashier'), pharmacySaleController.createSale);
+router.get('/', pharmacySaleController.getAllSales);
+router.get('/report', pharmacySaleController.getSalesReport);
+router.get('/stats/today', pharmacySaleController.getTodaySalesStats);
+router.get('/:id', pharmacySaleController.getSaleById);
+router.post('/:id/dispense', requireOrganizationRole('owner','admin','manager','pharmacist','cashier'), pharmacySaleController.dispenseSale);
 
 module.exports = router;

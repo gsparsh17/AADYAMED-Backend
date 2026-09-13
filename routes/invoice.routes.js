@@ -2,8 +2,10 @@ const express = require('express');
 const router = express.Router();
 const invoiceController = require('../controllers/invoice.controller');
 const { protect } = require('../middlewares/auth');
+const { resolvePharmacyTenantIfApplicable } = require('../middlewares/pharmacyTenant');
 
 router.use(protect);
+router.use(resolvePharmacyTenantIfApplicable);
 
 // Create invoices
 router.post('/', invoiceController.createInvoice);

@@ -37,6 +37,9 @@ const pharmacySaleItemSchema = new mongoose.Schema({
 });
 
 const pharmacySaleSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
+
   saleNumber: {
     type: String,
     required: true,
@@ -157,6 +160,7 @@ pharmacySaleSchema.index({ saleNumber: 1 });
 pharmacySaleSchema.index({ customerPhone: 1 });
 pharmacySaleSchema.index({ saleDate: -1 });
 pharmacySaleSchema.index({ patientId: 1, prescriptionId: 1 });
+pharmacySaleSchema.index({ organizationId: 1, storeId: 1, saleDate: -1 });
 
 // Generate sale number
 pharmacySaleSchema.pre('validate', async function(next) {

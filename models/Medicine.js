@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 
 const medicineSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
+
   medicineName: {
     type: String,
     required: true,
@@ -10,7 +13,7 @@ const medicineSchema = new mongoose.Schema({
   brandName: String,
   category: {
     type: String,
-    enum: ['tablet', 'capsule', 'syrup', 'injection', 'ointment', 'drops', 'inhaler', 'other'],
+    enum: ['tablet', 'capsule', 'syrup', 'injection', 'cream', 'ointment', 'drops', 'inhaler', 'other'],
     required: true
   },
   description: String,
@@ -110,5 +113,7 @@ const medicineSchema = new mongoose.Schema({
 medicineSchema.index({ medicineName: 'text', genericName: 'text', brandName: 'text' });
 medicineSchema.index({ category: 1, isActive: 1 });
 medicineSchema.index({ quantity: 1 });
+medicineSchema.index({ organizationId: 1, storeId: 1, isActive: 1, medicineName: 1 });
+medicineSchema.index({ organizationId: 1, storeId: 1, barcode: 1 });
 
 module.exports = mongoose.model('Medicine', medicineSchema);

@@ -29,6 +29,10 @@ const invoiceItemSchema = new mongoose.Schema({
 });
 
 const invoiceSchema = new mongoose.Schema({
+  // Present for pharmacy invoices so generic billing/invoice APIs cannot cross store boundaries.
+  // Non-pharmacy invoices may leave these fields empty.
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
   invoiceNumber: {
     type: String,
     required: true,
@@ -55,8 +59,7 @@ const invoiceSchema = new mongoose.Schema({
   },
   patientId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'PatientProfile',
-    required: true
+    ref: 'PatientProfile'
   },
   
   // Customer Details
@@ -154,9 +157,10 @@ invoiceSchema.index({ invoiceNumber: 1 });
 invoiceSchema.index({ patientId: 1, invoiceDate: -1 });
 invoiceSchema.index({ status: 1, dueDate: 1 });
 invoiceSchema.index({ invoiceType: 1 });
+invoiceSchema.index({ organizationId: 1, storeId: 1, invoiceType: 1, invoiceDate: -1 });
 
 // Generate invoice number
-invoiceSchema.pre('save', async function(next) {
+invoiceSchema.pre('validate', async function(next) {
   if (!this.invoiceNumber) {
     const count = await mongoose.model('Invoice').countDocuments();
     const date = new Date();

@@ -4,6 +4,7 @@ const PharmacySale = require('../models/PharmacySale');
 const LabTest = require('../models/LabTest');
 const PatientProfile = require('../models/PatientProfile');
 const PDFDocument = require('pdfkit');
+const { scopedFilter, scopedPayload } = require('../utils/tenantScope');
 
 exports.createInvoice = async (req, res) => {
   try {
@@ -40,20 +41,33 @@ exports.createInvoice = async (req, res) => {
         };
         break;
         
-      case 'pharmacy':
-        const pharmacySale = await PharmacySale.findById(pharmacySaleId)
+      case 'pharmacy': {
+        const pharmacySaleFilter = req.user.role === 'pharmacy'
+          ? scopedFilter(req, { _id: pharmacySaleId })
+          : { _id: pharmacySaleId };
+        const pharmacySale = await PharmacySale.findOne(pharmacySaleFilter)
           .populate('patientId', 'name phone email address');
         if (!pharmacySale) {
-          return res.status(404).json({ message: 'Pharmacy sale not found' });
+          return res.status(404).json({ message: 'Pharmacy sale not found in the selected store' });
         }
         referenceId = pharmacySaleId;
-        patient = pharmacySale.patientId || {
-          name: pharmacySale.customerName,
-          phone: pharmacySale.customerPhone,
-          email: pharmacySale.customerEmail,
-          address: pharmacySale.customerAddress
+        patient = pharmacySale.patientId || null;
+        customerDetails = pharmacySale.patientId ? {
+          customerName: pharmacySale.patientId.name,
+          customerPhone: pharmacySale.patientId.phone,
+          customerEmail: pharmacySale.patientId.email,
+          customerAddress: pharmacySale.patientId.address
+        } : {
+          customerName: pharmacySale.customerName || 'Walk-in customer',
+          customerPhone: pharmacySale.customerPhone,
+          customerEmail: pharmacySale.customerEmail,
+          customerAddress: pharmacySale.customerAddress
         };
+        // Preserve the sale tenant even when an admin generates the invoice.
+        customerDetails.organizationId = pharmacySale.organizationId;
+        customerDetails.storeId = pharmacySale.storeId;
         break;
+      }
         
       case 'lab_test':
         const labTest = await LabTest.findById(labTestId)
@@ -95,12 +109,12 @@ exports.createInvoice = async (req, res) => {
     const tax = invoiceItems.reduce((sum, item) => sum + item.taxAmount, 0);
     const totalAmount = subtotal + tax - (discount || 0);
     
-    const invoice = await Invoice.create({
+    const invoicePayload = {
       invoiceType,
-      [invoiceType === 'appointment' ? 'appointmentId' : 
-       invoiceType === 'pharmacy' ? 'pharmacySaleId' : 
+      [invoiceType === 'appointment' ? 'appointmentId' :
+       invoiceType === 'pharmacy' ? 'pharmacySaleId' :
        invoiceType === 'lab_test' ? 'labTestId' : null]: referenceId,
-      patientId: patient._id,
+      patientId: patient?._id,
       ...customerDetails,
       items: invoiceItems,
       subtotal,
@@ -112,7 +126,12 @@ exports.createInvoice = async (req, res) => {
       dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
       notes,
       createdBy: req.user.id
-    });
+    };
+    const invoice = await Invoice.create(
+      invoiceType === 'pharmacy' && req.user.role === 'pharmacy'
+        ? scopedPayload(req, invoicePayload)
+        : invoicePayload
+    );
     
     // Generate PDF
     await generateInvoicePDF(invoice);
@@ -140,6 +159,8 @@ exports.getAllInvoices = async (req, res) => {
     // Role-based filtering
     if (req.user.role === 'patient') {
       filter.patientId = req.user.profileId;
+    } else if (req.user.role === 'pharmacy') {
+      Object.assign(filter, scopedFilter(req, { invoiceType: 'pharmacy' }));
     } else if (req.user.role === 'admin') {
       if (patientId) filter.patientId = patientId;
     }
@@ -197,7 +218,8 @@ exports.getAllInvoices = async (req, res) => {
 
 exports.getInvoiceById = async (req, res) => {
   try {
-    const invoice = await Invoice.findById(req.params.id)
+    const invoiceFilter = req.user.role === 'pharmacy' ? scopedFilter(req, { _id: req.params.id }) : { _id: req.params.id };
+    const invoice = await Invoice.findOne(invoiceFilter)
       .populate('patientId')
       .populate('appointmentId')
       .populate('pharmacySaleId')
@@ -209,7 +231,7 @@ exports.getInvoiceById = async (req, res) => {
     }
     
     // Check authorization
-    if (!canViewInvoice(req.user, invoice)) {
+    if (!canViewInvoice(req, invoice)) {
       return res.status(403).json({ message: 'Not authorized to view this invoice' });
     }
     
@@ -223,7 +245,8 @@ exports.updatePayment = async (req, res) => {
   try {
     const { amount, paymentMethod, paymentReference } = req.body;
     
-    const invoice = await Invoice.findById(req.params.id);
+    const invoiceFilter = req.user.role === 'pharmacy' ? scopedFilter(req, { _id: req.params.id }) : { _id: req.params.id };
+    const invoice = await Invoice.findOne(invoiceFilter);
     if (!invoice) {
       return res.status(404).json({ message: 'Invoice not found' });
     }
@@ -256,13 +279,14 @@ exports.updatePayment = async (req, res) => {
 
 exports.generateInvoicePDF = async (req, res) => {
   try {
-    const invoice = await Invoice.findById(req.params.id);
+    const invoiceFilter = req.user.role === 'pharmacy' ? scopedFilter(req, { _id: req.params.id }) : { _id: req.params.id };
+    const invoice = await Invoice.findOne(invoiceFilter);
     if (!invoice) {
       return res.status(404).json({ message: 'Invoice not found' });
     }
     
     // Check authorization
-    if (!canViewInvoice(req.user, invoice)) {
+    if (!canViewInvoice(req, invoice)) {
       return res.status(403).json({ message: 'Not authorized' });
     }
     
@@ -296,6 +320,8 @@ exports.getInvoiceStats = async (req, res) => {
     // Role-based filtering
     if (req.user.role === 'patient') {
       matchStage.patientId = req.user.profileId;
+    } else if (req.user.role === 'pharmacy') {
+      Object.assign(matchStage, scopedFilter(req, { invoiceType: 'pharmacy' }));
     }
     
     let groupStage;
@@ -355,21 +381,27 @@ exports.getInvoiceStats = async (req, res) => {
 };
 
 // Helper functions
-function canViewInvoice(user, invoice) {
+function canViewInvoice(req, invoice) {
+  const user = req.user;
   if (user.role === 'admin') return true;
-  
-  if (user.role === 'patient' && 
-      invoice.patientId._id?.toString() === user.profileId) {
+
+  if (user.role === 'pharmacy') {
+    return invoice.invoiceType === 'pharmacy' &&
+      String(invoice.organizationId || '') === String(req.tenant?.organizationId || '') &&
+      String(invoice.storeId || '') === String(req.tenant?.storeId || '');
+  }
+
+  if (user.role === 'patient' &&
+      String(invoice.patientId?._id || invoice.patientId || '') === String(user.profileId || '')) {
     return true;
   }
-  
-  // Doctors/Physios can view invoices for their appointments
-  if ((user.role === 'doctor' || user.role === 'physio') && 
-      invoice.appointmentId) {
-    // Need to check if appointment belongs to this professional
-    return true; // Simplified - implement proper check
+
+  // Existing professional invoice authorization is preserved for now and will be
+  // tightened with appointment ownership in the doctor/appointment phase.
+  if ((user.role === 'doctor' || user.role === 'physio') && invoice.appointmentId) {
+    return true;
   }
-  
+
   return false;
 }
 

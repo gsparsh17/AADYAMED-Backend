@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 
 const stockAdjustmentSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
+
   medicineId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Medicine',
@@ -59,5 +62,6 @@ const stockAdjustmentSchema = new mongoose.Schema({
 
 stockAdjustmentSchema.index({ medicineId: 1, createdAt: -1 });
 stockAdjustmentSchema.index({ adjustmentType: 1 });
+stockAdjustmentSchema.index({ organizationId: 1, storeId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('StockAdjustment', stockAdjustmentSchema);

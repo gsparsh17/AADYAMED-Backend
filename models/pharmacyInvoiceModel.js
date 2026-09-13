@@ -8,6 +8,8 @@ const invoiceItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const pharmacyInvoiceSchema = new mongoose.Schema({
+  organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
+  storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacyStore', index: true },
   prescription_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Prescription' },
   patient_id: { type: mongoose.Schema.Types.ObjectId, ref: 'PatientProfile', required: true },
   doctor_id: { type: mongoose.Schema.Types.ObjectId, ref: 'DoctorProfile' },
@@ -33,5 +35,6 @@ const pharmacyInvoiceSchema = new mongoose.Schema({
 pharmacyInvoiceSchema.index({ patient_id: 1, createdAt: -1 });
 pharmacyInvoiceSchema.index({ prescription_id: 1 });
 pharmacyInvoiceSchema.index({ status: 1, createdAt: -1 });
+pharmacyInvoiceSchema.index({ organizationId: 1, storeId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('PharmacyInvoice', pharmacyInvoiceSchema);

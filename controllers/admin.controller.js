@@ -13,6 +13,7 @@ const Invoice = require('../models/Invoice');
 const LabTest = require('../models/LabTest');
 const Medicine = require('../models/Medicine');
 const PharmacySale = require('../models/PharmacySale');
+const PharmacyStore = require('../models/PharmacyStore');
 const Payout = require('../models/Payout');
 
 // ========== DASHBOARD FUNCTIONS ==========
@@ -2625,15 +2626,24 @@ exports.getPharmacyById = async (req, res) => {
       });
     }
     
-    // Get recent sales
-    const recentSales = await PharmacySale.find({ pharmacyId: id })
-      .populate('patientId', 'name')
-      .sort({ saleDate: -1 })
-      .limit(10);
+    const organizationId = pharmacy.organizationId || null;
+    const stores = organizationId
+      ? await PharmacyStore.find({ organizationId }).sort({ isDefault: -1, name: 1 })
+      : [];
+
+    // Tenant-aware recent sales and inventory stats. Legacy profiles without an
+    // organization remain visible but show no cross-tenant operational data
+    // until the tenancy migration/provisioning has run.
+    const recentSales = organizationId
+      ? await PharmacySale.find({ organizationId })
+          .populate('patientId', 'name')
+          .populate('storeId', 'name code')
+          .sort({ saleDate: -1, createdAt: -1 })
+          .limit(10)
+      : [];
     
-    // Get inventory stats
-    const inventoryStats = await Medicine.aggregate([
-      { $match: { pharmacyId: id, isActive: true } },
+    const inventoryStats = organizationId ? await Medicine.aggregate([
+      { $match: { organizationId: new mongoose.Types.ObjectId(organizationId), isActive: true } },
       {
         $group: {
           _id: null,
@@ -2644,11 +2654,12 @@ exports.getPharmacyById = async (req, res) => {
           totalValue: { $sum: { $multiply: ['$quantity', '$purchasePrice'] } }
         }
       }
-    ]);
+    ]) : [];
     
     res.json({
       success: true,
       pharmacy,
+      stores,
       recentSales,
       inventoryStats: inventoryStats[0] || { totalMedicines: 0, lowStockCount: 0, totalValue: 0 }
     });
@@ -3374,7 +3385,8 @@ exports.getPharmacyKpis = async (req, res) => {
   try {
     const totalMedicines = await Medicine.countDocuments({ isActive: true });
     const lowStock = await Medicine.countDocuments({
-      quantity: { $lte: { $ifNull: ['$reorderLevel', 10] } }
+      isActive: true,
+      $expr: { $lte: ['$quantity', { $ifNull: ['$reorderLevel', 10] }] }
     });
     const totalSales = await PharmacySale.countDocuments({ status: 'dispensed' });
     
