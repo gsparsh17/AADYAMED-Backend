@@ -35,8 +35,7 @@ const userSchema = new mongoose.Schema({
   },
   organizationRole: {
     type: String,
-    enum: ['owner', 'admin', 'manager', 'pharmacist', 'cashier', 'inventory', 'viewer'],
-    default: null
+    enum: ['owner', 'admin', 'manager', 'pharmacist', 'cashier', 'inventory', 'viewer']
   },
   pharmacyStoreIds: [{
     type: mongoose.Schema.Types.ObjectId,

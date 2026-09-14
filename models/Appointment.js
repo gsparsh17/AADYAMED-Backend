@@ -268,7 +268,7 @@ const appointmentSchema = new mongoose.Schema(
 
     bookedBy: {
       type: String,
-      enum: ['patient', 'admin', 'assistant'],
+      enum: ['patient', 'admin', 'assistant', 'doctor', 'physio'],
       default: 'patient',
     },
 

@@ -631,7 +631,7 @@ exports.updateProfile = async (req, res) => {
 
     const physio = await PhysiotherapistProfile.findOneAndUpdate(
       { userId: req.user.id },
-      updates,
+      { $set: updates },
       { new: true, runValidators: true }
     ).populate('userId', 'email');
 

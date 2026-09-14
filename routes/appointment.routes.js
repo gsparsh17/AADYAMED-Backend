@@ -9,6 +9,10 @@ router.use(protect);
 // Create appointment
 router.post('/', appointmentController.createAppointment);
 
+// Doctor/physio booking directly on a patient's behalf (Calendar, Referrals,
+// PatientProfile "new appointment" flows) — auto-confirmed, no payment step.
+router.post('/professional-create', appointmentController.createAppointmentByProfessional);
+
 // Get appointments by patient id (doctor view)
 router.get('/patient/:id', appointmentController.getAppointmentsByPatientId);
 

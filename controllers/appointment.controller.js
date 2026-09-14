@@ -268,6 +268,213 @@ exports.createAppointment = async (req, res) => {
   }
 };
 
+// A doctor/physio booking an appointment directly on a patient's behalf —
+// e.g. from the Calendar day-click, a Referral they're accepting, or a
+// patient's profile page. Unlike createAppointment (patient-only), this:
+//  - resolves the professional from req.user, never from client input, so a
+//    professional can only ever book their own calendar
+//  - skips the public-marketplace "verificationStatus === approved" gate,
+//    since this is the professional managing their own practice, not a
+//    patient discovering them for the first time
+//  - the frontend collects payment (currently: a UPI QR shown to the
+//    patient, self-declared by the doctor with an optional UTR/reference
+//    once paid — NOT yet gateway-verified) before ever calling this
+//    endpoint, so paymentReference presence here means "payment collected
+//    at booking time" and marks paymentStatus 'paid' up front. Once a real
+//    payment gateway is wired in, this should switch to creating the
+//    appointment only after a verified webhook/callback, same as the
+//    patient-facing createAppointment + /payment/verify flow.
+exports.createAppointmentByProfessional = async (req, res) => {
+  let slotLock = null;
+  let appointment = null;
+
+  try {
+    const professionalType = req.user.role;
+    if (!['doctor', 'physio'].includes(professionalType)) {
+      return res.status(403).json({ success: false, error: 'Only doctors or physiotherapists can use this endpoint' });
+    }
+
+    const {
+      patientId,
+      appointmentDate,
+      startTime,
+      type = 'clinic',
+      address,
+      location,
+      symptoms,
+      reason,
+      paymentReference,
+    } = req.body;
+
+    if (!patientId || !appointmentDate || !startTime) {
+      return res.status(400).json({
+        success: false,
+        error: 'Patient, appointment date, and start time are required',
+      });
+    }
+    if (!['clinic', 'home', 'video'].includes(type)) {
+      return res.status(400).json({ success: false, error: 'Invalid consultation type' });
+    }
+    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(startTime)) {
+      return res.status(400).json({ success: false, error: 'Invalid time format. Use HH:MM (24-hour format)' });
+    }
+    if (type === 'home' && (!address || !location?.coordinates || location.coordinates.length !== 2)) {
+      return res.status(400).json({ success: false, error: 'Address and coordinates are required for home visits' });
+    }
+
+    const patientProfile = await PatientProfile.findById(patientId);
+    if (!patientProfile) {
+      return res.status(404).json({ success: false, error: 'Patient not found' });
+    }
+
+    const ProfileModel = professionalType === 'physio' ? PhysiotherapistProfile : DoctorProfile;
+    const professional = await ProfileModel.findOne({ userId: req.user.id });
+    if (!professional) {
+      return res.status(404).json({ success: false, error: 'Your professional profile was not found' });
+    }
+    const professionalId = professional._id;
+
+    let consultationFee;
+    let duration;
+
+    if (professionalType === 'doctor') {
+      consultationFee = type === 'home'
+        ? Number(professional.homeVisitFee || professional.consultationFee || 0)
+        : type === 'video'
+          ? Number(professional.videoCallFee || professional.consultationFee || 0)
+          : Number(professional.consultationFee || 0);
+      duration = Number(professional.slotDurationMinutes || 30);
+
+      const daily = await getDoctorDailySlots(professional, appointmentDate, { type, duration });
+      const requestedSlot = daily.slots.find((slot) => slot.startTime === startTime && slot.isAvailable !== false);
+      if (!requestedSlot) {
+        return res.status(409).json({
+          success: false,
+          error: 'Selected time slot is no longer available. Please refresh availability and choose another slot.',
+          code: 'SLOT_UNAVAILABLE',
+        });
+      }
+      duration = requestedSlot.duration || duration;
+    } else {
+      consultationFee = type === 'home'
+        ? Number(professional.homeVisitFee || professional.consultationFee || 0)
+        : type === 'video'
+          ? Number(professional.videoCallFee || professional.consultationFee || 0)
+          : Number(professional.consultationFee || 0);
+      duration = 60;
+      if (!await checkAvailability(professionalId, professionalType, appointmentDate, startTime)) {
+        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
+      }
+    }
+
+    const appointmentDay = new Date(appointmentDate);
+    if (Number.isNaN(appointmentDay.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid appointment date' });
+    }
+    appointmentDay.setHours(0, 0, 0, 0);
+    const appointmentInstant = new Date(appointmentDay);
+    const [hour, minute] = startTime.split(':').map(Number);
+    appointmentInstant.setHours(hour, minute, 0, 0);
+    if (appointmentInstant <= new Date()) {
+      return res.status(400).json({ success: false, error: 'Appointment time must be in the future' });
+    }
+
+    const settings = await CommissionSettings.findOne().lean();
+    const defaultRate = professionalType === 'doctor'
+      ? Number(settings?.defaultDoctorCommission ?? 20)
+      : Number(settings?.defaultPhysioCommission ?? 20);
+    const commissionRate = Number(professional.commissionRate ?? defaultRate);
+    const platformCommission = Math.round((consultationFee * commissionRate) / 100);
+    const professionalEarning = consultationFee - platformCommission;
+
+    const idField = professionalType === 'doctor' ? 'doctorId' : 'physioId';
+
+    slotLock = await acquireSlotLock({
+      professionalType,
+      professionalId,
+      appointmentDate: appointmentDay,
+      startTime,
+      userId: req.user.id,
+    });
+
+    try {
+      appointment = await Appointment.create({
+        patientId,
+        [idField]: professionalId,
+        professionalType,
+        appointmentDate: appointmentDay,
+        startTime,
+        endTime: addMinutes(startTime, duration),
+        duration,
+        type,
+        address: type === 'home' ? address : undefined,
+        location: type === 'home' ? location : undefined,
+        symptoms: Array.isArray(symptoms) ? symptoms : [],
+        reason: reason || '',
+        consultationFee,
+        platformCommission,
+        professionalEarning,
+        totalAmount: consultationFee,
+        status: 'confirmed',
+        // Self-declared for now (no gateway verification yet) — see the
+        // note above the function. paymentId doubles as a free-text
+        // reference/UTR slot; there's no Razorpay involved on this path.
+        paymentStatus: paymentReference ? 'paid' : 'pending',
+        paymentId: paymentReference || undefined,
+        paymentDate: paymentReference ? new Date() : undefined,
+        createdBy: req.user.id,
+        bookedBy: professionalType,
+        deviceInfo: req.get('user-agent'),
+        ipAddress: req.ip,
+      });
+      await attachAppointment(slotLock, appointment._id);
+    } catch (error) {
+      if (slotLock?._id) await slotLock.deleteOne().catch(() => {});
+      throw error;
+    }
+
+    try {
+      const professionalModel = professionalType === 'doctor' ? 'DoctorProfile' : 'PhysiotherapistProfile';
+      await Commission.create({
+        appointmentId: appointment._id,
+        professionalId,
+        professionalModel,
+        professionalType,
+        patientId,
+        consultationFee,
+        platformCommission,
+        professionalEarning,
+        commissionRate,
+        payoutStatus: 'pending',
+        commissionCycle: {
+          month: new Date().getUTCMonth() + 1,
+          year: new Date().getUTCFullYear(),
+          cycleNumber: `${String(new Date().getUTCMonth() + 1).padStart(2, '0')}${new Date().getUTCFullYear()}`,
+        },
+        createdBy: req.user.id,
+      });
+    } catch (error) {
+      console.error('Commission creation failed after professional-initiated booking:', error);
+    }
+
+    try { await updateCalendarForAppointment(appointment); } catch (error) { console.error('Calendar update failed:', error); }
+    try { await sendAppointmentNotifications(appointment, professional, patientProfile); } catch (error) { console.error('Appointment notification failed:', error); }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Appointment created successfully',
+      appointment,
+    });
+  } catch (error) {
+    console.error('Error creating professional-initiated appointment:', error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : 'Failed to create appointment',
+      code: error.code,
+    });
+  }
+};
+
 exports.getAppointmentsByPatientId = async (req, res) => {
   try {
     const { id } = req.params;

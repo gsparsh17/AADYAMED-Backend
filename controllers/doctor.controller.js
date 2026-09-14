@@ -602,7 +602,7 @@ exports.updateProfile = async (req, res) => {
 
     const doctor = await DoctorProfile.findOneAndUpdate(
       { userId: req.user.id },
-      updates,
+      { $set: updates },
       { new: true, runValidators: true }
     ).populate('userId', 'email');
 

@@ -54,6 +54,95 @@ exports.getReferrals = async (req, res) => {
   }
 };
 
+// GET /referral/doctor/me (or /referral/physio/me) — referrals where the
+// current professional is one of the suggested professionals, with their
+// own per-suggestion response attached as `myResponse` so the dashboard can
+// show/act on just their own accept/decline state.
+exports.getReferralsForProfessional = async (req, res) => {
+  try {
+    const type = req.user.role === 'physio' ? 'physio' : 'doctor';
+
+    const ProfileModel = type === 'physio' ? PhysiotherapistProfile : DoctorProfile;
+    const professional = await ProfileModel.findOne({ userId: req.user.id }).select('_id');
+    if (!professional) {
+      return res.status(404).json({ success: false, error: 'Professional profile not found' });
+    }
+
+    const { response, page = 1, limit = 10 } = req.query;
+    const idField = type === 'physio' ? 'suggestedProfessionals.physioId' : 'suggestedProfessionals.doctorId';
+
+    const filter = { [idField]: professional._id };
+
+    const referrals = await Referral.find(filter)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .populate('patientId', 'name phone age')
+      .lean();
+
+    let withMyResponse = referrals.map((referral) => {
+      const mySuggestion = (referral.suggestedProfessionals || []).find((s) =>
+        type === 'physio'
+          ? String(s.physioId) === String(professional._id)
+          : String(s.doctorId) === String(professional._id)
+      );
+      return { ...referral, myResponse: mySuggestion?.response || 'pending' };
+    });
+
+    if (response) {
+      withMyResponse = withMyResponse.filter((r) => r.myResponse === response);
+    }
+
+    const total = await Referral.countDocuments(filter);
+
+    res.json({
+      success: true,
+      referrals: withMyResponse,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// Shared handler for accept/decline — only touches this professional's own
+// entry in suggestedProfessionals, never the referral's overall status.
+async function respondToSuggestion(req, res, response) {
+  try {
+    const type = req.user.role === 'physio' ? 'physio' : 'doctor';
+    const ProfileModel = type === 'physio' ? PhysiotherapistProfile : DoctorProfile;
+    const professional = await ProfileModel.findOne({ userId: req.user.id }).select('_id');
+    if (!professional) {
+      return res.status(404).json({ success: false, error: 'Professional profile not found' });
+    }
+
+    const referral = await Referral.findById(req.params.id);
+    if (!referral) {
+      return res.status(404).json({ success: false, error: 'Referral not found' });
+    }
+
+    const suggestion = referral.suggestedProfessionals.find((s) =>
+      type === 'physio'
+        ? String(s.physioId) === String(professional._id)
+        : String(s.doctorId) === String(professional._id)
+    );
+    if (!suggestion) {
+      return res.status(404).json({ success: false, error: 'You were not suggested on this referral' });
+    }
+
+    suggestion.response = response;
+    suggestion.respondedAt = new Date();
+    await referral.save();
+
+    res.json({ success: true, myResponse: response, referral });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+exports.acceptReferralSuggestion = (req, res) => respondToSuggestion(req, res, 'accepted');
+exports.declineReferralSuggestion = (req, res) => respondToSuggestion(req, res, 'declined');
+
 exports.getReferralById = async (req, res) => {
   try {
     const referral = await Referral.findById(req.params.id)

@@ -29,7 +29,16 @@ const doctorSuggestionSchema = new mongoose.Schema({
   suggestedAt: {
     type: Date,
     default: Date.now
-  }
+  },
+  // Independent accept/decline state per suggested professional — a referral
+  // can suggest several doctors/physios at once, and one responding must not
+  // affect the others' ability to respond.
+  response: {
+    type: String,
+    enum: ['pending', 'accepted', 'declined'],
+    default: 'pending'
+  },
+  respondedAt: Date
 });
 
 const referralSchema = new mongoose.Schema({

@@ -760,14 +760,30 @@ exports.getAvailableSlots = async (req, res) => {
       });
     }
 
-    if (!professional.userId?.isVerified || !professional.userId?.isActive) {
+    // The email-verification and admin-approval gates below are for the
+    // public marketplace (patients discovering a professional for the first
+    // time). A professional checking their own open slots — e.g. to book a
+    // patient directly — must not be blocked by either while still being
+    // authenticated. `isActive` (account disabled/banned) always applies.
+    const isCheckingOwnSlots =
+      req.user?.role === professionalType &&
+      String(professional.userId?._id || professional.userId) === String(req.user.id);
+
+    if (!professional.userId?.isActive) {
       return res.status(400).json({
         success: false,
         error: 'Professional is not available for appointments'
       });
     }
 
-    if (professional.verificationStatus !== 'approved') {
+    if (!isCheckingOwnSlots && !professional.userId?.isVerified) {
+      return res.status(400).json({
+        success: false,
+        error: 'Professional is not available for appointments'
+      });
+    }
+
+    if (!isCheckingOwnSlots && professional.verificationStatus !== 'approved') {
       return res.status(400).json({
         success: false,
         error: 'Professional profile is not approved'
@@ -886,7 +902,11 @@ exports.getAvailableSlots = async (req, res) => {
         };
 
         const slotType = type || 'clinic';
-        const fee = slotType === 'home' ? professional.homeVisitFee : professional.consultationFee;
+        const fee = slotType === 'home'
+          ? professional.homeVisitFee
+          : slotType === 'video'
+            ? (professional.videoCallFee ?? professional.consultationFee)
+            : professional.consultationFee;
 
         availableSlots.push({
           startTime: toHHMM(sStart),
