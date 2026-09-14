@@ -183,6 +183,7 @@ app.use('/api/admin', require('./routes/admin.routes'));
 // Professional Routes
 app.use('/api/doctor', require('./routes/doctor.routes'));
 app.use('/api/physio', require('./routes/physio.routes'));
+app.use('/api/physio-exercises', require('./routes/physioExercise.routes'));
 app.use('/api/pathology', require('./routes/pathology.routes'));
 app.use('/api/diagnostics', require('./routes/diagnostics.routes'));
 app.use('/api/pharmacy', require('./routes/pharmacy.routes'));
