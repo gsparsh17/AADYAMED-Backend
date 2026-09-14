@@ -2,79 +2,128 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const http = require('http');
+const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 
 const connectDB = require('./config/db');
-const app = require('./app'); // We will start the app after the DB is connected
+const app = require('./app');
+const User = require('./models/User');
 const ChatMessage = require('./models/ChatMessage');
 const ChatSession = require('./models/ChatSession');
+const { canUserAccessSession } = require('./services/chatAuthorization.service');
+
+function allowedSocketOrigins() {
+  const configured = [
+    process.env.FRONTEND_URL,
+    ...(process.env.SOCKET_CORS_ORIGINS || '').split(','),
+  ].map((item) => item?.trim()).filter(Boolean);
+
+  if (process.env.NODE_ENV !== 'production') {
+    configured.push('http://localhost:3000', 'http://localhost:5173');
+  }
+  return [...new Set(configured)];
+}
+
+function extractSocketToken(socket) {
+  const authToken = socket.handshake.auth?.token;
+  if (authToken) return String(authToken).replace(/^Bearer\s+/i, '').trim();
+
+  const authorization = socket.handshake.headers?.authorization;
+  if (authorization?.startsWith('Bearer ')) return authorization.slice(7).trim();
+  return null;
+}
+
+async function authenticateSocket(socket, next) {
+  try {
+    const token = extractSocketToken(socket);
+    if (!token) return next(new Error('Authentication required'));
+    if (!process.env.JWT_SECRET) return next(new Error('Server authentication configuration error'));
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+    if (!user || !user.isActive) return next(new Error('Invalid or inactive user'));
+    if (!user.profileId) return next(new Error('Profile required for chat'));
+
+    socket.user = user;
+    next();
+  } catch (error) {
+    next(new Error(error.name === 'TokenExpiredError' ? 'Session expired' : 'Invalid authentication token'));
+  }
+}
 
 const startServer = async () => {
   try {
-    // 1. Wait for the database to connect successfully
     await connectDB();
     console.log('✅ MongoDB Connected');
 
-    // 2. Now that the DB is ready, start the Express server
     const PORT = process.env.PORT || 5000;
-    
-    // Create HTTP Server
     const server = http.createServer(app);
-    
-    // Setup Socket.IO
+    const origins = allowedSocketOrigins();
+
     const io = new Server(server, {
       cors: {
-        origin: '*',
-      }
+        origin: origins.length ? origins : false,
+        credentials: true,
+      },
     });
 
-    // Handle Socket Connections
-    io.on('connection', (socket) => {
-      console.log('🔌 New Socket Connection:', socket.id);
+    io.use(authenticateSocket);
 
-      // Join a chat room specific to the session
-      socket.on('join_chat', (data) => {
-        const { sessionId } = data;
-        if (sessionId) {
-          socket.join(sessionId);
-          console.log(`User joined session room: ${sessionId}`);
+    io.on('connection', (socket) => {
+      console.log(`🔌 Authenticated socket: ${socket.id} user=${socket.user.id}`);
+
+      socket.on('join_chat', async (data = {}, ack) => {
+        try {
+          const sessionId = data.sessionId;
+          if (!sessionId) throw new Error('sessionId is required');
+
+          const session = await ChatSession.findById(sessionId).lean();
+          if (!session) throw new Error('Chat session not found');
+          if (!canUserAccessSession(socket.user, session)) throw new Error('Not authorized for this chat session');
+
+          socket.join(String(session._id));
+          if (typeof ack === 'function') ack({ success: true, sessionId: String(session._id) });
+        } catch (error) {
+          if (typeof ack === 'function') ack({ success: false, error: error.message });
+          else socket.emit('chat_error', { error: error.message });
         }
       });
 
-      // Handle sending messages
-      socket.on('send_message', async (data) => {
+      socket.on('send_message', async (data = {}, ack) => {
         try {
-          const { sessionId, senderId, senderType, content, messageType = 'text', fileUrl } = data;
+          const { sessionId, messageType = 'text', fileUrl } = data;
+          const content = typeof data.content === 'string' ? data.content.trim() : '';
 
-          if (!sessionId || !senderId || !content) {
-            return socket.emit('error', 'Missing required fields for message');
-          }
+          if (!sessionId || !content) throw new Error('sessionId and content are required');
+          if (content.length > 5000) throw new Error('Message is too long');
+          if (!['text', 'image', 'document'].includes(messageType)) throw new Error('Unsupported message type');
 
-          // Create new chat message
+          const session = await ChatSession.findById(sessionId).lean();
+          if (!session) throw new Error('Chat session not found');
+          if (!canUserAccessSession(socket.user, session)) throw new Error('Not authorized for this chat session');
+
+          // SECURITY: sender identity is always derived from the authenticated JWT.
           const msg = await ChatMessage.create({
-            sessionId,
-            senderId,
-            senderType,
+            sessionId: session._id,
+            senderId: socket.user.profileId,
+            senderType: socket.user.role,
             content,
             messageType,
             fileUrl,
-            isRead: false
+            isRead: false,
           });
 
-          // Update session lastMessage
-          await ChatSession.findByIdAndUpdate(sessionId, {
+          await ChatSession.findByIdAndUpdate(session._id, {
             lastMessage: msg._id,
-            updatedAt: new Date()
+            updatedAt: new Date(),
           });
 
-          // Broadcast to everyone in the room (including sender to confirm)
-          io.to(sessionId).emit('receive_message', msg.toJSON());
-          
-          // Optionally, we could also emit to a global user room to notify them if they aren't in the chat view
-
+          io.to(String(session._id)).emit('receive_message', msg.toJSON());
+          if (typeof ack === 'function') ack({ success: true, message: msg.toJSON() });
         } catch (error) {
-          console.error('Error sending message:', error);
-          socket.emit('error', 'Failed to send message');
+          console.error('Error sending message:', error.message);
+          if (typeof ack === 'function') ack({ success: false, error: error.message });
+          else socket.emit('chat_error', { error: error.message });
         }
       });
 
@@ -84,12 +133,11 @@ const startServer = async () => {
     });
 
     server.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`🚀 Server running on port ${PORT}`);
     });
-
   } catch (error) {
     console.error('❌ Failed to start server:', error);
-    process.exit(1); // Exit if the server can't start
+    process.exit(1);
   }
 };
 

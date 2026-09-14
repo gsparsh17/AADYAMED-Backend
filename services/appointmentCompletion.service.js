@@ -3,7 +3,7 @@ const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 const PatientProfile = require('../models/PatientProfile');
 const Invoice = require('../models/Invoice');
-const Notification = require('../models/Notification');
+const { createNotification } = require('./notification.service');
 
 async function updateProfessionalStatsOnce(appointment) {
   const update = {
@@ -65,7 +65,7 @@ async function sendCompletionNotification(appointment) {
   try {
     const patient = await PatientProfile.findById(appointment.patientId).select('userId');
     if (!patient?.userId) return;
-    await Notification.create({
+    await createNotification({
       userId: patient.userId,
       userRole: 'patient',
       title: 'Consultation completed',
@@ -73,7 +73,7 @@ async function sendCompletionNotification(appointment) {
         ? 'Your consultation is complete. A follow-up has been recommended.'
         : 'Your consultation is complete. You can review your consultation summary and prescription in AADYAMED.',
       type: 'appointment',
-      channels: ['in_app'],
+      channels: ['in_app', 'push'],
       relatedEntity: 'Appointment',
       relatedEntityId: appointment._id,
       actionUrl: `/dashboard/patient/consultations/${appointment._id}`,

@@ -3,8 +3,26 @@ const Appointment = require('../models/Appointment');
 const PatientProfile = require('../models/PatientProfile');
 const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
-const Notification = require('../models/Notification');
+const { createNotification } = require('../services/notification.service');
+const PharmacyProfile = require('../models/PharmacyProfile');
+const EPharmacyOrder = require('../models/EPharmacyOrder');
 const { generatePrescriptionPdf } = require('../utils/prescriptionPdf');
+
+
+async function pharmacyAccessiblePrescriptionIds(user, patientId) {
+  if (user.role !== 'pharmacy' || !user.profileId) return [];
+  const pharmacy = await PharmacyProfile.findById(user.profileId).select('organizationId defaultStoreId').lean();
+  if (!pharmacy) return [];
+
+  const filter = { prescriptionId: { $exists: true, $ne: null } };
+  if (patientId) filter.patientId = patientId;
+  if (pharmacy.organizationId) filter.organizationId = pharmacy.organizationId;
+  else if (pharmacy.defaultStoreId) filter.storeId = pharmacy.defaultStoreId;
+  else return [];
+
+  const orders = await EPharmacyOrder.find(filter).select('prescriptionId').lean();
+  return [...new Set(orders.map((o) => String(o.prescriptionId)).filter(Boolean))];
+}
 
 const EDITABLE_FIELDS = [
   'diagnosis', 'symptoms', 'notes', 'medicines', 'labTests', 'testInstructions',
@@ -55,7 +73,11 @@ async function canOwnAppointment(user, appointment) {
 
 async function canViewPrescription(user, prescription) {
   if (user.role === 'admin') return true;
-  if (user.role === 'pharmacy') return ['issued', 'superseded'].includes(prescription.status);
+  if (user.role === 'pharmacy') {
+    if (!['issued', 'superseded'].includes(prescription.status)) return false;
+    const allowedIds = await pharmacyAccessiblePrescriptionIds(user, prescription.patientId?._id || prescription.patientId);
+    return allowedIds.includes(String(prescription._id));
+  }
   if (user.role === 'patient') {
     const profile = user.profileId
       ? await PatientProfile.findById(user.profileId).select('_id')
@@ -81,13 +103,13 @@ async function notifyIssued(prescription) {
   try {
     const patient = await PatientProfile.findById(prescription.patientId).select('userId');
     if (!patient?.userId) return;
-    await Notification.create({
+    await createNotification({
       userId: patient.userId,
       userRole: 'patient',
       title: 'New prescription available',
       message: `Prescription ${prescription.prescriptionNumber} has been issued and is available in your account.`,
       type: 'prescription',
-      channels: ['in_app'],
+      channels: ['in_app', 'push'],
       relatedEntity: 'Prescription',
       relatedEntityId: prescription._id,
       actionUrl: '/dashboard/patient/prescriptions',
@@ -187,7 +209,11 @@ exports.getPrescriptionsByPatientId = async (req, res) => {
       filter.doctorId = req.user.profileId;
     } else if (req.user.role === 'physio') {
       filter.physioId = req.user.profileId;
-    } else if (!['admin', 'pharmacy'].includes(req.user.role)) {
+    } else if (req.user.role === 'pharmacy') {
+      const allowedIds = await pharmacyAccessiblePrescriptionIds(req.user, id);
+      filter._id = { $in: allowedIds };
+      filter.status = { $in: ['issued', 'superseded'] };
+    } else if (req.user.role !== 'admin') {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -216,6 +242,8 @@ exports.getPrescriptions = async (req, res) => {
     } else if (req.user.role === 'physio') {
       filter.physioId = req.user.profileId;
     } else if (req.user.role === 'pharmacy') {
+      const allowedIds = await pharmacyAccessiblePrescriptionIds(req.user, patientId);
+      filter._id = { $in: allowedIds };
       filter.status = { $in: ['issued', 'superseded'] };
       if (patientId) filter.patientId = patientId;
     } else if (req.user.role === 'admin') {

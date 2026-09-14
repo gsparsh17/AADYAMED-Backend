@@ -3,6 +3,9 @@ const crypto = require('crypto');
 const Appointment = require('../models/Appointment');
 const LabTest = require('../models/LabTest');
 const EPharmacyOrder = require('../models/EPharmacyOrder');
+const PaymentAttempt = require('../models/PaymentAttempt');
+const PaymentWebhookEvent = require('../models/PaymentWebhookEvent');
+const { createNotification } = require('../services/notification.service');
 
 const ENTITY_MODELS = {
   appointment: Appointment,
@@ -32,17 +35,69 @@ async function loadPayableEntity(user, entityType, entityId) {
   if (!ownsEntity(user, entity)) return { error: 'Not authorized for this payment entity', status: 403 };
 
   const amount = Number(entity.totalAmount ?? entity.consultationFee ?? 0);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { error: 'Entity has no valid payable amount', status: 400 };
-  }
-  if (entity.paymentStatus === 'paid') {
-    return { error: 'This entity is already paid', status: 409 };
-  }
-  if (entityType === 'labtest' && entity.status === 'cancelled') {
-    return { error: 'Cancelled diagnostic orders cannot be paid', status: 409 };
-  }
+  if (!Number.isFinite(amount) || amount <= 0) return { error: 'Entity has no valid payable amount', status: 400 };
+  if (entity.paymentStatus === 'paid') return { error: 'This entity is already paid', status: 409, entity, amount };
+  if (entityType === 'labtest' && entity.status === 'cancelled') return { error: 'Cancelled diagnostic orders cannot be paid', status: 409 };
 
   return { entity, amount };
+}
+
+async function markEntityPaid(attempt, paymentId) {
+  const Model = ENTITY_MODELS[attempt.entityType];
+  if (!Model) throw new Error('Unsupported payment entity type in payment attempt');
+  const entity = await Model.findById(attempt.entityId);
+  if (!entity) throw new Error('Payment entity no longer exists');
+
+  if (entity.paymentStatus === 'paid') {
+    const sameOrder = entity.razorpayOrderId === attempt.gatewayOrderId;
+    const samePayment = (entity.razorpayPaymentId || entity.paymentId) === paymentId;
+    if (sameOrder && samePayment) return entity;
+    throw new Error('Entity is already paid by another payment');
+  }
+
+  if (entity.razorpayOrderId && entity.razorpayOrderId !== attempt.gatewayOrderId) {
+    throw new Error('Entity payment order does not match payment attempt');
+  }
+
+  entity.paymentStatus = 'paid';
+  entity.paymentId = paymentId;
+  entity.razorpayPaymentId = paymentId;
+  entity.paymentDate = new Date();
+
+  if (attempt.entityType === 'pharmacy_order') {
+    entity.orderStatus = entity.prescriptionRequired && entity.prescriptionStatus === 'pending_review'
+      ? 'prescription_review'
+      : 'placed';
+    if (Array.isArray(entity.statusHistory)) {
+      entity.statusHistory.push({
+        status: entity.orderStatus,
+        note: 'Online payment verified',
+        actorId: attempt.userId,
+        at: new Date(),
+      });
+    }
+  }
+
+  await entity.save();
+  return entity;
+}
+
+async function notifyPayment(attempt) {
+  try {
+    await createNotification({
+      userId: attempt.userId,
+      title: 'Payment successful',
+      message: 'Your payment has been confirmed successfully.',
+      type: 'payment',
+      channels: ['in_app', 'push'],
+      relatedEntity: attempt.entityType,
+      relatedEntityId: attempt.entityId,
+      data: { entityType: attempt.entityType, entityId: String(attempt.entityId) },
+      actionUrl: '/payments',
+    });
+  } catch (error) {
+    console.error('Payment notification failed:', error.message);
+  }
 }
 
 exports.createPaymentOrder = async (req, res) => {
@@ -51,22 +106,50 @@ exports.createPaymentOrder = async (req, res) => {
     const loaded = await loadPayableEntity(req.user, entityType, entityId);
     if (loaded.error) return res.status(loaded.status).json({ success: false, message: loaded.error });
 
-    const gateway = getRazorpay();
-    if (!gateway) {
-      return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
+    const amountPaise = Math.round(loaded.amount * 100);
+    const idempotencyKey = req.get('Idempotency-Key')?.trim();
+
+    if (idempotencyKey) {
+      const existing = await PaymentAttempt.findOne({ userId: req.user.id, idempotencyKey });
+      if (existing) {
+        const sameRequest = existing.entityType === entityType
+          && String(existing.entityId) === String(entityId)
+          && existing.amountPaise === amountPaise;
+        if (!sameRequest) {
+          return res.status(409).json({ success: false, message: 'Idempotency key was already used for another payment request' });
+        }
+        return res.json({
+          success: true,
+          idempotent: true,
+          order: {
+            id: existing.gatewayOrderId,
+            amount: existing.amountPaise,
+            currency: existing.currency,
+          },
+          payable: { entityType, entityId, amount: loaded.amount, currency: existing.currency },
+        });
+      }
     }
 
-    // SECURITY: amount is derived from the server-side entity, never from req.body.amount.
-    const amountPaise = Math.round(loaded.amount * 100);
+    const gateway = getRazorpay();
+    if (!gateway) return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
+
     const order = await gateway.client.orders.create({
       amount: amountPaise,
       currency,
       receipt: `${entityType}_${String(entityId).slice(-12)}_${Date.now()}`.slice(0, 40),
-      notes: {
-        entityType,
-        entityId: String(entityId),
-        userId: String(req.user.id),
-      },
+      notes: { entityType, entityId: String(entityId), userId: String(req.user.id) },
+    });
+
+    const attempt = await PaymentAttempt.create({
+      userId: req.user.id,
+      entityType,
+      entityId,
+      amountPaise,
+      currency: String(currency).toUpperCase(),
+      gatewayOrderId: order.id,
+      idempotencyKey: idempotencyKey || undefined,
+      metadata: { receipt: order.receipt },
     });
 
     loaded.entity.razorpayOrderId = order.id;
@@ -75,6 +158,7 @@ exports.createPaymentOrder = async (req, res) => {
     res.json({
       success: true,
       order,
+      paymentAttemptId: attempt._id,
       payable: { entityType, entityId, amount: loaded.amount, currency },
     });
   } catch (error) {
@@ -87,39 +171,26 @@ exports.createPaymentOrder = async (req, res) => {
 exports.verifyPayment = async (req, res) => {
   try {
     const { order_id, payment_id, signature, entityType, entityId } = req.body;
-    if (!order_id || !payment_id || !signature) {
+    if (!order_id || !payment_id || !signature || !entityType || !entityId) {
       return res.status(400).json({ success: false, message: 'Payment verification fields are required' });
     }
 
-    const loaded = await loadPayableEntity(req.user, entityType, entityId);
-    if (loaded.error && loaded.status !== 409) {
-      return res.status(loaded.status).json({ success: false, message: loaded.error });
+    const attempt = await PaymentAttempt.findOne({ gatewayOrderId: order_id });
+    if (!attempt) return res.status(404).json({ success: false, message: 'Payment attempt not found' });
+    if (String(attempt.userId) !== String(req.user.id) && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized for this payment attempt' });
+    }
+    if (attempt.entityType !== entityType || String(attempt.entityId) !== String(entityId)) {
+      return res.status(400).json({ success: false, message: 'Payment attempt does not match supplied entity' });
     }
 
-    // If it is already paid, return idempotent success only for the same payment/order.
-    const Model = ENTITY_MODELS[entityType];
-    const entity = loaded.entity || await Model.findById(entityId);
-    if (!entity || !ownsEntity(req.user, entity)) {
-      return res.status(403).json({ success: false, message: 'Not authorized for this payment entity' });
-    }
-
-    if (entity.paymentStatus === 'paid') {
-      const sameOrder = entity.razorpayOrderId === order_id;
-      const samePayment = (entity.razorpayPaymentId || entity.paymentId) === payment_id;
-      if (sameOrder && samePayment) {
-        return res.json({ success: true, message: 'Payment already verified' });
-      }
-      return res.status(409).json({ success: false, message: 'Entity is already paid by another payment' });
-    }
-
-    if (!entity.razorpayOrderId || entity.razorpayOrderId !== order_id) {
-      return res.status(400).json({ success: false, message: 'Payment order does not match this entity' });
+    if (attempt.status === 'captured') {
+      if (attempt.gatewayPaymentId === payment_id) return res.json({ success: true, message: 'Payment already verified' });
+      return res.status(409).json({ success: false, message: 'Payment attempt was already captured by another payment' });
     }
 
     const gateway = getRazorpay();
-    if (!gateway) {
-      return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
-    }
+    if (!gateway) return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
 
     const expectedSignature = crypto
       .createHmac('sha256', gateway.key_secret)
@@ -132,24 +203,117 @@ exports.verifyPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid payment signature' });
     }
 
-    entity.paymentStatus = 'paid';
-    entity.paymentId = payment_id;
-    entity.razorpayPaymentId = payment_id;
-    entity.paymentDate = new Date();
-    if (entityType === 'pharmacy_order') {
-      entity.orderStatus = entity.prescriptionRequired && entity.prescriptionStatus === 'pending_review'
-        ? 'prescription_review'
-        : 'placed';
-      if (Array.isArray(entity.statusHistory)) {
-        entity.statusHistory.push({ status: entity.orderStatus, note: 'Online payment verified', actorId: req.user.id, at: new Date() });
-      }
-    }
-    await entity.save();
+    await markEntityPaid(attempt, payment_id);
+    attempt.gatewayPaymentId = payment_id;
+    attempt.status = 'captured';
+    attempt.verifiedAt = new Date();
+    attempt.capturedAt = new Date();
+    await attempt.save();
+    await notifyPayment(attempt);
 
-    await sendPaymentConfirmation(req.user.id, entityType, entityId);
     res.json({ success: true, message: 'Payment verified successfully' });
   } catch (error) {
+    console.error('Payment verification error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.handleRazorpayWebhook = async (req, res) => {
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+  const signature = req.get('x-razorpay-signature');
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
+
+  if (!webhookSecret) return res.status(503).json({ success: false, message: 'Webhook secret is not configured' });
+  if (!signature) return res.status(400).json({ success: false, message: 'Missing webhook signature' });
+
+  const expected = crypto.createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
+  const providedBuf = Buffer.from(String(signature));
+  const expectedBuf = Buffer.from(expected);
+  if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+    return res.status(400).json({ success: false, message: 'Invalid webhook signature' });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(rawBody.toString('utf8'));
+  } catch (_error) {
+    return res.status(400).json({ success: false, message: 'Invalid webhook JSON' });
+  }
+
+  const payloadHash = crypto.createHash('sha256').update(rawBody).digest('hex');
+  const eventKey = req.get('x-razorpay-event-id') || payloadHash;
+  let eventDoc;
+  try {
+    eventDoc = await PaymentWebhookEvent.create({
+      eventKey,
+      eventType: payload.event || 'unknown',
+      payloadHash,
+      status: 'processing',
+    });
+  } catch (error) {
+    if (error?.code === 11000) return res.json({ success: true, duplicate: true });
+    throw error;
+  }
+
+  try {
+    const payment = payload.payload?.payment?.entity;
+    const refund = payload.payload?.refund?.entity;
+
+    if (payload.event === 'payment.captured' && payment?.order_id) {
+      const attempt = await PaymentAttempt.findOne({ gatewayOrderId: payment.order_id });
+      if (!attempt) throw new Error('Payment attempt not found for captured payment');
+      if (Number(payment.amount) !== Number(attempt.amountPaise)) throw new Error('Captured amount does not match payment attempt');
+      if (payment.currency && String(payment.currency).toUpperCase() !== attempt.currency) throw new Error('Captured currency does not match payment attempt');
+
+      const alreadyCaptured = attempt.status === 'captured';
+      await markEntityPaid(attempt, payment.id);
+      attempt.gatewayPaymentId = payment.id;
+      attempt.status = 'captured';
+      attempt.capturedAt = attempt.capturedAt || new Date();
+      attempt.verifiedAt = attempt.verifiedAt || new Date();
+      await attempt.save();
+      if (!alreadyCaptured) await notifyPayment(attempt);
+      eventDoc.gatewayOrderId = payment.order_id;
+      eventDoc.gatewayPaymentId = payment.id;
+      eventDoc.status = 'processed';
+    } else if (payload.event === 'payment.failed' && payment?.order_id) {
+      await PaymentAttempt.findOneAndUpdate(
+        { gatewayOrderId: payment.order_id },
+        {
+          status: 'failed',
+          gatewayPaymentId: payment.id,
+          failureCode: payment.error_code,
+          failureDescription: payment.error_description,
+        },
+      );
+      eventDoc.gatewayOrderId = payment.order_id;
+      eventDoc.gatewayPaymentId = payment.id;
+      eventDoc.status = 'processed';
+    } else if (payload.event === 'refund.processed' && refund?.payment_id) {
+      const attempt = await PaymentAttempt.findOne({ gatewayPaymentId: refund.payment_id });
+      if (attempt) {
+        attempt.status = 'refunded';
+        attempt.refundedAt = new Date();
+        await attempt.save();
+        const Model = ENTITY_MODELS[attempt.entityType];
+        await Model.findByIdAndUpdate(attempt.entityId, { paymentStatus: 'refunded' });
+      }
+      eventDoc.gatewayPaymentId = refund.payment_id;
+      eventDoc.status = 'processed';
+    } else {
+      eventDoc.status = 'ignored';
+    }
+
+    eventDoc.processedAt = new Date();
+    await eventDoc.save();
+    return res.json({ success: true });
+  } catch (error) {
+    eventDoc.status = 'failed';
+    eventDoc.error = error.message;
+    eventDoc.processedAt = new Date();
+    await eventDoc.save();
+    console.error('Razorpay webhook processing failed:', error);
+    return res.status(500).json({ success: false, message: 'Webhook processing failed' });
   }
 };
 
@@ -157,20 +321,22 @@ exports.getPaymentHistory = async (req, res) => {
   try {
     const { startDate, endDate, page = 1, limit = 20 } = req.query;
     const dateFilter = startDate && endDate ? { $gte: new Date(startDate), $lte: new Date(endDate) } : null;
-
     const appointmentFilter = { paymentStatus: 'paid' };
     const labFilter = { paymentStatus: 'paid' };
+    const pharmacyFilter = { paymentStatus: 'paid' };
 
     if (req.user.role === 'patient') {
       appointmentFilter.patientId = req.user.profileId;
       labFilter.patientId = req.user.profileId;
+      pharmacyFilter.patientId = req.user.profileId;
     } else if (req.user.role === 'doctor') {
       appointmentFilter.doctorId = req.user.profileId;
-      // Doctors do not own lab payments; keep lab list empty below.
       labFilter._id = null;
+      pharmacyFilter._id = null;
     } else if (req.user.role === 'physio') {
       appointmentFilter.physioId = req.user.profileId;
       labFilter._id = null;
+      pharmacyFilter._id = null;
     } else if (req.user.role !== 'admin') {
       return res.status(403).json({ success: false, message: 'Not authorized to view payment history' });
     }
@@ -178,42 +344,37 @@ exports.getPaymentHistory = async (req, res) => {
     if (dateFilter) {
       appointmentFilter.paymentDate = dateFilter;
       labFilter.paymentDate = dateFilter;
+      pharmacyFilter.paymentDate = dateFilter;
     }
 
     const pageNumber = Math.max(1, parseInt(page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
 
-    const [appointments, labTests] = await Promise.all([
-      Appointment.find(appointmentFilter)
-        .sort({ paymentDate: -1 })
-        .skip((pageNumber - 1) * pageSize)
-        .limit(pageSize)
-        .select('appointmentDate totalAmount consultationFee platformCommission professionalEarning paymentDate razorpayPaymentId'),
-      LabTest.find(labFilter)
-        .sort({ paymentDate: -1 })
-        .skip((pageNumber - 1) * pageSize)
-        .limit(pageSize)
-        .select('scheduledDate totalAmount paymentStatus paymentDate razorpayPaymentId'),
+    const [appointments, labTests, pharmacyOrders, appointmentCount, labCount, pharmacyCount] = await Promise.all([
+      Appointment.find(appointmentFilter).sort({ paymentDate: -1 }).limit(pageNumber * pageSize)
+        .select('appointmentDate totalAmount consultationFee platformCommission professionalEarning paymentDate razorpayPaymentId paymentId'),
+      LabTest.find(labFilter).sort({ paymentDate: -1 }).limit(pageNumber * pageSize)
+        .select('scheduledDate totalAmount paymentStatus paymentDate razorpayPaymentId paymentId'),
+      EPharmacyOrder.find(pharmacyFilter).sort({ paymentDate: -1 }).limit(pageNumber * pageSize)
+        .select('orderNumber totalAmount paymentStatus paymentDate razorpayPaymentId paymentId orderStatus'),
+      Appointment.countDocuments(appointmentFilter),
+      LabTest.countDocuments(labFilter),
+      EPharmacyOrder.countDocuments(pharmacyFilter),
     ]);
 
     const combined = [
-      ...appointments.map((a) => ({
-        type: 'appointment', date: a.paymentDate, amount: a.totalAmount ?? a.consultationFee,
-        reference: a.razorpayPaymentId, details: a,
-      })),
-      ...labTests.map((lt) => ({
-        type: 'labtest', date: lt.paymentDate, amount: lt.totalAmount,
-        reference: lt.razorpayPaymentId || lt.paymentId, details: lt,
-      })),
+      ...appointments.map((a) => ({ type: 'appointment', date: a.paymentDate, amount: a.totalAmount ?? a.consultationFee, reference: a.razorpayPaymentId, details: a })),
+      ...labTests.map((lt) => ({ type: 'labtest', date: lt.paymentDate, amount: lt.totalAmount, reference: lt.razorpayPaymentId || lt.paymentId, details: lt })),
+      ...pharmacyOrders.map((o) => ({ type: 'pharmacy_order', date: o.paymentDate, amount: o.totalAmount, reference: o.razorpayPaymentId || o.paymentId, details: o })),
     ].sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    res.json({ success: true, payments: combined });
+    const start = (pageNumber - 1) * pageSize;
+    res.json({
+      success: true,
+      payments: combined.slice(start, start + pageSize),
+      pagination: { page: pageNumber, limit: pageSize, total: appointmentCount + labCount + pharmacyCount },
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
-async function sendPaymentConfirmation(userId, entityType, entityId) {
-  // Notification integration is intentionally deferred to a later phase.
-  void userId; void entityType; void entityId;
-}

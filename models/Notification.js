@@ -8,8 +8,8 @@ const notificationSchema = new mongoose.Schema({
   },
   userRole: {
     type: String,
-    enum: ['admin', 'doctor', 'physio', 'patient', 'pathology'],
-    required: true
+    enum: ['admin', 'doctor', 'physio', 'patient', 'pathology', 'pharmacy', 'mr'],
+    required: false
   },
   
   // Content
@@ -35,7 +35,12 @@ const notificationSchema = new mongoose.Schema({
       'commission',
       'system',
       'marketing',
-      'reminder'
+      'reminder',
+      'order',
+      'chat',
+      'diagnostic',
+      'mr',
+      'inventory'
     ],
     required: true
   },

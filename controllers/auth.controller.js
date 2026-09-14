@@ -11,6 +11,31 @@ const sendEmail = require('../utils/sendEmail');
 const { default: mongoose } = require('mongoose');
 const { provisionPharmacyTenant } = require('../services/pharmacyTenant.service');
 
+
+async function sendVerificationEmail(user, verificationToken) {
+  const frontendUrl = process.env.FRONTEND_URL?.replace(/\/$/, '');
+  if (!frontendUrl) {
+    console.warn('Verification email not sent: FRONTEND_URL is not configured');
+    return false;
+  }
+
+  const verificationUrl = `${frontendUrl}/verify-email/${verificationToken}`;
+  await sendEmail({
+    to: user.email,
+    subject: 'Verify Your Email - AadyaPlus',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2>Welcome to AadyaPlus</h2>
+        <p>Hello ${user.name},</p>
+        <p>Please verify your email address to finish setting up your account.</p>
+        <p><a href="${verificationUrl}">Verify email address</a></p>
+        <p>This verification link expires in 24 hours.</p>
+      </div>
+    `,
+  });
+  return true;
+}
+
 // ========== HELPER FUNCTIONS ==========
 
 const getClientIp = (req) => {
@@ -97,68 +122,23 @@ exports.register = async (req, res) => {
     const verificationToken = user.createEmailVerificationToken();
     await user.save();
     
-    // Send verification email
-    // try {
-    //   const verificationUrl = `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
-      
-    //   await sendEmail({
-    //     to: user.email,
-    //     subject: 'Verify Your Email - AadyaPlus',
-    //     html: `
-    //       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-    //         <div style="text-align: center; margin-bottom: 30px;">
-    //           <h2 style="color: #2563eb; margin-bottom: 10px;">Welcome to AadyaPlus!</h2>
-    //           <p style="color: #666; font-size: 16px;">Healthcare at your fingertips</p>
-    //         </div>
-            
-    //         <div style="background-color: #f8fafc; padding: 20px; border-radius: 6px; margin-bottom: 30px;">
-    //           <p style="margin: 0; color: #334155; line-height: 1.6;">
-    //             Hello <strong>${user.name}</strong>,<br><br>
-    //             Thank you for creating an account with AadyaPlus. To get started, please verify your email address by clicking the button below:
-    //           </p>
-    //         </div>
-            
-    //         <div style="text-align: center; margin: 30px 0;">
-    //           <a href="${verificationUrl}" 
-    //              style="background-color: #2563eb; color: white; padding: 14px 28px; 
-    //                     text-decoration: none; border-radius: 6px; font-weight: 600; 
-    //                     display: inline-block; font-size: 16px; border: none; cursor: pointer;">
-    //             Verify Email Address
-    //           </a>
-    //         </div>
-            
-    //         <div style="color: #64748b; font-size: 14px; text-align: center; margin-bottom: 20px;">
-    //           <p style="margin: 5px 0;">Or copy and paste this link in your browser:</p>
-    //           <p style="margin: 10px 0; padding: 10px; background-color: #f1f5f9; border-radius: 4px; word-break: break-all;">
-    //             ${verificationUrl}
-    //           </p>
-    //           <p style="margin: 5px 0;">This link will expire in 24 hours.</p>
-    //         </div>
-            
-    //         <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 30px 0;">
-            
-    //         <div style="color: #94a3b8; font-size: 12px; text-align: center;">
-    //           <p style="margin: 5px 0;">If you didn't create an account with AadyaPlus, please ignore this email.</p>
-    //           <p style="margin: 5px 0;">Need help? Contact our support team at <a href="mailto:support@AadyaPlus.com" style="color: #2563eb;">support@AadyaPlus.com</a></p>
-    //           <p style="margin: 5px 0;">© ${new Date().getFullYear()} AadyaPlus. All rights reserved.</p>
-    //         </div>
-    //       </div>
-    //     `
-    //   });
-      
-    //   console.log(`Verification email sent to ${user.email}`);
-      
-    // } catch (emailError) {
-    //   console.error('Failed to send verification email:', emailError);
-    //   // Continue even if email fails
-    // }
-    
+    // Send the initial verification email. Registration still succeeds if the
+    // mail provider is temporarily unavailable; resend-verification can retry.
+    let verificationEmailSent = false;
+    try {
+      verificationEmailSent = await sendVerificationEmail(user, verificationToken);
+    } catch (emailError) {
+      console.error('Failed to send verification email:', emailError.message);
+    }
+
     // Generate JWT token (for auto-login after verification)
     const token = generateToken(user._id);
     
     res.status(201).json({
       success: true,
-      message: 'Registration successful! Please check your email to verify your account.',
+      message: verificationEmailSent
+        ? 'Registration successful! Please check your email to verify your account.'
+        : 'Registration successful. Verification email could not be sent; please use resend verification.',
       token,
       user: {
         id: user._id,
@@ -299,17 +279,11 @@ exports.resendVerification = async (req, res) => {
     
     // Send verification email
     try {
-      const verificationUrl = `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
-      
-      await sendEmail({
-        to: user.email,
-        subject: 'Verify Your Email - AadyaPlus',
-        html: `<p>Click <a href="${verificationUrl}">here</a> to verify your email.</p>`
-      });
+      await sendVerificationEmail(user, verificationToken);
     } catch (emailError) {
-      console.error('Failed to send verification email:', emailError);
+      console.error('Failed to send verification email:', emailError.message);
     }
-    
+
     res.json({
       success: true,
       message: 'Verification email sent successfully'

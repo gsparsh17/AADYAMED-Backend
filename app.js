@@ -29,6 +29,9 @@ require('./models/AuditLog');
 require('./models/Notification');
 require('./models/Calendar');
 require('./models/Invoice');
+require('./models/DeviceRegistration');
+require('./models/PaymentAttempt');
+require('./models/PaymentWebhookEvent');
 
 // Pharmacy Models
 require('./models/Medicine');
@@ -62,6 +65,15 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true
 }));
+
+// Razorpay webhook signature verification requires the exact raw request body.
+// Keep this route before express.json().
+app.post(
+  '/api/payment/webhook',
+  express.raw({ type: 'application/json', limit: '2mb' }),
+  require('./controllers/payment.controller').handleRazorpayWebhook,
+);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

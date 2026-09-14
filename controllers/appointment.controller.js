@@ -6,7 +6,7 @@ const PathologyProfile = require('../models/PathologyProfile'); // ✅ NEW
 const PatientProfile = require('../models/PatientProfile');
 const Commission = require('../models/Commission');
 const CommissionSettings = require('../models/CommissionSettings');
-const Notification = require('../models/Notification');
+const { createNotification } = require('../services/notification.service');
 const Calendar = require('../models/Calendar');
 const Invoice = require('../models/Invoice');
 const { addMinutes, getDoctorDailySlots } = require('../services/doctorAvailability.service');
@@ -1243,24 +1243,24 @@ async function sendAppointmentNotifications(appointment, professional, patientPr
   try {
     const professionalUserId = professional?.userId?._id || professional?.userId;
 
-    await Notification.create({
+    await createNotification({
       userId: patientProfile.userId,
       userRole: 'patient',
       title: 'Appointment Created',
       message: `Your appointment with ${professional.name} is scheduled for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
       type: 'appointment',
-      channels: ['in_app', 'email'],
+      channels: ['in_app', 'push', 'email'],
       relatedEntity: 'Appointment',
       relatedEntityId: appointment._id
     });
 
-    await Notification.create({
+    await createNotification({
       userId: professionalUserId,
       userRole: appointment.professionalType, // doctor | physio | pathology
       title: 'New Appointment Request',
       message: `New appointment request from ${patientProfile.name} for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
       type: 'appointment',
-      channels: ['in_app'],
+      channels: ['in_app', 'push'],
       relatedEntity: 'Appointment',
       relatedEntityId: appointment._id
     });
@@ -1288,12 +1288,12 @@ async function sendStatusUpdateNotification(appointment, oldStatus, newStatus) {
     const patientProfile = await PatientProfile.findById(appointment.patientId);
     if (!patientProfile) return;
 
-    await Notification.create({
+    await createNotification({
       userId: patientProfile.userId,
       title: 'Appointment Status Update',
       message: `Your appointment ${message}`,
       type: 'appointment',
-      channels: ['in_app'],
+      channels: ['in_app', 'push'],
       relatedEntity: 'Appointment',
       relatedEntityId: appointment._id
     });
@@ -1321,24 +1321,24 @@ async function sendCancellationNotification(appointment) {
     const patientProfile = await PatientProfile.findById(appointment.patientId);
 
     if (professionalUserId) {
-      await Notification.create({
+      await createNotification({
         userId: professionalUserId,
         title: 'Appointment Cancelled',
         message: `Appointment with ${patientProfile?.name || 'patient'} has been cancelled`,
         type: 'appointment',
-        channels: ['in_app'],
+        channels: ['in_app', 'push'],
         relatedEntity: 'Appointment',
         relatedEntityId: appointment._id
       });
     }
 
     if (patientProfile) {
-      await Notification.create({
+      await createNotification({
         userId: patientProfile.userId,
         title: 'Appointment Cancelled',
         message: `Your appointment has been cancelled. Refund amount: ₹${appointment.totalAmount - appointment.cancellationFee}`,
         type: 'appointment',
-        channels: ['in_app', 'email'],
+        channels: ['in_app', 'push', 'email'],
         relatedEntity: 'Appointment',
         relatedEntityId: appointment._id
       });
@@ -1369,12 +1369,12 @@ async function sendRescheduleNotification(appointment, oldDate, oldTime) {
     const newDateStr = appointment.appointmentDate.toLocaleDateString();
 
     if (professionalUserId) {
-      await Notification.create({
+      await createNotification({
         userId: professionalUserId,
         title: 'Appointment Rescheduled',
         message: `Appointment with ${patientProfile?.name || 'patient'} has been rescheduled to ${newDateStr} at ${appointment.startTime}`,
         type: 'appointment',
-        channels: ['in_app'],
+        channels: ['in_app', 'push'],
         relatedEntity: 'Appointment',
         relatedEntityId: appointment._id
       });
@@ -1390,12 +1390,12 @@ async function sendCompletionNotification(appointment) {
     const patientProfile = await PatientProfile.findById(appointment.patientId);
     if (!patientProfile) return;
 
-    await Notification.create({
+    await createNotification({
       userId: patientProfile.userId,
       title: 'Appointment Completed',
       message: 'Your appointment has been completed. Prescription will be available shortly.',
       type: 'appointment',
-      channels: ['in_app'],
+      channels: ['in_app', 'push'],
       relatedEntity: 'Appointment',
       relatedEntityId: appointment._id
     });
