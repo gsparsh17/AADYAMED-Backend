@@ -307,7 +307,7 @@ exports.rescheduleOrder = async (req, res) => {
       order.scheduledDate = startOfDay(date); order.scheduledTime = startTime; order.startTime = startTime; order.endTime = endTime;
       pushHistory(order, 'scheduled', 'Patient rescheduled diagnostic order', req.user.id);
       await order.save({ session });
-      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { appointmentDate: startOfDay(date), startTime, endTime, status: 'rescheduled', rescheduleReason: 'Diagnostic order rescheduled by patient', $inc: { rescheduleCount: 1 } }, { session });
+      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { appointmentDate: startOfDay(date), startTime, endTime, status: 'rescheduled', rescheduleReason: 'Diagnostic order rescheduled by patient' }, $inc: { rescheduleCount: 1 } }, { session });
     });
     res.json({ success: true, order });
   } catch (error) { res.status(400).json({ success: false, message: error.message }); }
@@ -331,7 +331,7 @@ exports.cancelOrder = async (req, res) => {
       order.status = 'cancelled'; order.cancelledBy = 'patient'; order.cancellationReason = clean(req.body?.reason) || 'Cancelled by patient'; order.cancelledAt = new Date();
       pushHistory(order, 'cancelled', order.cancellationReason, req.user.id);
       await order.save({ session });
-      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { status: 'cancelled', cancelledBy: 'patient', cancellationReason: order.cancellationReason, cancelledAt: new Date() }, { session });
+      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'cancelled', cancelledBy: 'patient', cancellationReason: order.cancellationReason, cancelledAt: new Date() } }, { session });
     });
     const refund = await attemptRefund(order); await order.save();
     res.json({ success: true, order, refund });
@@ -454,11 +454,11 @@ exports.updateOrderStatus = async (req, res) => {
     if (status === 'completed') {
       order.tests.forEach(t => { if (t.status !== 'cancelled') { t.status = 'completed'; t.completedAt = t.completedAt || new Date(); } });
       if (!wasCompleted) await PathologyProfile.findByIdAndUpdate(lab._id, { $inc: { totalTestsConducted: 1 } });
-      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { status: 'completed', actualEndTime: new Date() });
+      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'completed', actualEndTime: new Date() } });
     }
     pushHistory(order, status, clean(req.body?.note) || `Status changed to ${status}`, req.user.id); await order.save();
     if (status === 'cancelled' && previousStatus !== 'cancelled') {
-      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { status: 'cancelled', cancelledBy: 'professional', cancellationReason: order.cancellationReason, cancelledAt: new Date() });
+      if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'cancelled', cancelledBy: 'professional', cancellationReason: order.cancellationReason, cancelledAt: new Date() } });
       await attemptRefund(order);
       await order.save();
     }
@@ -478,7 +478,7 @@ exports.uploadReport = async (req, res) => {
     order.tests.forEach(t => { if (t.status !== 'cancelled') { t.status = 'completed'; t.completedAt = t.completedAt || new Date(); } });
     pushHistory(order, 'completed', 'Lab report uploaded and released', req.user.id); await order.save();
     if (!wasCompleted) await PathologyProfile.findByIdAndUpdate(lab._id, { $inc: { totalTestsConducted: 1 } });
-    if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { status: 'completed', actualEndTime: new Date() });
+    if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'completed', actualEndTime: new Date() } });
     res.json({ success: true, order, message: 'Report uploaded successfully' });
   } catch (error) { if (req.file?.path) fs.unlink(req.file.path, () => {}); res.status(400).json({ success: false, message: error.message }); }
 };
@@ -514,7 +514,7 @@ exports.updateStaff = async (req, res) => {
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 };
 exports.deleteStaff = async (req, res) => {
-  try { const lab = await labForUser(req.user); const staff = lab && await PathologyStaff.findOneAndUpdate({ _id: req.params.id, pathologyId: lab._id }, { isActive: false }, { new: true }); if (!staff) return res.status(404).json({ success: false, message: 'Staff member not found' }); res.json({ success: true, staff }); }
+  try { const lab = await labForUser(req.user); const staff = lab && await PathologyStaff.findOneAndUpdate({ _id: req.params.id, pathologyId: lab._id }, { $set: { isActive: false } }, { new: true }); if (!staff) return res.status(404).json({ success: false, message: 'Staff member not found' }); res.json({ success: true, staff }); }
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 };
 

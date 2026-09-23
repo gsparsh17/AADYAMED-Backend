@@ -1,10 +1,22 @@
 const mongoose = require('mongoose');
 
 const commissionSchema = new mongoose.Schema({
+  // Optional since commissions also arise from pharmacy orders, which have no
+  // appointment. Exactly one of appointmentId / pharmacyOrderId is set — see
+  // the pre-validate hook at the bottom of this file.
   appointmentId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Appointment',
-    required: true
+    ref: 'Appointment'
+  },
+  pharmacyOrderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'EPharmacyOrder',
+    index: true
+  },
+  storeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PharmacyStore',
+    index: true
   },
 
   // ✅ use refPath that matches registered mongoose model names
@@ -90,5 +102,16 @@ commissionSchema.pre('save', function(next) {
   }
   next();
 });
+
+commissionSchema.pre('validate', function (next) {
+  if (!this.appointmentId && !this.pharmacyOrderId) {
+    return next(new Error('A commission must reference an appointment or a pharmacy order'));
+  }
+  next();
+});
+
+// One commission per pharmacy order — the sparse index makes re-running
+// settlement for an already-settled order a no-op rather than a duplicate.
+commissionSchema.index({ pharmacyOrderId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Commission', commissionSchema);

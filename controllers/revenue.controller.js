@@ -1,16 +1,14 @@
-const Appointment = require('../models/Appointment');
 const Salary = require('../models/Salary');
 const Invoice = require('../models/Invoice');
-const mongoose = require('mongoose');
 
 // Calculate hospital revenue
 exports.calculateHospitalRevenue = async (req, res) => {
   try {
-    const { period, startDate, endDate } = req.query;
-    
+    const { startDate, endDate } = req.query;
+
     let dateFilter = {};
     if (startDate && endDate) {
-      dateFilter.createdAt = {
+      dateFilter.invoiceDate = {
         $gte: new Date(startDate),
         $lte: new Date(endDate)
       };
@@ -19,7 +17,7 @@ exports.calculateHospitalRevenue = async (req, res) => {
       const now = new Date();
       const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      dateFilter.createdAt = {
+      dateFilter.invoiceDate = {
         $gte: firstDayOfMonth,
         $lte: lastDayOfMonth
       };
@@ -30,14 +28,14 @@ exports.calculateHospitalRevenue = async (req, res) => {
       {
         $match: {
           ...dateFilter,
-          status: 'Paid',
-          invoice_type: 'Appointment'
+          status: 'paid',
+          invoiceType: 'appointment'
         }
       },
       {
         $group: {
           _id: null,
-          totalRevenue: { $sum: '$total' },
+          totalRevenue: { $sum: '$totalAmount' },
           appointmentCount: { $sum: 1 }
         }
       }
@@ -48,24 +46,25 @@ exports.calculateHospitalRevenue = async (req, res) => {
       {
         $match: {
           ...dateFilter,
-          status: 'Paid',
-          invoice_type: 'Pharmacy'
+          status: 'paid',
+          invoiceType: 'pharmacy'
         }
       },
       {
         $group: {
           _id: null,
-          totalRevenue: { $sum: '$total' },
+          totalRevenue: { $sum: '$totalAmount' },
           saleCount: { $sum: 1 }
         }
       }
     ]);
 
-    // Calculate doctor salary expenses
+    // Calculate staff salary expenses (period overlap with the requested date range)
     const salaryExpenses = await Salary.aggregate([
       {
         $match: {
-          ...dateFilter,
+          period_start: { $lte: dateFilter.invoiceDate.$lte },
+          period_end: { $gte: dateFilter.invoiceDate.$gte },
           status: 'paid'
         }
       },
@@ -82,14 +81,14 @@ exports.calculateHospitalRevenue = async (req, res) => {
     const totalAppointmentRevenue = appointmentRevenue[0]?.totalRevenue || 0;
     const totalPharmacyRevenue = pharmacyRevenue[0]?.totalRevenue || 0;
     const totalSalaryExpenses = salaryExpenses[0]?.totalExpenses || 0;
-    
+
     const grossRevenue = totalAppointmentRevenue + totalPharmacyRevenue;
     const netRevenue = grossRevenue - totalSalaryExpenses;
 
     res.json({
       period: {
-        start: dateFilter.createdAt?.$gte || new Date(),
-        end: dateFilter.createdAt?.$lte || new Date()
+        start: dateFilter.invoiceDate?.$gte || new Date(),
+        end: dateFilter.invoiceDate?.$lte || new Date()
       },
       revenue: {
         appointment: totalAppointmentRevenue,
@@ -138,15 +137,15 @@ exports.getDailyRevenueReport = async (req, res) => {
       Invoice.aggregate([
         {
           $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            status: 'Paid',
-            invoice_type: 'Appointment'
+            invoiceDate: { $gte: startOfDay, $lte: endOfDay },
+            status: 'paid',
+            invoiceType: 'appointment'
           }
         },
         {
           $group: {
             _id: null,
-            total: { $sum: '$total' },
+            total: { $sum: '$totalAmount' },
             count: { $sum: 1 }
           }
         }
@@ -155,20 +154,20 @@ exports.getDailyRevenueReport = async (req, res) => {
       Invoice.aggregate([
         {
           $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            status: 'Paid',
-            invoice_type: 'Pharmacy'
+            invoiceDate: { $gte: startOfDay, $lte: endOfDay },
+            status: 'paid',
+            invoiceType: 'pharmacy'
           }
         },
         {
           $group: {
             _id: null,
-            total: { $sum: '$total' },
+            total: { $sum: '$totalAmount' },
             count: { $sum: 1 }
           }
         }
       ]),
-      // Salary expenses
+      // Salary expenses paid on this day
       Salary.aggregate([
         {
           $match: {
@@ -212,95 +211,94 @@ exports.getDailyRevenueReport = async (req, res) => {
 
 // Get monthly revenue report
 exports.getMonthlyRevenueReport = async (req, res) => {
-  try {
-    const { year, month } = req.query;
-    const targetYear = parseInt(year) || new Date().getFullYear();
-    const targetMonth = parseInt(month) || new Date().getMonth() + 1;
+  try {
+    const { year, month } = req.query;
+    const targetYear = parseInt(year) || new Date().getFullYear();
+    const targetMonth = parseInt(month) || new Date().getMonth() + 1;
 
-    const startOfMonth = new Date(targetYear, targetMonth - 1, 1);
-    const endOfMonth = new Date(targetYear, targetMonth, 0, 23, 59, 59, 999);
-    const daysInMonth = endOfMonth.getDate();
+    const startOfMonth = new Date(targetYear, targetMonth - 1, 1);
+    const endOfMonth = new Date(targetYear, targetMonth, 0, 23, 59, 59, 999);
 
-    const [revenueByDay, salaryExpenses, appointments, pharmacySales, dailyRevenueTotals] = await Promise.all([
-      // Daily revenue breakdown
-      Invoice.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfMonth, $lte: endOfMonth },
-            status: 'Paid'
-          }
-        },
-        {
-          $group: {
-            _id: {
-              day: { $dayOfMonth: '$createdAt' },
-              type: '$invoice_type'
-            },
-            total: { $sum: '$total' },
-            count: { $sum: 1 }
-          }
-        },
-        { $sort: { '_id.day': 1 } }
-      ]),
-      // Monthly salary expenses
-      Salary.aggregate([
-        {
-          $match: {
-            period_start: { $gte: startOfMonth, $lte: endOfMonth },
-            status: 'paid'
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: '$net_amount' },
-            count: { $sum: 1 }
-          }
-        }
-      ]),
-      // Total appointments
-      Invoice.countDocuments({
-        createdAt: { $gte: startOfMonth, $lte: endOfMonth },
-        status: 'Paid',
-        invoice_type: 'Appointment'
-      }),
-      // Total pharmacy sales
-      Invoice.countDocuments({
-        createdAt: { $gte: startOfMonth, $lte: endOfMonth },
-        status: 'Paid',
-        invoice_type: 'Pharmacy'
-      }),
-      // Daily revenue totals for average and highest day calculation
-      Invoice.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfMonth, $lte: endOfMonth },
-            status: 'Paid'
-          }
-        },
-        {
-          $group: {
-            _id: {
-              date: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }
-            },
-            dailyRevenue: { $sum: '$total' }
-          }
-        }
-      ])
-    ]);
+    const [revenueByDay, salaryExpenses, appointments, pharmacySales, dailyRevenueTotals] = await Promise.all([
+      // Daily revenue breakdown
+      Invoice.aggregate([
+        {
+          $match: {
+            invoiceDate: { $gte: startOfMonth, $lte: endOfMonth },
+            status: 'paid'
+          }
+        },
+        {
+          $group: {
+            _id: {
+              day: { $dayOfMonth: '$invoiceDate' },
+              type: '$invoiceType'
+            },
+            total: { $sum: '$totalAmount' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id.day': 1 } }
+      ]),
+      // Salary expenses paid within the month
+      Salary.aggregate([
+        {
+          $match: {
+            paid_date: { $gte: startOfMonth, $lte: endOfMonth },
+            status: 'paid'
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: '$net_amount' },
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      // Total appointments
+      Invoice.countDocuments({
+        invoiceDate: { $gte: startOfMonth, $lte: endOfMonth },
+        status: 'paid',
+        invoiceType: 'appointment'
+      }),
+      // Total pharmacy sales
+      Invoice.countDocuments({
+        invoiceDate: { $gte: startOfMonth, $lte: endOfMonth },
+        status: 'paid',
+        invoiceType: 'pharmacy'
+      }),
+      // Daily revenue totals for average and highest day calculation
+      Invoice.aggregate([
+        {
+          $match: {
+            invoiceDate: { $gte: startOfMonth, $lte: endOfMonth },
+            status: 'paid'
+          }
+        },
+        {
+          $group: {
+            _id: {
+              date: { $dateToString: { format: '%Y-%m-%d', date: '$invoiceDate' } }
+            },
+            dailyRevenue: { $sum: '$totalAmount' }
+          }
+        }
+      ])
+    ]);
 
     const appointmentRevenue = await Invoice.aggregate([
       {
         $match: {
-          createdAt: { $gte: startOfMonth, $lte: endOfMonth },
-          status: 'Paid',
-          invoice_type: 'Appointment'
+          invoiceDate: { $gte: startOfMonth, $lte: endOfMonth },
+          status: 'paid',
+          invoiceType: 'appointment'
         }
       },
       {
         $group: {
           _id: null,
-          totalRevenue: { $sum: '$total' },
+          totalRevenue: { $sum: '$totalAmount' },
         }
       }
     ]);
@@ -309,58 +307,59 @@ exports.getMonthlyRevenueReport = async (req, res) => {
     const pharmacyRevenue = await Invoice.aggregate([
       {
         $match: {
-          createdAt: { $gte: startOfMonth, $lte: endOfMonth },
-          status: 'Paid',
-          invoice_type: 'Pharmacy'
+          invoiceDate: { $gte: startOfMonth, $lte: endOfMonth },
+          status: 'paid',
+          invoiceType: 'pharmacy'
         }
       },
       {
         $group: {
           _id: null,
-          totalRevenue: { $sum: '$total' },
+          totalRevenue: { $sum: '$totalAmount' },
         }
       }
     ]);
 
-    // Process daily revenue data
-    const dailyBreakdown = {};
+    // Process daily revenue data
+    const dailyBreakdown = {};
     const totalAppointmentRevenue = appointmentRevenue[0]?.totalRevenue || 0;
     const totalPharmacyRevenue = pharmacyRevenue[0]?.totalRevenue || 0;
-    const businessDays = new Set();
+    const businessDays = new Set();
 
-    revenueByDay.forEach(item => {
-      const day = item._id.day;
-      businessDays.add(day);
-      if (!dailyBreakdown[day]) {
-        dailyBreakdown[day] = { appointment: 0, pharmacy: 0, total: 0 };
-      }
-      dailyBreakdown[day][item._id.type.toLowerCase()] = item.total;
-      dailyBreakdown[day].total += item.total;
-    });
+    revenueByDay.forEach(item => {
+      const day = item._id.day;
+      businessDays.add(day);
+      if (!dailyBreakdown[day]) {
+        dailyBreakdown[day] = { appointment: 0, pharmacy: 0, lab_test: 0, package: 0, other: 0, total: 0 };
+      }
+      const type = item._id.type;
+      if (dailyBreakdown[day][type] !== undefined) dailyBreakdown[day][type] = item.total;
+      dailyBreakdown[day].total += item.total;
+    });
 
-    const highestRevenueDay = dailyRevenueTotals.sort((a, b) => b.dailyRevenue - a.dailyRevenue)[0] || { _id: { date: '' }, dailyRevenue: 0 };
-    const totalSalariesPaid = salaryExpenses[0]?.total || 0;
-    const totalRevenue = Object.values(dailyBreakdown).reduce((sum, day) => sum + day.total, 0);
-    const netRevenue = totalRevenue - totalSalariesPaid;
+    const highestRevenueDay = [...dailyRevenueTotals].sort((a, b) => b.dailyRevenue - a.dailyRevenue)[0] || { _id: { date: '' }, dailyRevenue: 0 };
+    const totalSalariesPaid = salaryExpenses[0]?.total || 0;
+    const totalRevenue = Object.values(dailyBreakdown).reduce((sum, day) => sum + day.total, 0);
+    const netRevenue = totalRevenue - totalSalariesPaid;
 
-    res.json({
-        appointmentRevenue: totalAppointmentRevenue,
-        pharmacyRevenue: totalPharmacyRevenue,
-        totalRevenue: totalRevenue,
-        averageDailyRevenue: businessDays.size > 0 ? totalRevenue / businessDays.size : 0,
-        highestRevenueDay: {
-          amount: highestRevenueDay.dailyRevenue,
-          date: highestRevenueDay._id.date,
-        },
-        profitMargin: totalRevenue > 0 ? (netRevenue / totalRevenue) * 100 : 0,
-        totalAppointments: appointments,
-        totalPharmacySales: pharmacySales,
-        businessDays: businessDays.size,
-        totalSalariesPaid: totalSalariesPaid,
+    res.json({
+        appointmentRevenue: totalAppointmentRevenue,
+        pharmacyRevenue: totalPharmacyRevenue,
+        totalRevenue: totalRevenue,
+        averageDailyRevenue: businessDays.size > 0 ? totalRevenue / businessDays.size : 0,
+        highestRevenueDay: {
+          amount: highestRevenueDay.dailyRevenue,
+          date: highestRevenueDay._id.date,
+        },
+        profitMargin: totalRevenue > 0 ? (netRevenue / totalRevenue) * 100 : 0,
+        totalAppointments: appointments,
+        totalPharmacySales: pharmacySales,
+        businessDays: businessDays.size,
+        totalSalariesPaid: totalSalariesPaid,
         netRevenue: netRevenue,
         salaryExpenses: totalSalariesPaid
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 };

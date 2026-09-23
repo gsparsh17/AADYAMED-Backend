@@ -164,7 +164,7 @@ exports.updateCustomer = async (req, res) => {
 
     const customer = await Customer.findByIdAndUpdate(
       id,
-      updateData,
+      { $set: updateData },
       { new: true, runValidators: true }
     );
 
@@ -193,7 +193,7 @@ exports.deleteCustomer = async (req, res) => {
 
     const customer = await Customer.findByIdAndUpdate(
       id,
-      { is_active: false },
+      { $set: { is_active: false } },
       { new: true }
     );
 

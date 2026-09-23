@@ -235,7 +235,7 @@ exports.updateProfile = async (req, res) => {
 
     // Update user email if changed
     if (updates.email) {
-      await User.findByIdAndUpdate(profile.userId, { email: updates.email });
+      await User.findByIdAndUpdate(profile.userId, { $set: { email: updates.email } });
     }
 
     return res.json({

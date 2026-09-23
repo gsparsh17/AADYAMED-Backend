@@ -20,6 +20,33 @@ const sanitizeProfilePayload = (body = {}) => {
   return payload;
 };
 
+/**
+ * The registered identity that verification actually checked. Once a pharmacy
+ * is approved (or suspended) these stop being free-text, because an approval
+ * standing against a licence number nobody reviewed is worse than no approval
+ * at all. `licenseNumber` also carries a unique index, so an edited typo
+ * collides with another pharmacy's record instead of failing cleanly.
+ *
+ * A `pending` or `rejected` pharmacy keeps them editable — a rejected one
+ * usually needs to correct exactly these fields.
+ */
+const LOCKED_WHEN_VERIFIED = ['pharmacyName', 'licenseNumber'];
+const VERIFIED_STATUSES = ['approved', 'suspended'];
+
+const changedLockedFields = (existing, payload, fields, read = (doc, f) => doc[f]) => {
+  if (!existing || !VERIFIED_STATUSES.includes(existing.verificationStatus)) return [];
+  return fields.filter((field) => {
+    if (payload[field] === undefined || payload[field] === null) return false;
+    const current = read(existing, field);
+    const currentText = String(current === undefined || current === null ? '' : current).trim();
+    // Nothing was verified about a field that was never filled in, so filling
+    // it for the first time is not a change to a verified value. Locking a
+    // blank field would leave no way to ever set it.
+    if (currentText === '') return false;
+    return String(payload[field]).trim() !== currentText;
+  });
+};
+
 exports.createPharmacyProfile = async (req, res) => {
   try {
     const existingProfile = await PharmacyProfile.findOne({ userId: req.user.id });
@@ -32,7 +59,7 @@ exports.createPharmacyProfile = async (req, res) => {
 
     const user = await User.findByIdAndUpdate(
       req.user.id,
-      { profileCompleted: true, profileId: profile._id, profileModel: 'PharmacyProfile' },
+      { $set: { profileCompleted: true, profileId: profile._id, profileModel: 'PharmacyProfile' } },
       { new: true }
     );
     const tenant = await provisionPharmacyTenant(user, profile);
@@ -63,9 +90,25 @@ exports.getPharmacyProfile = async (req, res) => {
 
 exports.updatePharmacyProfile = async (req, res) => {
   try {
+    const payload = sanitizeProfilePayload(req.body);
+
+    const existing = await PharmacyProfile.findOne({ userId: req.user.id });
+    if (!existing) return res.status(404).json({ success: false, error: 'Profile not found' });
+
+    // Unchanged values are allowed through: the edit screen posts the whole
+    // form every time, so only an actual difference is a rejection.
+    const locked = changedLockedFields(existing, payload, LOCKED_WHEN_VERIFIED);
+    if (locked.length > 0) {
+      return res.status(403).json({
+        success: false,
+        message: `Your pharmacy is verified, so ${locked.join(' and ')} can no longer be changed here. Contact support to update ${locked.length > 1 ? 'them' : 'it'}.`,
+        lockedFields: locked
+      });
+    }
+
     const profile = await PharmacyProfile.findOneAndUpdate(
       { userId: req.user.id },
-      { $set: sanitizeProfilePayload(req.body) },
+      { $set: payload },
       { new: true, runValidators: true }
     );
     if (!profile) return res.status(404).json({ success: false, error: 'Profile not found' });

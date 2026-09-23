@@ -53,11 +53,11 @@ async function resolvePharmacyTenant(req, res, next) {
         return res.status(403).json({ success: false, error: 'Store does not belong to the requested organization' });
       }
     } else {
-      if (!requestedStore) {
-        return res.status(400).json({ success: false, error: 'A pharmacy store must be selected for this operation' });
-      }
-      store = await PharmacyStore.findOne({ _id: requestedStore, status: 'active' });
-      if (store) organization = await Organization.findById(store.organizationId);
+      // Every route that mounts this middleware today gates on
+      // authorize('admin', 'pharmacy') first, so this branch is currently
+      // unreachable — but fail closed rather than trusting any other
+      // authenticated role to access an arbitrary store by guessing its ID.
+      return res.status(403).json({ success: false, error: 'Not authorized to access pharmacy store data' });
     }
 
     if (!organization || organization.status !== 'active') {

@@ -2,6 +2,7 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const DeviceRegistration = require('../models/DeviceRegistration');
 const { createNotification } = require('../services/notification.service');
+const { sendDailyWelcome } = require('../services/pharmacyOrderAlert.service');
 
 exports.getNotifications = async (req, res) => {
   try {
@@ -42,7 +43,7 @@ exports.markAsRead = async (req, res) => {
   try {
     const notification = await Notification.findOneAndUpdate(
       { _id: req.params.id, userId: req.user.id },
-      { read: true, readAt: new Date(), status: 'read' },
+      { $set: { read: true, readAt: new Date(), status: 'read' } },
       { new: true },
     );
 
@@ -60,7 +61,7 @@ exports.markAllAsRead = async (req, res) => {
   try {
     await Notification.updateMany(
       { userId: req.user.id, read: false },
-      { read: true, readAt: new Date(), status: 'read' },
+      { $set: { read: true, readAt: new Date(), status: 'read' } },
     );
 
     res.json({ success: true, message: 'All notifications marked as read' });
@@ -81,6 +82,20 @@ exports.deleteNotification = async (req, res) => {
     }
 
     res.json({ success: true, message: 'Notification deleted' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Called by the app on every launch. Sends the day's greeting the first time
+ * it is called that day and does nothing on every later call, so the client
+ * needs no "have I already done this today" state of its own.
+ */
+exports.dailyWelcome = async (req, res) => {
+  try {
+    const result = await sendDailyWelcome(req.user);
+    res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -113,7 +128,7 @@ exports.registerDeviceToken = async (req, res) => {
     );
 
     // Keep the legacy single token populated during the migration window.
-    await User.findByIdAndUpdate(req.user.id, { deviceToken: token.trim() });
+    await User.findByIdAndUpdate(req.user.id, { $set: { deviceToken: token.trim() } });
 
     res.json({ success: true, registration });
   } catch (error) {

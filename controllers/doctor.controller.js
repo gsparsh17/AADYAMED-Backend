@@ -615,7 +615,7 @@ exports.updateProfile = async (req, res) => {
 
     // If email changed in profile, reflect in User too
     if (updates.email && doctor.userId) {
-      await User.findByIdAndUpdate(doctor.userId, { email: updates.email });
+      await User.findByIdAndUpdate(doctor.userId, { $set: { email: updates.email } });
     }
 
     // Check if availability was updated and trigger immediate calendar sync
@@ -1041,7 +1041,7 @@ exports.updateDoctor = async (req, res) => {
 
     const doctor = await DoctorProfile.findByIdAndUpdate(
       doctorId,
-      updates,
+      { $set: updates },
       { new: true, runValidators: true }
     ).populate('userId', 'email');
 
@@ -1055,7 +1055,7 @@ exports.updateDoctor = async (req, res) => {
     // Update associated user if email changed
     if (updates.email && doctor.userId) {
       await User.findByIdAndUpdate(doctor.userId, {
-        email: updates.email
+        $set: { email: updates.email }
       });
     }
 

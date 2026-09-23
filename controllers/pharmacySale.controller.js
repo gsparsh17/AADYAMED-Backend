@@ -9,6 +9,16 @@ const { scopeFromRequest, consumeFefo, addToBatch } = require('../services/inven
 
 const money = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
+// A Mongoose ValidationError (bad enum value, missing required field, etc.)
+// is caused by the request, not a server fault — report it as 400 with the
+// real reason instead of an opaque 500.
+function sendSaleError(res, error) {
+  if (error.name === 'ValidationError') {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+  return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+}
+
 exports.createSale = async (req, res) => {
   try {
     const customerType = req.body.customerType || req.body.customer_type || 'walkin';
@@ -154,7 +164,7 @@ exports.createSale = async (req, res) => {
     }));
     res.status(201).json({ success: true, sale });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, message: error.message });
+    sendSaleError(res, error);
   }
 };
 
@@ -219,7 +229,7 @@ exports.dispenseSale = async (req, res) => {
     if (sale.prescriptionId) await updatePrescriptionDispense(sale);
     res.json({ success: true, sale });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, message: error.message });
+    sendSaleError(res, error);
   }
 };
 
@@ -254,6 +264,66 @@ exports.getAllSales = async (req, res) => {
       { $addFields: { totalSales: { $subtract: ['$grossSales', '$returns'] } } },
     ]);
     res.json({ success: true, sales, totals: totals || { grossSales: 0, returns: 0, totalSales: 0, totalTax: 0, grossProfit: 0, count: 0 }, pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * The store's customers, derived from its own sales.
+ *
+ * There is no customer collection: a counter sale stores `customerName` and
+ * `customerPhone` as plain strings, so "my customers" is an aggregate over
+ * past bills rather than a lookup. Grouped by phone where one exists, since
+ * that is the only stable identifier a walk-in has; otherwise by name.
+ */
+exports.getSaleCustomers = async (req, res) => {
+  try {
+    const search = String(req.query.search || '').trim();
+    const match = scopedFilter(req, {
+      $or: [
+        { customerPhone: { $nin: [null, ''] } },
+        { customerName: { $nin: [null, '', 'Walk-in Customer'] } }
+      ]
+    });
+
+    const rows = await PharmacySale.aggregate([
+      { $match: match },
+      { $sort: { saleDate: -1 } },
+      { $group: {
+        _id: {
+          $cond: [
+            { $and: [{ $ne: ['$customerPhone', null] }, { $ne: ['$customerPhone', ''] }] },
+            '$customerPhone',
+            { $toLower: { $ifNull: ['$customerName', ''] } }
+          ]
+        },
+        name: { $first: '$customerName' },
+        phone: { $first: '$customerPhone' },
+        lastPurchase: { $first: '$saleDate' },
+        visits: { $sum: 1 },
+        totalSpent: { $sum: { $subtract: ['$totalAmount', { $ifNull: ['$returnedAmount', 0] }] } }
+      } },
+      { $sort: { lastPurchase: -1 } },
+      { $limit: 300 }
+    ]);
+
+    const customers = rows
+      .filter(r => String(r.name || '').trim() || String(r.phone || '').trim())
+      .map(r => ({
+        name: String(r.name || '').trim(),
+        phone: String(r.phone || '').trim(),
+        visits: r.visits,
+        totalSpent: r.totalSpent,
+        lastPurchase: r.lastPurchase
+      }))
+      .filter(c => {
+        if (!search) return true;
+        const needle = search.toLowerCase();
+        return c.name.toLowerCase().includes(needle) || c.phone.includes(search);
+      });
+
+    res.json({ success: true, customers });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }

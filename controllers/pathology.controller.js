@@ -579,7 +579,7 @@ exports.createProfile = async (req, res) => {
     if (req.files?.profileImage?.[0]?.path) profile.profileImage = req.files.profileImage[0].path;
 
     await profile.save();
-    await User.findByIdAndUpdate(req.user.id, { profileId: profile._id });
+    await User.findByIdAndUpdate(req.user.id, { $set: { profileId: profile._id } });
 
     return res.status(201).json({ success: true, message: 'Pathology profile created successfully', profile });
   } catch (error) {
@@ -1006,7 +1006,7 @@ exports.updateTestStatus = async (req, res) => {
 
     const labTest = await LabTest.findOneAndUpdate(
       { _id: id, pathologyId: profile._id },
-      updateData,
+      { $set: updateData },
       { new: true, runValidators: true }
     );
 
@@ -1044,7 +1044,7 @@ exports.uploadReport = async (req, res) => {
 
     const labTest = await LabTest.findOneAndUpdate(
       { _id: id, pathologyId: profile._id },
-      updateData,
+      { $set: updateData },
       { new: true, runValidators: true }
     );
 

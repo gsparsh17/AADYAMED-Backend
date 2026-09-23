@@ -1,5 +1,6 @@
 const admin = require('firebase-admin');
 const DeviceRegistration = require('../models/DeviceRegistration');
+const oneSignal = require('./oneSignalPush.service');
 
 let firebaseInitAttempted = false;
 let firebaseReady = false;
@@ -46,11 +47,34 @@ function invalidTokenCode(code = '') {
 }
 
 async function sendPushToUser(userId, payload) {
+  // OneSignal is the provider when it is configured. FCM is kept as the
+  // fallback rather than deleted: the two use different device registries, so
+  // an install mid-migration — or one where OneSignal is not set up — keeps
+  // delivering instead of going silent.
+  if (oneSignal.isConfigured()) {
+    const result = await oneSignal.sendToExternalIds(userId, {
+      title: payload.title,
+      body: payload.body,
+      data: payload.data,
+      priority: payload.priority,
+    });
+    return {
+      attempted: result.attempted || 0,
+      successCount: result.successCount || 0,
+      failureCount: (result.attempted || 0) - (result.successCount || 0),
+      provider: 'onesignal',
+      skipped: result.skipped,
+    };
+  }
+
   const registrations = await DeviceRegistration.find({ userId, active: true })
     .select('_id token')
     .lean();
 
   if (!registrations.length) {
+    // Worth logging: a user with no device token receives nothing, and the
+    // symptom (no alert) is identical to FCM being misconfigured.
+    console.warn(`Push skipped for user ${userId}: no active device tokens registered`);
     return { attempted: 0, successCount: 0, failureCount: 0, skipped: 'no_active_tokens' };
   }
 

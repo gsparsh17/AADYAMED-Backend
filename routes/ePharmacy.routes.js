@@ -42,11 +42,15 @@ router.get('/merchant/orders/:id', c.getMerchantOrder);
 router.post('/merchant/orders/:id/prescription', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.reviewPrescription);
 router.post('/merchant/orders/:id/confirm', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.confirmMerchantOrder);
 router.post('/merchant/orders/:id/status', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.updateMerchantStatus);
+router.get('/merchant/rejection-reasons', c.rejectionReasons);
+router.post('/merchant/orders/:id/reject', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.rejectMerchantOrder);
 router.post('/merchant/orders/:id/cancel', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.cancelMerchantOrder);
 router.post('/merchant/orders/:id/refund', requireOrganizationRole('owner', 'admin', 'manager'), c.retryMerchantRefund);
+router.get('/merchant/settlement', c.merchantSettlement);
 router.get('/merchant/coupons', c.listCoupons);
 router.post('/merchant/coupons', requireOrganizationRole('owner', 'admin', 'manager'), c.createCoupon);
 router.patch('/merchant/coupons/:id', requireOrganizationRole('owner', 'admin', 'manager'), c.updateCoupon);
+router.post('/merchant/pause', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.setStorePause);
 router.patch('/merchant/settings', requireOrganizationRole('owner', 'admin', 'manager'), c.updateOnlineSettings);
 
 module.exports = router;

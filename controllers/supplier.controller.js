@@ -81,7 +81,7 @@ exports.deleteSupplier = async (req, res) => {
   try {
     const supplier = await Supplier.findOneAndUpdate(
       scopedFilter(req, { _id: req.params.id }),
-      { isActive: false },
+      { $set: { isActive: false } },
       { new: true }
     );
     if (!supplier) return res.status(404).json({ success: false, message: 'Supplier not found in the selected store' });

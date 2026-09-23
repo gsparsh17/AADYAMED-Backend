@@ -110,7 +110,7 @@ exports.createStore = async (req, res) => {
 
 exports.updateStore = async (req, res) => {
   try {
-    const { organization } = await provisionPharmacyTenant(req.user);
+    const { organization, profile } = await provisionPharmacyTenant(req.user);
     if (!['owner', 'admin', 'manager'].includes(req.user.organizationRole || 'owner')) {
       return res.status(403).json({ success: false, error: 'You cannot update pharmacy stores' });
     }
@@ -123,6 +123,32 @@ exports.updateStore = async (req, res) => {
     const allowed = ['name', 'licenseNumber', 'drugLicenseNumber', 'gstin', 'email', 'phone', 'address', 'operatingHours', 'settings', 'status'];
     const updates = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => allowed.includes(key)));
     updates.updatedBy = req.user._id;
+
+    const existing = await PharmacyStore.findOne({ _id: req.params.id, organizationId: organization._id });
+    if (!existing) return res.status(404).json({ success: false, error: 'Store not found' });
+
+    // The default store is the registered pharmacy — the one verification
+    // looked at — so its trading name, licences and GSTIN are frozen once the
+    // profile is approved. Additional branches were never verified on their
+    // own, so theirs stay editable.
+    if (existing.isDefault && ['approved', 'suspended'].includes(profile.verificationStatus)) {
+      const lockedFields = ['name', 'licenseNumber', 'drugLicenseNumber', 'gstin'];
+      const changed = lockedFields.filter((field) => {
+        if (updates[field] === undefined || updates[field] === null) return false;
+        const current = existing[field];
+        const currentText = String(current === undefined || current === null ? '' : current).trim();
+        // A blank field was never verified — first-time entry stays allowed.
+        if (currentText === '') return false;
+        return String(updates[field]).trim() !== currentText;
+      });
+      if (changed.length > 0) {
+        return res.status(403).json({
+          success: false,
+          message: `Your pharmacy is verified, so ${changed.join(', ')} can no longer be changed here. Contact support to update ${changed.length > 1 ? 'them' : 'it'}.`,
+          lockedFields: changed
+        });
+      }
+    }
 
     const store = await PharmacyStore.findOneAndUpdate(
       { _id: req.params.id, organizationId: organization._id },

@@ -583,9 +583,8 @@ exports.forceVerifyUser = async (req, res) => {
     const updatedUser = await User.findByIdAndUpdate(
       id,
       {
-        isVerified: true,
-        emailVerificationToken: undefined,
-        emailVerificationExpires: undefined
+        $set: { isVerified: true },
+        $unset: { emailVerificationToken: 1, emailVerificationExpires: 1 }
       },
       { new: true }
     );
@@ -603,31 +602,31 @@ exports.forceVerifyUser = async (req, res) => {
       case 'doctor':
         updatedProfile = await DoctorProfile.findOneAndUpdate(
           { userId: id },
-          verificationData,
+          { $set: verificationData },
           { new: true }
         );
         break;
-        
+
       case 'physio':
         updatedProfile = await PhysiotherapistProfile.findOneAndUpdate(
           { userId: id },
-          verificationData,
+          { $set: verificationData },
           { new: true }
         );
         break;
-        
+
       case 'pathology':
         updatedProfile = await PathologyProfile.findOneAndUpdate(
           { userId: id },
-          verificationData,
+          { $set: verificationData },
           { new: true }
         );
         break;
-        
+
       case 'pharmacy':
         updatedProfile = await PharmacyProfile.findOneAndUpdate(
           { userId: id },
-          verificationData,
+          { $set: verificationData },
           { new: true }
         );
         break;
@@ -1013,7 +1012,7 @@ exports.verifyProfessional = async (req, res) => {
     
     // Update user verification status if approved
     if (status === 'approved') {
-      await User.findByIdAndUpdate(professional.userId, { isVerified: true });
+      await User.findByIdAndUpdate(professional.userId, { $set: { isVerified: true } });
     }
     
     // Log the action
@@ -1069,7 +1068,7 @@ exports.updateProfessionalNotes = async (req, res) => {
     
     const professional = await Model.findByIdAndUpdate(
       id,
-      { adminNotes: notes },
+      { $set: { adminNotes: notes } },
       { new: true }
     );
     
@@ -1859,9 +1858,11 @@ exports.processPayout = async (req, res) => {
     await Commission.updateMany(
       { _id: { $in: commissionIds } },
       {
-        payoutStatus: 'processing',
-        payoutId: payout._id,
-        processingStartedAt: new Date()
+        $set: {
+          payoutStatus: 'processing',
+          payoutId: payout._id,
+          processingStartedAt: new Date()
+        }
       }
     );
     
@@ -2060,10 +2061,12 @@ exports.markPayoutAsPaid = async (req, res) => {
     await Commission.updateMany(
       { _id: { $in: payout.commissionIds } },
       {
-        payoutStatus: 'paid',
-        paidAt: paymentDate ? new Date(paymentDate) : new Date(),
-        transactionId: transactionId || null,
-        payoutNotes: notes || ''
+        $set: {
+          payoutStatus: 'paid',
+          paidAt: paymentDate ? new Date(paymentDate) : new Date(),
+          transactionId: transactionId || null,
+          payoutNotes: notes || ''
+        }
       }
     );
     
@@ -2472,10 +2475,10 @@ exports.updatePathologyLab = async (req, res) => {
     
     const lab = await PathologyProfile.findByIdAndUpdate(
       id,
-      updates,
+      { $set: updates },
       { new: true, runValidators: true }
     );
-    
+
     if (!lab) {
       return res.status(404).json({
         success: false,
@@ -2529,10 +2532,10 @@ exports.deletePathologyLab = async (req, res) => {
     }
     
     // Soft delete - mark as inactive
-    await PathologyProfile.findByIdAndUpdate(id, { isActive: false });
+    await PathologyProfile.findByIdAndUpdate(id, { $set: { isActive: false } });
     
     // Update user
-    await User.findByIdAndUpdate(lab.userId, { isActive: false });
+    await User.findByIdAndUpdate(lab.userId, { $set: { isActive: false } });
     
     res.json({
       success: true,
@@ -2682,10 +2685,16 @@ exports.updatePharmacy = async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-    
+
+    // Remove protected fields
+    delete updates.userId;
+    delete updates.verificationStatus;
+    delete updates.verifiedAt;
+    delete updates.verifiedBy;
+
     const pharmacy = await PharmacyProfile.findByIdAndUpdate(
       id,
-      updates,
+      { $set: updates },
       { new: true, runValidators: true }
     );
     
@@ -2729,10 +2738,10 @@ exports.deletePharmacy = async (req, res) => {
     }
     
     // Soft delete - mark as inactive (actually verificationStatus can be suspended or just change user isActive)
-    await PharmacyProfile.findByIdAndUpdate(id, { verificationStatus: 'suspended' });
+    await PharmacyProfile.findByIdAndUpdate(id, { $set: { verificationStatus: 'suspended' } });
     
     // Update user
-    await User.findByIdAndUpdate(pharmacy.userId, { isActive: false });
+    await User.findByIdAndUpdate(pharmacy.userId, { $set: { isActive: false } });
     
     res.json({
       success: true,

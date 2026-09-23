@@ -117,21 +117,33 @@ async function provisionPharmacyTenant(user, profile = null) {
     let code = `${baseCode}-${uniqueSuffix()}`;
     while (await Organization.exists({ code })) code = `${baseCode}-${uniqueSuffix()}`;
 
-    organization = await Organization.create({
-      name: pharmacyProfile.pharmacyName || user.name,
-      code,
-      type: 'independent_pharmacy',
-      ownerUserId: user._id,
-      contact: { email: pharmacyProfile.email || user.email, phone: pharmacyProfile.phone || user.phone },
-      address: {
-        street: pharmacyProfile.address?.street,
-        city: pharmacyProfile.address?.city,
-        state: pharmacyProfile.address?.state,
-        pincode: pharmacyProfile.address?.pincode,
-        country: 'India'
-      },
-      createdBy: user._id
-    });
+    try {
+      organization = await Organization.create({
+        name: pharmacyProfile.pharmacyName || user.name,
+        code,
+        type: 'independent_pharmacy',
+        ownerUserId: user._id,
+        contact: { email: pharmacyProfile.email || user.email, phone: pharmacyProfile.phone || user.phone },
+        address: {
+          street: pharmacyProfile.address?.street,
+          city: pharmacyProfile.address?.city,
+          state: pharmacyProfile.address?.state,
+          pincode: pharmacyProfile.address?.pincode,
+          country: 'India'
+        },
+        createdBy: user._id
+      });
+    } catch (error) {
+      // A concurrent request won the race and already created this owner's
+      // organization (unique index on ownerUserId for independent_pharmacy) —
+      // recover by using it instead of failing the request.
+      if (error?.code === 11000) {
+        organization = await Organization.findOne({ ownerUserId: user._id, type: 'independent_pharmacy' });
+        if (!organization) throw error;
+      } else {
+        throw error;
+      }
+    }
   }
 
   let store = null;
@@ -147,19 +159,31 @@ async function provisionPharmacyTenant(user, profile = null) {
   }
 
   if (!store) {
-    store = await PharmacyStore.create({
-      organizationId: organization._id,
-      pharmacyProfileId: pharmacyProfile._id,
-      name: pharmacyProfile.pharmacyName || user.name,
-      code: 'MAIN',
-      licenseNumber: pharmacyProfile.licenseNumber,
-      email: pharmacyProfile.email || user.email,
-      phone: pharmacyProfile.phone || user.phone,
-      address: pharmacyProfile.address || {},
-      operatingHours: pharmacyProfile.operatingHours,
-      isDefault: true,
-      createdBy: user._id
-    });
+    try {
+      store = await PharmacyStore.create({
+        organizationId: organization._id,
+        pharmacyProfileId: pharmacyProfile._id,
+        name: pharmacyProfile.pharmacyName || user.name,
+        code: 'MAIN',
+        licenseNumber: pharmacyProfile.licenseNumber,
+        email: pharmacyProfile.email || user.email,
+        phone: pharmacyProfile.phone || user.phone,
+        address: pharmacyProfile.address || {},
+        operatingHours: pharmacyProfile.operatingHours,
+        isDefault: true,
+        createdBy: user._id
+      });
+    } catch (error) {
+      // Same race as the organization above — the unique (organizationId,
+      // code) index means a concurrent request may have already created
+      // this store; recover by using it instead of failing the request.
+      if (error?.code === 11000) {
+        store = await PharmacyStore.findOne({ organizationId: organization._id, code: 'MAIN' });
+        if (!store) throw error;
+      } else {
+        throw error;
+      }
+    }
   }
 
   const storeIds = Array.from(new Set([

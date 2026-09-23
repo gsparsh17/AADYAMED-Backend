@@ -212,9 +212,11 @@ exports.createAppointment = async (req, res) => {
     try {
       if (referralId) {
         await Referral.findByIdAndUpdate(referralId, {
-          appointmentId: appointment._id,
-          status: 'appointment_booked',
-          selectedProfessional: { professionalId, professionalType, consultationFee },
+          $set: {
+            appointmentId: appointment._id,
+            status: 'appointment_booked',
+            selectedProfessional: { professionalId, professionalType, consultationFee },
+          },
         });
       }
     } catch (error) {

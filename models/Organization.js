@@ -32,5 +32,17 @@ const organizationSchema = new mongoose.Schema({
 
 organizationSchema.index({ ownerUserId: 1, status: 1 });
 organizationSchema.index({ name: 'text', code: 'text' });
+// Prevents the tenant-provisioning race in pharmacyTenant.service.js: without
+// this, two concurrent requests from a freshly-registered pharmacy (very
+// plausible — e.g. the dashboard loading inventory + sales + profile at once
+// right after signup) can both pass the "does an org exist?" check before
+// either creates one, producing two organizations/stores for the same owner
+// with their data invisibly split between them. Scoped to independent
+// pharmacies specifically, since that's the only type this provisioning path
+// creates — other org types may legitimately share an owner elsewhere.
+organizationSchema.index(
+  { ownerUserId: 1 },
+  { unique: true, partialFilterExpression: { type: 'independent_pharmacy' } }
+);
 
 module.exports = mongoose.model('Organization', organizationSchema);

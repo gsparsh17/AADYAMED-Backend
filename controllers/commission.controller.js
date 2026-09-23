@@ -640,10 +640,12 @@ exports.processPayout = async (req, res) => {
     // Update commissions status to processing
     await Commission.updateMany(
       { _id: { $in: commissionIds } },
-      { 
-        payoutStatus: 'processing',
-        payoutId: payout._id,
-        processingStartedAt: new Date()
+      {
+        $set: {
+          payoutStatus: 'processing',
+          payoutId: payout._id,
+          processingStartedAt: new Date()
+        }
       }
     );
     
@@ -838,11 +840,13 @@ exports.markPayoutAsPaid = async (req, res) => {
     // Update commissions to paid status
     await Commission.updateMany(
       { _id: { $in: payout.commissionIds } },
-      { 
-        payoutStatus: 'paid',
-        paidAt: paymentDate ? new Date(paymentDate) : new Date(),
-        transactionId: transactionId || null,
-        payoutNotes: notes || ''
+      {
+        $set: {
+          payoutStatus: 'paid',
+          paidAt: paymentDate ? new Date(paymentDate) : new Date(),
+          transactionId: transactionId || null,
+          payoutNotes: notes || ''
+        }
       }
     );
     

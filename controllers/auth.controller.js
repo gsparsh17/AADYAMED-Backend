@@ -7,6 +7,7 @@ const PathologyProfile = require('../models/PathologyProfile');
 const PharmacyProfile = require('../models/PharmacyProfile');
 const MRProfile = require('../models/MRProfile');
 const { generateToken }= require('../utils/generateToken');
+const otpService = require('../services/otp.service');
 const sendEmail = require('../utils/sendEmail');
 const { default: mongoose } = require('mongoose');
 const { provisionPharmacyTenant } = require('../services/pharmacyTenant.service');
@@ -88,6 +89,31 @@ const validateRegistrationData = (data) => {
  */
 exports.register = async (req, res) => {
   try {
+    // When the app signs a user up from the OTP screen it passes the token
+    // issued at verify time. Redeeming it here is what makes the phone
+    // trustworthy — and redeeming is single-use, so one verified number
+    // cannot be spun into many accounts.
+    if (req.body.verificationToken) {
+      const ok = await otpService.consumeVerification({
+        phone: req.body.phone,
+        verificationToken: req.body.verificationToken,
+        purpose: 'signup',
+      });
+      if (!ok) {
+        return res.status(401).json({ success: false, error: 'Phone verification has expired. Verify your number again.' });
+      }
+      req.body.phone = otpService.normalisePhone(req.body.phone);
+      req.body.phoneVerified = true;
+
+      // Refuse to add a second account to a number that already has one:
+      // that is exactly how the ambiguous rows already in the database were
+      // created, and each one permanently locks that number out of OTP login.
+      const taken = await User.exists({ phone: req.body.phone });
+      if (taken) {
+        return res.status(409).json({ success: false, error: 'An account already exists for this mobile number. Sign in instead.' });
+      }
+    }
+
     const { email, password, role, phone, name } = req.body;
     
     // Validate input data
@@ -356,6 +382,127 @@ async function resolveProfileForUser(user) {
 
   return null;
 }
+
+/**
+ * The single account a phone number identifies.
+ *
+ * `phone` is required on User but **not unique**, and real data already has
+ * numbers shared by several accounts. Signing in "the" user for such a number
+ * would mean `findOne` picking one arbitrarily — a doctor could land in a
+ * pharmacy's dashboard. So an ambiguous number is refused outright rather
+ * than resolved by luck.
+ */
+async function resolveUserByPhone(phone) {
+  const matches = await User.find({ phone }).limit(2);
+  if (matches.length > 1) {
+    const error = new Error(
+      'Several accounts use this mobile number, so it cannot be used to sign in. Please sign in with your email and password, or contact support.',
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  return matches[0] || null;
+}
+
+/**
+ * Phone + OTP authentication.
+ *
+ * Sign-in and sign-up share one challenge flow but stay separate purposes, so
+ * a code issued to sign in cannot be replayed to create an account.
+ */
+exports.sendLoginOtp = async (req, res) => {
+  try {
+    const phone = otpService.normalisePhone(req.body.phone);
+    if (!phone) return res.status(400).json({ success: false, error: 'Enter a valid 10-digit mobile number' });
+
+    const existing = await resolveUserByPhone(phone);
+    const purpose = existing ? 'login' : 'signup';
+
+    // The response says which flow the caller is in, so the app can go
+    // straight to "create your account" instead of failing at verify time.
+    // It does not say whether the *account* exists in any other terms, which
+    // is the same thing any OTP login discloses by necessity.
+    if (existing && existing.isActive === false) {
+      return res.status(403).json({ success: false, error: 'Your account has been deactivated. Please contact support.' });
+    }
+
+    const result = await otpService.sendOtp({ phone, purpose, ip: getClientIp(req) });
+    res.json({ success: true, purpose, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Verifies the code. An existing user is signed straight in; a new number gets
+ * a single-use `verificationToken` to hand to the register call.
+ */
+exports.verifyLoginOtp = async (req, res) => {
+  try {
+    const phone = otpService.normalisePhone(req.body.phone);
+    if (!phone) return res.status(400).json({ success: false, error: 'Enter a valid 10-digit mobile number' });
+
+    const existing = await resolveUserByPhone(phone);
+    const purpose = existing ? 'login' : 'signup';
+    const verified = await otpService.verifyOtp({ phone, code: req.body.code, purpose });
+
+    if (!existing) {
+      // Nothing is created here — the account is made by /register, which
+      // needs a name, role and profile details this endpoint does not have.
+      return res.json({
+        success: true,
+        registered: false,
+        phone,
+        verificationToken: verified.verificationToken,
+        nextStep: 'register',
+      });
+    }
+
+    if (existing.isActive === false) {
+      return res.status(403).json({ success: false, error: 'Your account has been deactivated. Please contact support.' });
+    }
+
+    await existing.updateLastLogin(getClientIp(req));
+    const token = generateToken(existing._id);
+    const resolved = await resolveProfileForUser(existing);
+    const resolvedProfileId = resolved?.profileId || existing.profileId || null;
+    const resolvedProfileModel = resolved?.profileModel || existing.profileModel || null;
+
+    if (resolved && (!existing.profileId || String(existing.profileId) !== String(resolvedProfileId))) {
+      existing.profileId = resolvedProfileId;
+      existing.profileModel = resolvedProfileModel;
+      existing.profileCompleted = true;
+      await existing.save();
+    }
+
+    res.json({
+      success: true,
+      registered: true,
+      token,
+      user: {
+        id: existing._id,
+        email: existing.email,
+        name: existing.name,
+        role: existing.role,
+        phone: existing.phone,
+        isVerified: existing.isVerified,
+        profileCompleted: !!resolvedProfileId,
+        profileId: resolvedProfileId,
+        profileModel: resolvedProfileModel,
+        status: existing.status,
+        preferences: existing.preferences,
+        organizationId: existing.organizationId || null,
+        organizationRole: existing.organizationRole || null,
+        pharmacyStoreIds: existing.pharmacyStoreIds || [],
+        defaultPharmacyStoreId: existing.defaultPharmacyStoreId || null,
+      },
+      profile: resolved?.profile || null,
+      nextStep: resolvedProfileId ? null : 'complete-profile',
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+};
 
 exports.login = async (req, res) => {
   try {
@@ -713,7 +860,7 @@ exports.updateProfile = async (req, res) => {
     const userId = req.user.id;
     const user = req.user;
     const updates = req.body;
-    
+
     // Check if profile exists
     if (!user.profileCompleted || !user.profileId || !user.profileModel) {
       return res.status(400).json({
@@ -721,43 +868,53 @@ exports.updateProfile = async (req, res) => {
         error: 'Please complete your profile first'
       });
     }
-    
+
+    // This endpoint is reachable by any authenticated professional — never
+    // let client input touch admin-controlled/financial/computed fields
+    // (mass-assignment: without this, a doctor could PUT
+    // { verificationStatus: 'approved', commissionRate: 0 } and self-approve).
+    [
+      'userId', 'verificationStatus', 'adminNotes', 'verifiedAt', 'verifiedBy',
+      'totalEarnings', 'totalConsultations', 'totalTestsConducted', 'averageRating',
+      'totalReviews', 'pendingCommission', 'paidCommission', 'commissionRate',
+      'isActive'
+    ].forEach((key) => delete updates[key]);
+
     let profile;
-    
+
     switch(user.profileModel) {
       case 'DoctorProfile':
         profile = await DoctorProfile.findOneAndUpdate(
           { userId },
-          updates,
+          { $set: updates },
           { new: true, runValidators: true }
         );
         break;
       case 'PhysiotherapistProfile':
         profile = await PhysiotherapistProfile.findOneAndUpdate(
           { userId },
-          updates,
+          { $set: updates },
           { new: true, runValidators: true }
         );
         break;
       case 'PatientProfile':
         profile = await PatientProfile.findOneAndUpdate(
           { userId },
-          updates,
+          { $set: updates },
           { new: true, runValidators: true }
         );
         break;
       case 'PathologyProfile':
         profile = await PathologyProfile.findOneAndUpdate(
           { userId },
-          updates,
+          { $set: updates },
           { new: true, runValidators: true }
         );
         break;
-      case 'Pharmacy':
-        const Pharmacy = require('../models/Pharmacy');
-        profile = await Pharmacy.findOneAndUpdate(
+      case 'PharmacyProfile':
+        profile = await PharmacyProfile.findOneAndUpdate(
           { userId },
-          updates,
+          { $set: updates },
           { new: true, runValidators: true }
         );
         break;

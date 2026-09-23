@@ -6,6 +6,9 @@ const EPharmacyOrder = require('../models/EPharmacyOrder');
 const PaymentAttempt = require('../models/PaymentAttempt');
 const PaymentWebhookEvent = require('../models/PaymentWebhookEvent');
 const { createNotification } = require('../services/notification.service');
+const CounterPayment = require('../models/CounterPayment');
+const counterPaymentController = require('./counterPayment.controller');
+const { notifyNewPharmacyOrder } = require('../services/pharmacyOrderAlert.service');
 
 const ENTITY_MODELS = {
   appointment: Appointment,
@@ -79,6 +82,11 @@ async function markEntityPaid(attempt, paymentId) {
   }
 
   await entity.save();
+
+  // A prepaid pharmacy order only reaches the store once payment clears, so
+  // this is the moment it becomes a new order from their point of view.
+  if (attempt.entityType === 'pharmacy_order') await notifyNewPharmacyOrder(entity);
+
   return entity;
 }
 
@@ -258,8 +266,22 @@ exports.handleRazorpayWebhook = async (req, res) => {
   try {
     const payment = payload.payload?.payment?.entity;
     const refund = payload.payload?.refund?.entity;
+    const qrCode = payload.payload?.qr_code?.entity;
 
-    if (payload.event === 'payment.captured' && payment?.order_id) {
+    // Counter QR collection. A QR payment has no Razorpay *order* id, so it
+    // never matches a PaymentAttempt — it settles against CounterPayment
+    // instead, through the same applyPayment() the polling endpoint uses.
+    if (payload.event === 'qr_code.credited' && qrCode?.id && payment?.id) {
+      const counterPayment = await CounterPayment.findOne({ qrId: qrCode.id });
+      if (!counterPayment) throw new Error('Counter payment not found for credited QR');
+      await counterPaymentController._applyPayment(counterPayment, {
+        paymentId: payment.id,
+        amountPaise: payment.amount,
+        vpa: payment.vpa,
+      });
+      eventDoc.gatewayPaymentId = payment.id;
+      eventDoc.status = 'processed';
+    } else if (payload.event === 'payment.captured' && payment?.order_id) {
       const attempt = await PaymentAttempt.findOne({ gatewayOrderId: payment.order_id });
       if (!attempt) throw new Error('Payment attempt not found for captured payment');
       if (Number(payment.amount) !== Number(attempt.amountPaise)) throw new Error('Captured amount does not match payment attempt');
@@ -280,10 +302,12 @@ exports.handleRazorpayWebhook = async (req, res) => {
       await PaymentAttempt.findOneAndUpdate(
         { gatewayOrderId: payment.order_id },
         {
-          status: 'failed',
-          gatewayPaymentId: payment.id,
-          failureCode: payment.error_code,
-          failureDescription: payment.error_description,
+          $set: {
+            status: 'failed',
+            gatewayPaymentId: payment.id,
+            failureCode: payment.error_code,
+            failureDescription: payment.error_description,
+          },
         },
       );
       eventDoc.gatewayOrderId = payment.order_id;
@@ -296,7 +320,7 @@ exports.handleRazorpayWebhook = async (req, res) => {
         attempt.refundedAt = new Date();
         await attempt.save();
         const Model = ENTITY_MODELS[attempt.entityType];
-        await Model.findByIdAndUpdate(attempt.entityId, { paymentStatus: 'refunded' });
+        await Model.findByIdAndUpdate(attempt.entityId, { $set: { paymentStatus: 'refunded' } });
       }
       eventDoc.gatewayPaymentId = refund.payment_id;
       eventDoc.status = 'processed';

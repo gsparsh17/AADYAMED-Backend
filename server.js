@@ -11,6 +11,7 @@ const User = require('./models/User');
 const ChatMessage = require('./models/ChatMessage');
 const ChatSession = require('./models/ChatSession');
 const { canUserAccessSession } = require('./services/chatAuthorization.service');
+const { logIntegrationStatus } = require('./services/integrationStatus.service');
 
 function allowedSocketOrigins() {
   const configured = [
@@ -114,8 +115,7 @@ const startServer = async () => {
           });
 
           await ChatSession.findByIdAndUpdate(session._id, {
-            lastMessage: msg._id,
-            updatedAt: new Date(),
+            $set: { lastMessage: msg._id, updatedAt: new Date() },
           });
 
           io.to(String(session._id)).emit('receive_message', msg.toJSON());
@@ -134,11 +134,30 @@ const startServer = async () => {
 
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
+      // Printed once at boot so a silently-disabled integration is a decision
+      // rather than something discovered when an order goes unanswered.
+      logIntegrationStatus();
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
     process.exit(1);
   }
 };
+
+// Without these, one unhandled rejection or uncaught exception anywhere in
+// this large codebase silently kills the process for every pharmacy at once,
+// with no log trail. Exiting (rather than continuing) is deliberate — process
+// state after an uncaught exception can't be trusted — so this must run under
+// a supervisor (pm2/systemd) configured to restart on exit; see ecosystem
+// config / package.json for the pm2 setup.
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled promise rejection:', reason);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught exception:', error);
+  process.exit(1);
+});
 
 startServer();

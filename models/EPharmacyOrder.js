@@ -6,6 +6,12 @@ const orderItemSchema = new mongoose.Schema({
   medicineName: String,
   genericName: String,
   quantity: { type: Number, required: true, min: 1 },
+  // What the customer asked for, kept when the pharmacy can only supply part
+  // of it. `quantity` stays the figure everything downstream bills, allocates
+  // and ships, so nothing else has to learn about short supply; a line where
+  // orderedQuantity > quantity was short-supplied, and one at quantity 0 was
+  // dropped entirely.
+  orderedQuantity: { type: Number, min: 0 },
   unit: String,
   hsnCode: String,
   prescriptionRequired: Boolean,
@@ -95,7 +101,18 @@ const schema = new mongoose.Schema({
     deliveredAt: Date
   },
   fulfillmentSaleId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacySale' },
+  // Set when the pharmacy accepted the order for less than was asked for.
+  partiallyFulfilled: { type: Boolean, default: false },
+  fulfilmentNote: String,
   cancellationReason: String,
+  // Set only when the store declined a new order, as opposed to cancelling one
+  // it had already accepted. Kept separate from cancellationReason (free text)
+  // so acceptance/rejection rates can be aggregated.
+  rejectionReason: {
+    type: String,
+    enum: ['out_of_stock', 'store_closed', 'cannot_fulfil', 'prescription_invalid', 'address_not_serviceable', 'other'],
+    index: true
+  },
   cancelledAt: Date,
   cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }

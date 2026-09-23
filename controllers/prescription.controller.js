@@ -142,7 +142,7 @@ async function issueDocument(prescription, user) {
       { $set: { status: 'superseded' } }
     );
   }
-  await Appointment.findByIdAndUpdate(prescription.appointmentId, { prescriptionId: prescription._id });
+  await Appointment.findByIdAndUpdate(prescription.appointmentId, { $set: { prescriptionId: prescription._id } });
   await notifyIssued(prescription);
   return prescription;
 }
@@ -187,7 +187,7 @@ exports.createPrescription = async (req, res) => {
       createdBy: req.user._id || req.user.id
     });
 
-    await Appointment.findByIdAndUpdate(appointmentId, { prescriptionId: prescription._id });
+    await Appointment.findByIdAndUpdate(appointmentId, { $set: { prescriptionId: prescription._id } });
     if (!requestedDraft) await issueDocument(prescription, req.user);
 
     return res.status(201).json({ success: true, prescription });

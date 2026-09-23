@@ -13,6 +13,12 @@ router.post('/resend-verification', authController.resendVerification);
 // Login
 router.post('/login', authController.login);
 
+// Phone + OTP. One challenge flow serves both signing in and signing up: the
+// send call reports which of the two the number is in, so the app can route
+// straight to registration for a new number.
+router.post('/otp/send', authController.sendLoginOtp);
+router.post('/otp/verify', authController.verifyLoginOtp);
+
 // Password Management
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password/:token', authController.resetPassword);

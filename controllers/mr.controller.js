@@ -614,7 +614,7 @@ exports.updateTeamMember = asyncHandler(async (req, res) => {
   });
 
   const profile = await MRProfile
-    .findByIdAndUpdate(req.params.id, updates, {
+    .findByIdAndUpdate(req.params.id, { $set: updates }, {
       new: true,
       runValidators: true
     })
@@ -630,7 +630,7 @@ exports.updateTeamMember = asyncHandler(async (req, res) => {
   if (req.body.isActive !== undefined) {
     await User.updateOne(
       { _id: profile.userId._id },
-      { isActive: Boolean(req.body.isActive) }
+      { $set: { isActive: Boolean(req.body.isActive) } }
     );
   }
 
@@ -733,9 +733,14 @@ exports.updateTerritory = asyncHandler(async (req, res) => {
     }
   }
 
+  const territoryUpdates = { ...req.body };
+  delete territoryUpdates._id;
+  delete territoryUpdates.createdBy;
+  delete territoryUpdates.createdAt;
+
   const territory = await MRTerritory.findByIdAndUpdate(
     req.params.id,
-    req.body,
+    { $set: territoryUpdates },
     { new: true, runValidators: true }
   );
 
@@ -2068,9 +2073,13 @@ exports.updateDetailing = asyncHandler(async (req, res) => {
     }
   }
 
+  const detailingUpdates = { ...req.body };
+  delete detailingUpdates._id;
+  delete detailingUpdates.createdByUserId;
+
   const content = await MRDetailingContent.findByIdAndUpdate(
     req.params.id,
-    req.body,
+    { $set: detailingUpdates },
     { new: true, runValidators: true }
   );
 

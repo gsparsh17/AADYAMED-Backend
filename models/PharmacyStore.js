@@ -46,7 +46,12 @@ const pharmacyStoreSchema = new mongoose.Schema({
     codEnabled: { type: Boolean, default: true },
     onlinePaymentEnabled: { type: Boolean, default: true },
     estimatedDeliveryMinutes: { type: Number, default: 120, min: 15 },
-    allowReturns: { type: Boolean, default: true }
+    allowReturns: { type: Boolean, default: true },
+    // A temporary "too busy right now" stop, distinct from `enabled`.
+    // `enabled: false` means the store is not on the platform; this means it
+    // is, but cannot take orders until this moment passes. Null = open.
+    pausedUntil: { type: Date, default: null },
+    pauseReason: { type: String, trim: true }
   },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }

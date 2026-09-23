@@ -259,9 +259,9 @@ async function updateProfessionalRating(feedback) {
     };
     
     if (feedback.professionalType === 'doctor') {
-      await DoctorProfile.findByIdAndUpdate(feedback.professionalId, updateData);
+      await DoctorProfile.findByIdAndUpdate(feedback.professionalId, { $set: updateData });
     } else {
-      await PhysiotherapistProfile.findByIdAndUpdate(feedback.professionalId, updateData);
+      await PhysiotherapistProfile.findByIdAndUpdate(feedback.professionalId, { $set: updateData });
     }
   }
 }

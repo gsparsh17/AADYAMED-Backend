@@ -4,12 +4,19 @@ const medicineController = require('../controllers/medicine.controller');
 const { protect, authorize } = require('../middlewares/auth');
 const { resolvePharmacyTenant } = require('../middlewares/pharmacyTenant');
 const { requireOrganizationRole } = require('../middlewares/organizationAccess');
+const bulkUpload = require('../middlewares/medicineBulkUpload');
 
 router.use(protect);
 router.use(authorize('admin', 'pharmacy'));
+
+// Static template — no tenant/store context needed to download it.
+router.get('/bulk-upload/template', medicineController.downloadBulkUploadTemplate);
+router.get('/catalog/search', medicineController.searchMedicineCatalog);
+
 router.use(resolvePharmacyTenant);
 
 router.post('/', requireOrganizationRole('owner','admin','manager','inventory','pharmacist'), medicineController.createMedicine);
+router.post('/bulk-upload', requireOrganizationRole('owner','admin','manager','inventory','pharmacist'), bulkUpload.single('file'), medicineController.bulkUploadMedicines);
 router.get('/', medicineController.getAllMedicines);
 router.get('/search', medicineController.searchMedicines);
 router.get('/low-stock', medicineController.getLowStockMedicines);

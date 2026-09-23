@@ -9,6 +9,8 @@ const PatientProfile = require('../models/PatientProfile');
 const EPharmacyAddress = require('../models/EPharmacyAddress');
 const EPharmacyCart = require('../models/EPharmacyCart');
 const EPharmacyPrescriptionUpload = require('../models/EPharmacyPrescriptionUpload');
+const { notifyNewPharmacyOrder } = require('../services/pharmacyOrderAlert.service');
+const { settlePharmacyOrder, storeSettlementSummary, previewOrderSettlement } = require('../services/pharmacySettlement.service');
 const EPharmacyCoupon = require('../models/EPharmacyCoupon');
 const EPharmacyOrder = require('../models/EPharmacyOrder');
 const PharmacySale = require('../models/PharmacySale');
@@ -34,6 +36,43 @@ async function releaseCoupon(order) {
   // Defensive clamp for legacy/manual data.
   await EPharmacyCoupon.updateOne({ _id: order.couponId, usageCount: { $lt: 0 } }, { $set: { usageCount: 0 } });
   return true;
+}
+
+/**
+ * Refunds part of a paid order — used when the pharmacy can only supply some
+ * of what was ordered.
+ *
+ * Separate from refundOnlinePayment, which refunds the whole payment and ends
+ * the order. Here the order carries on for the items that *are* available, so
+ * paymentStatus stays 'paid' and only refundAmount grows.
+ */
+async function refundDifference(order, amount, reason) {
+  const paise = Math.round(Number(amount || 0) * 100);
+  if (paise <= 0) return { attempted: false };
+  if (order.paymentMethod !== 'online' || order.paymentStatus !== 'paid') return { attempted: false };
+  if (!order.razorpayPaymentId && !order.paymentId) {
+    order.refundFailure = 'Payment ID is unavailable for a partial refund';
+    return { attempted: false, pending: true };
+  }
+  const gateway = getRazorpayClient();
+  if (!gateway) {
+    order.refundFailure = 'Razorpay is not configured';
+    return { attempted: false, pending: true };
+  }
+  try {
+    const refund = await gateway.payments.refund(order.razorpayPaymentId || order.paymentId, {
+      amount: paise,
+      notes: { orderNumber: order.orderNumber, reason: String(reason || 'Partial fulfilment').slice(0, 240) }
+    });
+    order.refundId = refund.id;
+    order.refundAmount = money(Number(order.refundAmount || 0) + Number(refund.amount || 0) / 100);
+    order.refundedAt = new Date();
+    order.refundFailure = undefined;
+    return { attempted: true, refunded: true, amount: money(Number(refund.amount || 0) / 100) };
+  } catch (error) {
+    order.refundFailure = error?.error?.description || error.message;
+    return { attempted: true, refunded: false, error: order.refundFailure };
+  }
 }
 
 async function refundOnlinePayment(order, reason) {
@@ -107,6 +146,12 @@ function ecommerceSettings(store) {
   };
 }
 
+/** True while a store has paused itself and the pause has not yet lapsed. */
+function isStorePaused(store) {
+  const until = store?.ecommerce?.pausedUntil;
+  return Boolean(until) && new Date(until) > new Date();
+}
+
 function isPincodeServiceable(store, pincode) {
   const pins = ecommerceSettings(store).serviceablePincodes.filter(Boolean);
   return !pins.length || !pincode || pins.includes(String(pincode));
@@ -135,7 +180,15 @@ function linePrice(medicine, quantity) {
 
 async function getStore(storeId) {
   if (!mongoose.isValidObjectId(storeId)) return null;
-  return PharmacyStore.findOne({ _id: storeId, status: 'active', 'ecommerce.enabled': { $ne: false } });
+  const store = await PharmacyStore.findOne({ _id: storeId, status: 'active', 'ecommerce.enabled': { $ne: false } });
+  // A paused store stays visible but stops accepting: the customer is told it
+  // is busy rather than the pharmacy quietly vanishing mid-checkout.
+  if (store && isStorePaused(store)) {
+    const error = new Error(store.ecommerce.pauseReason || 'This pharmacy is not accepting orders right now');
+    error.statusCode = 409;
+    throw error;
+  }
+  return store;
 }
 
 async function resolveCoupon({ code, store, patientId, merchandiseTotal }) {
@@ -334,7 +387,7 @@ exports.listStores = async (req, res) => {
     if (q) filter.name = new RegExp(String(q), 'i');
     const stores = await PharmacyStore.find(filter).sort({ isDefault: -1, name: 1 }).lean();
     const filtered = pincode ? stores.filter(s => isPincodeServiceable(s, pincode)) : stores;
-    res.json({ success: true, stores: filtered.map(s => ({ ...s, ecommerce: ecommerceSettings(s), serviceable: isPincodeServiceable(s, pincode) })) });
+    res.json({ success: true, stores: filtered.map(s => ({ ...s, ecommerce: ecommerceSettings(s), serviceable: isPincodeServiceable(s, pincode), paused: isStorePaused(s) })) });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
 };
 
@@ -419,7 +472,7 @@ exports.createAddress = async (req, res) => {
     res.status(201).json({ success: true, address });
   } catch (e) { res.status(400).json({ success: false, message: e.message }); }
 };
-exports.updateAddress = async (req, res) => { try { const patientId = requirePatient(req); if (req.body.isDefault) await EPharmacyAddress.updateMany({ patientId }, { $set: { isDefault: false } }); const address = await EPharmacyAddress.findOneAndUpdate({ _id: req.params.id, patientId }, req.body, { new: true, runValidators: true }); if (!address) return res.status(404).json({ success: false, message: 'Address not found' }); res.json({ success: true, address }); } catch (e) { res.status(400).json({ success: false, message: e.message }); } };
+exports.updateAddress = async (req, res) => { try { const patientId = requirePatient(req); if (req.body.isDefault) await EPharmacyAddress.updateMany({ patientId }, { $set: { isDefault: false } }); const address = await EPharmacyAddress.findOneAndUpdate({ _id: req.params.id, patientId }, { $set: req.body }, { new: true, runValidators: true }); if (!address) return res.status(404).json({ success: false, message: 'Address not found' }); res.json({ success: true, address }); } catch (e) { res.status(400).json({ success: false, message: e.message }); } };
 exports.deleteAddress = async (req, res) => { try { const patientId = requirePatient(req); const address = await EPharmacyAddress.findOneAndDelete({ _id: req.params.id, patientId }); if (!address) return res.status(404).json({ success: false, message: 'Address not found' }); if (address.isDefault) { const next = await EPharmacyAddress.findOne({ patientId }).sort({ createdAt: -1 }); if (next) { next.isDefault = true; await next.save(); } } res.json({ success: true }); } catch (e) { res.status(500).json({ success: false, message: e.message }); } };
 exports.setDefaultAddress = async (req, res) => { try { const patientId = requirePatient(req); const address = await EPharmacyAddress.findOne({ _id: req.params.id, patientId }); if (!address) return res.status(404).json({ success: false, message: 'Address not found' }); await EPharmacyAddress.updateMany({ patientId }, { $set: { isDefault: false } }); address.isDefault = true; await address.save(); res.json({ success: true, address }); } catch (e) { res.status(500).json({ success: false, message: e.message }); } };
 
@@ -477,6 +530,9 @@ exports.createOrder = async (req, res) => {
     });
     if (priced.coupon) await EPharmacyCoupon.updateOne({ _id: priced.coupon._id }, { $inc: { usageCount: 1 }, $push: { redemptions: { patientId, orderId: order._id, redeemedAt: new Date() } } });
     await EPharmacyCart.findOneAndUpdate({ patientId }, { $set: { items: [], prescriptionId: null, prescriptionUploadId: null } });
+    // An order awaiting payment is not yet the pharmacy's problem — the alert
+    // for those fires from the payment webhook once the money is in.
+    if (initialStatus !== 'payment_pending') await notifyNewPharmacyOrder(order);
     res.status(201).json({ success: true, order });
   } catch (e) { res.status(e.statusCode || 400).json({ success: false, message: e.message }); }
 };
@@ -507,11 +563,38 @@ exports.listMerchantOrders = async (req, res) => {
     const filter = { organizationId: req.tenant.organizationId, storeId: req.tenant.storeId };
     if (status) filter.orderStatus = status; if (prescriptionStatus) filter.prescriptionStatus = prescriptionStatus; if (q) filter.orderNumber = new RegExp(String(q), 'i');
     const p = Math.max(1, Number(page) || 1), l = Math.min(100, Math.max(1, Number(limit) || 30));
-    const [orders, total] = await Promise.all([EPharmacyOrder.find(filter).populate('patientId', 'name phone email').sort({ createdAt: -1 }).skip((p - 1) * l).limit(l), EPharmacyOrder.countDocuments(filter)]);
+    const [orders, total] = await Promise.all([
+      EPharmacyOrder.find(filter)
+        .populate('patientId', 'name phone email')
+        .populate('prescriptionUploadId', 'originalName mimeType status createdAt')
+        .sort({ createdAt: -1 }).skip((p - 1) * l).limit(l),
+      EPharmacyOrder.countDocuments(filter)
+    ]);
     res.json({ success: true, orders, pagination: { page: p, limit: l, total, pages: Math.ceil(total / l) } });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
-exports.getMerchantOrder = async (req, res) => { try { const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }).populate('patientId', 'name phone email').populate('prescriptionId'); if (!order) return res.status(404).json({ success: false, message: 'Order not found' }); res.json({ success: true, order }); } catch (e) { res.status(500).json({ success: false, message: e.message }); } };
+exports.getMerchantOrder = async (req, res) => {
+  try {
+    const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId })
+      .populate('patientId', 'name phone email')
+      // The prescriber is the first thing a pharmacist checks on a
+      // prescription, so the doctor/physio is populated through rather than
+      // left as a bare ObjectId. The upload record carries the file the
+      // patient photographed.
+      .populate({
+        path: 'prescriptionId',
+        populate: [
+          { path: 'doctorId', select: 'name specialization licenseNumber clinicName' },
+          { path: 'physioId', select: 'name specialization licenseNumber' }
+        ]
+      })
+      .populate('prescriptionUploadId', 'originalName mimeType size status reviewNotes reviewedAt createdAt');
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    // What this order is worth to the pharmacy after the platform's cut.
+    const settlement = await previewOrderSettlement(order);
+    res.json({ success: true, order, settlement });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
 exports.reviewPrescription = async (req, res) => {
   try {
     const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }); if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -529,6 +612,123 @@ exports.reviewPrescription = async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
+/**
+ * Declines an order the store cannot fulfil.
+ *
+ * Distinct from `cancelMerchantOrder`, which is for an order already accepted
+ * and in progress. Rejection is the first-response verdict — out of stock,
+ * store closed, cannot fulfil — and it is the only honest way to say no: the
+ * previous options were "confirm" (which allocates stock) or "cancel" (which
+ * reads to the customer as the pharmacy backing out after agreeing).
+ *
+ * The customer outcome is the same either way — the order ends and an online
+ * payment is refunded — but the reason is recorded, which is what makes
+ * acceptance rate measurable later.
+ */
+const REJECTION_REASONS = {
+  out_of_stock: 'Some items are out of stock',
+  store_closed: 'The pharmacy is closed right now',
+  cannot_fulfil: 'The pharmacy cannot fulfil this order',
+  prescription_invalid: 'The prescription is not valid for these medicines',
+  address_not_serviceable: 'This address is not serviceable',
+  other: 'The pharmacy declined this order'
+};
+
+exports.rejectMerchantOrder = async (req, res) => {
+  try {
+    const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.fulfillmentSaleId) return res.status(409).json({ success: false, message: 'This order was already accepted — cancel it instead' });
+    if (!['placed', 'prescription_review', 'payment_pending'].includes(order.orderStatus)) {
+      return res.status(409).json({ success: false, message: 'Only a new order can be rejected' });
+    }
+
+    const code = String(req.body.reason || 'other');
+    if (!REJECTION_REASONS[code]) {
+      return res.status(400).json({ success: false, message: 'Unknown rejection reason', reasons: Object.keys(REJECTION_REASONS) });
+    }
+    const note = String(req.body.note || '').trim();
+    const reason = note ? `${REJECTION_REASONS[code]} — ${note}` : REJECTION_REASONS[code];
+
+    order.statusHistory.push({ status: order.orderStatus, note: `Rejected by pharmacy: ${reason}`, actorId: req.user.id });
+    order.rejectionReason = code;
+    const refund = await finalizeCancellation(order, reason, req.user.id);
+    res.json({ success: true, order, refund, reason });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
+};
+
+exports.rejectionReasons = (_req, res) =>
+  res.json({ success: true, reasons: Object.entries(REJECTION_REASONS).map(([code, label]) => ({ code, label })) });
+
+/**
+ * Reduces an order to what the pharmacy can actually supply.
+ *
+ * `availability` is a map of order-item id -> quantity the store can provide.
+ * Lines are scaled proportionally rather than re-priced, because every money
+ * field on a line (listed, discount, taxable, tax, total) was derived from the
+ * same per-unit price at checkout; scaling keeps them internally consistent
+ * and keeps the customer on the price they agreed to.
+ *
+ * Returns null when nothing was reduced, so the caller can tell a full
+ * acceptance from a partial one.
+ */
+function applyAvailability(order, availability) {
+  if (!availability || typeof availability !== 'object') return null;
+
+  let changed = false;
+  const shortfalls = [];
+
+  for (const item of order.items) {
+    const key = String(item._id);
+    if (!Object.prototype.hasOwnProperty.call(availability, key)) continue;
+
+    const ordered = Number(item.orderedQuantity ?? item.quantity);
+    const raw = Number(availability[key]);
+    if (!Number.isFinite(raw)) continue;
+    const supplied = Math.max(0, Math.min(ordered, Math.floor(raw)));
+    if (supplied === ordered) continue;
+
+    const ratio = ordered > 0 ? supplied / ordered : 0;
+    item.orderedQuantity = ordered;
+    item.quantity = supplied;
+    item.listedAmount = money(Number(item.listedAmount || 0) * ratio);
+    item.medicineDiscount = money(Number(item.medicineDiscount || 0) * ratio);
+    item.taxableAmount = money(Number(item.taxableAmount || 0) * ratio);
+    item.taxAmount = money(Number(item.taxAmount || 0) * ratio);
+    item.totalAmount = money(Number(item.totalAmount || 0) * ratio);
+    changed = true;
+    shortfalls.push(`${item.medicineName}: ${supplied} of ${ordered}`);
+  }
+
+  if (!changed) return null;
+
+  const kept = order.items.filter((i) => Number(i.quantity) > 0);
+  if (kept.length === 0) return { empty: true, shortfalls };
+
+  const previousTotal = money(order.totalAmount);
+  const merchandise = kept.reduce((sum, i) => sum + Number(i.listedAmount || 0), 0);
+  const originalMerchandise = Number(order.subtotal || 0) || merchandise;
+  const couponRatio = originalMerchandise > 0 ? merchandise / originalMerchandise : 0;
+
+  order.items = kept;
+  order.subtotal = money(merchandise);
+  order.medicineDiscount = money(kept.reduce((sum, i) => sum + Number(i.medicineDiscount || 0), 0));
+  order.tax = money(kept.reduce((sum, i) => sum + Number(i.taxAmount || 0), 0));
+  // The coupon shrinks with the basket it was applied to. The delivery fee
+  // does not: the trip still happens, and re-charging a customer who had
+  // qualified for free delivery would be worse than absorbing it.
+  order.couponDiscount = money(Number(order.couponDiscount || 0) * couponRatio);
+  order.totalAmount = money(
+    order.subtotal - order.medicineDiscount - order.couponDiscount + order.tax + Number(order.deliveryFee || 0)
+  );
+  order.partiallyFulfilled = true;
+  order.fulfilmentNote = shortfalls.join('; ');
+
+  return { empty: false, shortfalls, previousTotal, refundDue: money(Math.max(0, previousTotal - order.totalAmount)) };
+}
+
 exports.confirmMerchantOrder = async (req, res) => {
   try {
     const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }).populate('patientId', 'name phone email');
@@ -537,6 +737,14 @@ exports.confirmMerchantOrder = async (req, res) => {
     if (!['placed'].includes(order.orderStatus)) return res.status(409).json({ success: false, message: 'Order is not ready for confirmation' });
     if (order.prescriptionRequired && order.prescriptionStatus !== 'approved') return res.status(409).json({ success: false, message: 'Prescription must be approved first' });
     if (order.paymentMethod === 'online' && order.paymentStatus !== 'paid') return res.status(409).json({ success: false, message: 'Online payment is not complete' });
+
+    // The pharmacy may accept for less than was ordered. Applied before stock
+    // is touched so FEFO consumes only what is actually being supplied.
+    const reduction = applyAvailability(order, req.body.availability);
+    if (reduction?.empty) {
+      return res.status(400).json({ success: false, message: 'Nothing can be supplied — reject the order instead' });
+    }
+
     const scope = { organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }; const completed = []; let cogs = 0;
     try {
       for (const item of order.items) {
@@ -550,7 +758,32 @@ exports.confirmMerchantOrder = async (req, res) => {
         items: order.items.map(i => ({ medicineId: i.medicineId, batchId: i.batchAllocations?.[0]?.batchId, batchAllocations: i.batchAllocations, medicineName: i.medicineName, genericName: i.genericName, quantity: i.quantity, unit: i.unit, sellingPrice: i.unitPrice, discount: i.medicineDiscount, taxRate: i.taxRate, priceIncludesTax: true, hsnCode: i.hsnCode, taxableAmount: i.taxableAmount, taxAmount: i.taxAmount, totalAmount: i.totalAmount, costAmount: money((i.batchAllocations || []).reduce((s, a) => s + Number(a.purchasePrice || 0) * Number(a.quantity || 0), 0)) })),
         prescriptionRequired: order.prescriptionRequired, subtotal: order.subtotal, discount: money(order.medicineDiscount + order.couponDiscount), tax: order.tax, totalAmount: order.totalAmount, paidAmount: order.paymentStatus === 'paid' ? order.totalAmount : 0, balanceAmount: order.paymentStatus === 'paid' ? 0 : order.totalAmount, paymentMethod: order.paymentMethod === 'online' ? 'online' : 'cash', paymentReference: order.razorpayPaymentId, paymentStatus: order.paymentStatus === 'paid' ? 'paid' : 'pending', costOfGoods: cogs, grossProfit: money(order.subtotal - cogs), status: 'dispensed', invoiceNumber: `INV-${order.orderNumber}`, dispensedBy: req.user.id, dispensedAt: new Date(), deliveryInstructions: order.deliveryInstructions, createdBy: req.user.id
       });
-      order.fulfillmentSaleId = sale._id; order.orderStatus = 'confirmed'; order.statusHistory.push({ status: 'confirmed', note: 'Accepted by pharmacy and stock allocated', actorId: req.user.id }); await order.save(); res.json({ success: true, order, sale });
+      order.fulfillmentSaleId = sale._id;
+      order.orderStatus = 'confirmed';
+      order.statusHistory.push({
+        status: 'confirmed',
+        note: reduction
+          ? `Accepted with changes — ${reduction.shortfalls.join('; ')}`
+          : 'Accepted by pharmacy and stock allocated',
+        actorId: req.user.id
+      });
+
+      // Refund the difference before saving, so a failed refund is recorded on
+      // the same document as the reduced total it belongs to.
+      let refund = null;
+      if (reduction && reduction.refundDue > 0) {
+        refund = await refundDifference(order, reduction.refundDue, `Partial fulfilment of ${order.orderNumber}`);
+        order.statusHistory.push({
+          status: order.orderStatus,
+          note: refund?.refunded
+            ? `Refunded ${refund.amount} for items not supplied`
+            : `Refund of ${reduction.refundDue} could not be raised: ${order.refundFailure || 'unknown error'}`,
+          actorId: req.user.id
+        });
+      }
+
+      await order.save();
+      res.json({ success: true, order, sale, reduction: reduction || null, refund });
     } catch (error) {
       for (const done of completed.reverse()) for (const allocation of done.allocations) await addToBatch({ scope, medicineId: done.item.medicineId, batchId: allocation.batchId, quantity: allocation.quantity, actorId: req.user.id, adjustmentType: 'addition', reason: `Rollback online order ${order.orderNumber}`, referenceType: 'online_order', referenceId: order._id }).catch(err => console.error('Online order rollback failed', err));
       throw error;
@@ -568,8 +801,25 @@ exports.updateMerchantStatus = async (req, res) => {
     if (req.body.tracking) order.tracking = { ...order.tracking.toObject?.() || order.tracking, ...req.body.tracking };
     if (target === 'shipped') order.tracking.shippedAt = new Date(); if (target === 'out_for_delivery') order.tracking.outForDeliveryAt = new Date();
     if (target === 'delivered') { order.tracking.deliveredAt = new Date(); if (order.paymentMethod === 'cod') { order.paymentStatus = 'paid'; order.paymentDate = new Date(); if (order.fulfillmentSaleId) await PharmacySale.updateOne({ _id: order.fulfillmentSaleId }, { $set: { paymentStatus: 'paid', paidAmount: order.totalAmount, balanceAmount: 0 } }); } }
-    await order.save(); res.json({ success: true, order });
+    await order.save();
+    // Delivery is when the pharmacy has earned the money, so that is when the
+    // platform records what it owes them.
+    if (target === 'delivered') await settlePharmacyOrder(order, req.user.id);
+    res.json({ success: true, order });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+/**
+ * What the platform owes this store, and what it has already paid — the
+ * merchant's view of settlement, which is different from their own P&L.
+ */
+exports.merchantSettlement = async (req, res) => {
+  try {
+    const summary = await storeSettlementSummary(req.tenant.storeId, { limit: Number(req.query.limit) || 50 });
+    res.json({ success: true, ...summary });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
 };
 
 exports.cancelMerchantOrder = async (req, res) => {
@@ -599,7 +849,30 @@ exports.retryMerchantRefund = async (req, res) => {
 
 exports.listCoupons = async (req, res) => { try { res.json({ success: true, coupons: await EPharmacyCoupon.find({ organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }).sort({ createdAt: -1 }) }); } catch (e) { res.status(500).json({ success: false, message: e.message }); } };
 exports.createCoupon = async (req, res) => { try { const coupon = await EPharmacyCoupon.create({ ...req.body, code: String(req.body.code || '').toUpperCase(), organizationId: req.tenant.organizationId, storeId: req.tenant.storeId, createdBy: req.user.id, updatedBy: req.user.id }); res.status(201).json({ success: true, coupon }); } catch (e) { res.status(400).json({ success: false, message: e.code === 11000 ? 'Coupon code already exists for this store' : e.message }); } };
-exports.updateCoupon = async (req, res) => { try { const coupon = await EPharmacyCoupon.findOneAndUpdate({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }, { ...req.body, updatedBy: req.user.id }, { new: true, runValidators: true }); if (!coupon) return res.status(404).json({ success: false, message: 'Coupon not found' }); res.json({ success: true, coupon }); } catch (e) { res.status(400).json({ success: false, message: e.message }); } };
-exports.updateOnlineSettings = async (req, res) => { try { const allowed = ['enabled', 'serviceablePincodes', 'minOrderAmount', 'deliveryFee', 'freeDeliveryThreshold', 'codEnabled', 'onlinePaymentEnabled', 'estimatedDeliveryMinutes', 'allowReturns']; const set = {}; for (const key of allowed) if (Object.prototype.hasOwnProperty.call(req.body, key)) set[`ecommerce.${key}`] = req.body[key]; const store = await PharmacyStore.findOneAndUpdate({ _id: req.tenant.storeId, organizationId: req.tenant.organizationId }, { $set: set }, { new: true, runValidators: true }); res.json({ success: true, store }); } catch (e) { res.status(400).json({ success: false, message: e.message }); } };
+exports.updateCoupon = async (req, res) => { try { const coupon = await EPharmacyCoupon.findOneAndUpdate({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }, { $set: { ...req.body, updatedBy: req.user.id } }, { new: true, runValidators: true }); if (!coupon) return res.status(404).json({ success: false, message: 'Coupon not found' }); res.json({ success: true, coupon }); } catch (e) { res.status(400).json({ success: false, message: e.message }); } };
+exports.updateOnlineSettings = async (req, res) => { try { const allowed = ['enabled', 'serviceablePincodes', 'minOrderAmount', 'deliveryFee', 'freeDeliveryThreshold', 'codEnabled', 'onlinePaymentEnabled', 'estimatedDeliveryMinutes', 'allowReturns', 'pausedUntil', 'pauseReason']; const set = {}; for (const key of allowed) if (Object.prototype.hasOwnProperty.call(req.body, key)) set[`ecommerce.${key}`] = req.body[key]; const store = await PharmacyStore.findOneAndUpdate({ _id: req.tenant.storeId, organizationId: req.tenant.organizationId }, { $set: set }, { new: true, runValidators: true }); res.json({ success: true, store }); } catch (e) { res.status(400).json({ success: false, message: e.message }); } };
+
+/**
+ * Pause or resume a store without taking it off the platform.
+ *
+ * `minutes: 0` (or omitted) resumes. A pause is always an explicit end time
+ * rather than an open-ended flag, so a store cannot be accidentally left shut
+ * overnight — the worst case is that it reopens on its own.
+ */
+exports.setStorePause = async (req, res) => {
+  try {
+    const minutes = Math.max(0, Math.min(24 * 60, Number(req.body.minutes) || 0));
+    const pausedUntil = minutes > 0 ? new Date(Date.now() + minutes * 60 * 1000) : null;
+    const store = await PharmacyStore.findOneAndUpdate(
+      { _id: req.tenant.storeId, organizationId: req.tenant.organizationId },
+      { $set: { 'ecommerce.pausedUntil': pausedUntil, 'ecommerce.pauseReason': minutes > 0 ? String(req.body.reason || '').trim() || undefined : undefined } },
+      { new: true, runValidators: true }
+    );
+    if (!store) return res.status(404).json({ success: false, message: 'Store not found' });
+    res.json({ success: true, store, pausedUntil });
+  } catch (e) {
+    res.status(400).json({ success: false, message: e.message });
+  }
+};
 
 module.exports._helpers = { linePrice, ecommerceSettings };

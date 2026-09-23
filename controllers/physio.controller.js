@@ -638,7 +638,7 @@ exports.updateProfile = async (req, res) => {
     if (!physio) return res.status(404).json({ success: false, error: 'Physiotherapist profile not found' });
 
     if (updates.email && physio.userId) {
-      await User.findByIdAndUpdate(physio.userId, { email: updates.email });
+      await User.findByIdAndUpdate(physio.userId, { $set: { email: updates.email } });
     }
 
     if (updates.availability && JSON.stringify(currentPhysio.availability) !== JSON.stringify(updates.availability)) {
@@ -1046,7 +1046,7 @@ exports.updatePhysio = async (req, res) => {
     delete updates.pendingCommission;
     delete updates.paidCommission;
 
-    const physio = await PhysiotherapistProfile.findByIdAndUpdate(physioId, updates, {
+    const physio = await PhysiotherapistProfile.findByIdAndUpdate(physioId, { $set: updates }, {
       new: true,
       runValidators: true
     }).populate('userId', 'email');
@@ -1054,7 +1054,7 @@ exports.updatePhysio = async (req, res) => {
     if (!physio) return res.status(404).json({ success: false, error: 'Physiotherapist not found' });
 
     if (updates.email && physio.userId) {
-      await User.findByIdAndUpdate(physio.userId, { email: updates.email });
+      await User.findByIdAndUpdate(physio.userId, { $set: { email: updates.email } });
     }
 
     if (updates.availability) {

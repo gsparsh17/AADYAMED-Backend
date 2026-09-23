@@ -26,6 +26,12 @@ const commissionSettingsSchema = new mongoose.Schema({
     min: 0,
     max: 100
   },
+  defaultPharmacyCommission: {
+    type: Number,
+    default: 10,
+    min: 0,
+    max: 100
+  },
   
   // Tiered Commission Structure
   tieredCommissionEnabled: {

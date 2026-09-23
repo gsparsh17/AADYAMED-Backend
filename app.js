@@ -61,8 +61,30 @@ require('./models/MRDetailingContent');
 
 // Middleware - Security
 app.use(helmet()); // Set security headers
+// Supports multiple deployed origins (e.g. web app + marketing site) via a
+// comma-separated CORS_ORIGINS, falling back to the single FRONTEND_URL for
+// backward compatibility. Mobile apps (Flutter) aren't subject to CORS.
+const allowedOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:3000')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+// Flutter web's dev server picks a random port each run, so a fixed
+// CORS_ORIGINS entry can't track it. Outside production, allow any
+// localhost/127.0.0.1 origin regardless of port; production still enforces
+// the explicit allowlist above.
+const isLocalDevOrigin = (origin) =>
+  process.env.NODE_ENV !== 'production' &&
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin(origin, callback) {
+    // Allow non-browser requests (no Origin header, e.g. curl/mobile) through.
+    if (!origin || allowedOrigins.includes(origin) || isLocalDevOrigin(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true
 }));
 
@@ -206,6 +228,12 @@ app.use('/api/commission', require('./routes/comission.routes'));
 app.use('/api/invoice', require('./routes/invoice.routes'));
 app.use('/api/billing', require('./routes/billing.routes'));
 app.use('/api/payment', require('./routes/payment.routes'));
+// Was never mounted — the web frontend's IncomePage.jsx already calls
+// /revenue, /revenue/daily, /revenue/monthly directly and was a live 404.
+app.use('/api/revenue', require('./routes/revenue.routes'));
+// Was never mounted either — doctor/ReportsPage.jsx already calls
+// /labreports directly and was a live 404.
+app.use('/api/labreports', require('./routes/labreport.routes'));
 
 // Support Routes
 app.use('/api/feedback', require('./routes/feedback.routes'));
@@ -233,6 +261,7 @@ app.use('/api/orders/purchase', require('./routes/purchaseOrder.routes'));
 app.use('/api/orders/purchase-orders', require('./routes/purchaseOrder.routes'));
 app.use('/api/orders/sale', require('./routes/pharmacySale.routes'));
 app.use('/api/sales', require('./routes/pharmacySale.routes'));
+app.use('/api/counter-payments', require('./routes/counterPayment.routes'));
 app.use('/api/stock-adjustments', require('./routes/stockAdjustment.routes'));
 app.use('/api/pharmacy-erp', require('./routes/inventory.routes'));
 app.use('/api/epharmacy', require('./routes/ePharmacy.routes'));
