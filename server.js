@@ -137,6 +137,8 @@ const startServer = async () => {
       // Printed once at boot so a silently-disabled integration is a decision
       // rather than something discovered when an order goes unanswered.
       logIntegrationStatus();
+      // Once the DB is up and the server is listening.
+      require('./jobs/pharmacyOrderTimeoutJob').start();
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

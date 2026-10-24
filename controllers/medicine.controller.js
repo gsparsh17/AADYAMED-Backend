@@ -104,11 +104,42 @@ exports.createMedicine = async (req, res) => {
   }
 };
 
+/**
+ * One medicine by its exact barcode, in the caller's branch. Backs the
+ * professional app's scanner: a scan should land on the product, not on a
+ * search results list.
+ */
+exports.getMedicineByBarcode = async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim();
+    if (!code) return res.status(400).json({ success: false, message: 'Barcode is required' });
+    const medicine = await Medicine.findOne(scopedFilter(req, { barcode: code }));
+    if (!medicine) {
+      return res.status(404).json({ success: false, message: 'No medicine with this barcode in this branch' });
+    }
+    res.json({ success: true, medicine: withLegacyMedicineFields(medicine) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
 exports.getAllMedicines = async (req, res) => {
   try {
     const { search, category, isActive, is_active, lowStock, page = 1, limit = 20 } = req.query;
     const filter = scopedFilter(req);
-    if (search) filter.$text = { $search: search };
+    if (search) {
+      // Partial, case-insensitive match plus an exact barcode hit. The old
+      // $text query matched whole words only ("dol" never found "Dolo 650")
+      // and ignored barcodes entirely. Store-scoped, so a regex scan is cheap.
+      const term = String(search).trim().slice(0, 80);
+      const pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { medicineName: pattern },
+        { genericName: pattern },
+        { brandName: pattern },
+        { barcode: term },
+      ];
+    }
     if (category) filter.category = category;
     if (req.query['stock_quantity[gt]'] !== undefined) {
       filter.quantity = { $gt: Number(req.query['stock_quantity[gt]']) || 0 };

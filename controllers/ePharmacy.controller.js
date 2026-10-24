@@ -570,7 +570,12 @@ exports.listMerchantOrders = async (req, res) => {
         .sort({ createdAt: -1 }).skip((p - 1) * l).limit(l),
       EPharmacyOrder.countDocuments(filter)
     ]);
-    res.json({ success: true, orders, pagination: { page: p, limit: l, total, pages: Math.ceil(total / l) } });
+    res.json({
+      success: true,
+      orders: orders.map(withDeadline),
+      acceptWindowMinutes: { placed: acceptWindowMinutes('placed'), prescription_review: acceptWindowMinutes('prescription_review') },
+      pagination: { page: p, limit: l, total, pages: Math.ceil(total / l) }
+    });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 exports.getMerchantOrder = async (req, res) => {
@@ -592,7 +597,7 @@ exports.getMerchantOrder = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     // What this order is worth to the pharmacy after the platform's cut.
     const settlement = await previewOrderSettlement(order);
-    res.json({ success: true, order, settlement });
+    res.json({ success: true, order: withDeadline(order), settlement });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 exports.reviewPrescription = async (req, res) => {
@@ -631,8 +636,101 @@ const REJECTION_REASONS = {
   cannot_fulfil: 'The pharmacy cannot fulfil this order',
   prescription_invalid: 'The prescription is not valid for these medicines',
   address_not_serviceable: 'This address is not serviceable',
-  other: 'The pharmacy declined this order'
+  other: 'The pharmacy declined this order',
+  // Set by the timeout job, not offered to pharmacists in the reject sheet.
+  no_response: 'The pharmacy did not respond in time'
 };
+
+// ── Acceptance window ─────────────────────────────────────────────────────
+// A new order the store never answers would otherwise wait forever while the
+// customer hears nothing. Each waiting order gets a deadline; the timeout job
+// rejects it (and refunds an online payment) once that passes. Prescription
+// orders get longer because reading a prescription takes longer.
+const WAITING_STATUSES = ['placed', 'prescription_review'];
+
+function acceptWindowMinutes(status) {
+  const fromEnv = status === 'prescription_review'
+    ? Number(process.env.PHARMACY_RX_REVIEW_MINUTES)
+    : Number(process.env.PHARMACY_ACCEPT_MINUTES);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return status === 'prescription_review' ? 30 : 15;
+}
+
+/** When this order started waiting on the store — its latest arrival in a waiting status. */
+function waitingSince(order) {
+  const history = Array.isArray(order.statusHistory) ? order.statusHistory : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (WAITING_STATUSES.includes(history[i].status) && history[i].at) return new Date(history[i].at);
+  }
+  return new Date(order.createdAt);
+}
+
+/** The moment this order is auto-rejected if nobody responds, or null. */
+function acceptDeadline(order) {
+  if (!WAITING_STATUSES.includes(order.orderStatus) || order.fulfillmentSaleId) return null;
+  return new Date(waitingSince(order).getTime() + acceptWindowMinutes(order.orderStatus) * 60000);
+}
+
+/** Adds `acceptBy` so the app's countdown matches the server exactly. */
+function withDeadline(order) {
+  const obj = typeof order.toObject === 'function' ? order.toObject() : { ...order };
+  const deadline = acceptDeadline(order);
+  if (deadline) obj.acceptBy = deadline.toISOString();
+  return obj;
+}
+
+/**
+ * Rejects every waiting order whose deadline has passed. Run by
+ * jobs/pharmacyOrderTimeoutJob every minute. Returns how many were rejected.
+ */
+async function autoRejectStaleOrders(now = new Date()) {
+  // Nothing can be overdue that has waited less than the shortest window.
+  const shortest = Math.min(acceptWindowMinutes('placed'), acceptWindowMinutes('prescription_review'));
+  const candidates = await EPharmacyOrder.find({
+    orderStatus: { $in: WAITING_STATUSES },
+    fulfillmentSaleId: null,
+    updatedAt: { $lte: new Date(now.getTime() - shortest * 60000) },
+  }).limit(200);
+
+  let rejected = 0;
+  for (const order of candidates) {
+    const deadline = acceptDeadline(order);
+    if (!deadline || deadline > now) continue;
+    try {
+      const minutes = acceptWindowMinutes(order.orderStatus);
+      const reason = REJECTION_REASONS.no_response;
+      order.statusHistory.push({
+        status: order.orderStatus,
+        note: `Auto-rejected: not accepted within ${minutes} minutes`,
+      });
+      order.rejectionReason = 'no_response';
+      await finalizeCancellation(order, reason, null);
+      rejected += 1;
+      notifyStoreOfTimeout(order, minutes);
+    } catch (error) {
+      console.error(`Auto-reject failed for order ${order._id}:`, error.message);
+    }
+  }
+  return rejected;
+}
+
+/** Tells the store it lost an order to the timeout, so it shows in their list. */
+function notifyStoreOfTimeout(order, minutes) {
+  const { storeStaff } = require('../services/pharmacyOrderAlert.service');
+  const { createNotification } = require('../services/notification.service');
+  storeStaff(order.storeId, order.organizationId)
+    .then((recipients) => Promise.all(recipients.map((userId) => createNotification({
+      userId,
+      title: 'Order cancelled — no response',
+      message: `${order.orderNumber} was not accepted within ${minutes} minutes and has been cancelled.`,
+      type: 'order',
+      channels: ['in_app', 'push'],
+      relatedEntity: 'pharmacy_order',
+      relatedEntityId: order._id,
+      data: { entityType: 'pharmacy_order', orderId: String(order._id) },
+    }).catch(() => null))))
+    .catch((error) => console.error('Timeout notification failed:', error.message));
+}
 
 exports.rejectMerchantOrder = async (req, res) => {
   try {
@@ -875,4 +973,5 @@ exports.setStorePause = async (req, res) => {
   }
 };
 
-module.exports._helpers = { linePrice, ecommerceSettings };
+module.exports._helpers = { linePrice, ecommerceSettings, acceptDeadline, acceptWindowMinutes };
+module.exports.autoRejectStaleOrders = autoRejectStaleOrders;

@@ -39,7 +39,10 @@ function stringifyData(data = {}) {
  * Returns a result rather than throwing: a failed push must never take down
  * the order, payment or notification write that triggered it.
  */
-async function sendToExternalIds(userIds, { title, body, data = {}, priority } = {}) {
+async function sendToExternalIds(
+  userIds,
+  { title, body, data = {}, priority, androidChannel, ttlSeconds } = {},
+) {
   const creds = credentials();
   if (!creds) return { attempted: 0, skipped: 'onesignal_not_configured' };
 
@@ -58,8 +61,16 @@ async function sendToExternalIds(userIds, { title, body, data = {}, priority } =
     // Android needs an explicit high priority for the notification to arrive
     // promptly while the device is dozing — which is the whole point of a
     // new-order alert.
-    priority: priority === 'high' ? 10 : 5,
-    android_channel_name: 'Orders',
+    priority: priority === 'high' || priority === 'urgent' ? 10 : 5,
+    // A channel the app itself creates (see the professional app's push
+    // service). This was `android_channel_name`, which is not a OneSignal
+    // field and was ignored — so order alerts played as ordinary
+    // notifications instead of on the loud "New orders" channel.
+    existing_android_channel_id: androidChannel || 'aadya_pro_high_importance',
+    ...(priority === 'high' || priority === 'urgent'
+      ? { ios_interruption_level: 'time_sensitive', ios_sound: 'default' }
+      : {}),
+    ...(ttlSeconds ? { ttl: ttlSeconds } : {}),
   };
 
   try {

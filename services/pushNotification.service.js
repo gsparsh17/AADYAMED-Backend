@@ -57,6 +57,8 @@ async function sendPushToUser(userId, payload) {
       body: payload.body,
       data: payload.data,
       priority: payload.priority,
+      androidChannel: payload.androidChannel,
+      ttlSeconds: payload.ttlSeconds,
     });
     return {
       attempted: result.attempted || 0,
@@ -83,6 +85,7 @@ async function sendPushToUser(userId, payload) {
   }
 
   const tokens = registrations.map((item) => item.token);
+  const isHigh = payload.priority === 'high' || payload.priority === 'urgent';
   const data = {};
   for (const [key, value] of Object.entries(payload.data || {})) {
     if (value !== undefined && value !== null) data[key] = String(value);
@@ -95,10 +98,29 @@ async function sendPushToUser(userId, payload) {
       body: String(payload.body || ''),
     },
     data,
-    android: { priority: payload.priority === 'urgent' ? 'high' : 'normal' },
+    // 'high' and 'urgent' both need FCM high priority: a normal-priority
+    // message can be held for many minutes while the phone dozes, which for
+    // a new-order alert means a missed order. Previously only 'urgent' was
+    // treated as high, so new orders (sent as 'high') went out as normal.
+    android: {
+      priority: isHigh ? 'high' : 'normal',
+      ...(payload.ttlSeconds ? { ttl: payload.ttlSeconds * 1000 } : {}),
+      notification: {
+        // Must match a channel the app creates; Android plays that
+        // channel's sound and importance.
+        channelId: payload.androidChannel || 'aadya_pro_high_importance',
+        sound: 'default',
+        defaultVibrateTimings: true,
+      },
+    },
     apns: {
-      headers: { 'apns-priority': payload.priority === 'urgent' ? '10' : '5' },
-      payload: { aps: { sound: 'default' } },
+      headers: { 'apns-priority': isHigh ? '10' : '5' },
+      payload: {
+        aps: {
+          sound: 'default',
+          ...(isHigh ? { 'interruption-level': 'time-sensitive' } : {}),
+        },
+      },
     },
   };
 

@@ -54,6 +54,10 @@ async function notifyNewPharmacyOrder(order) {
           type: 'order',
           priority: 'high',
           channels: ['in_app', 'push'],
+          androidChannel: 'pharmacy_orders',
+          // An order alert that arrives after the customer has given up is
+          // noise; the in-app list still has it.
+          ttlSeconds: 600,
           relatedEntity: 'pharmacy_order',
           relatedEntityId: order._id,
           data: {
@@ -93,8 +97,22 @@ async function sendDailyWelcome(user) {
   });
   if (alreadySent) return { sent: false, reason: 'already_sent_today' };
 
-  const hour = new Date().getHours();
-  const part = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  // India time, not the server's clock (often UTC), and no "Good morning"
+  // between midnight and 5am.
+  const hour = Number(
+    new Intl.DateTimeFormat('en-IN', {
+      hour: 'numeric',
+      hourCycle: 'h23',
+      timeZone: 'Asia/Kolkata',
+    }).format(new Date()),
+  );
+  const part = hour < 5
+    ? 'Hello'
+    : hour < 12
+      ? 'Good morning'
+      : hour < 17
+        ? 'Good afternoon'
+        : 'Good evening';
   const firstName = String(user.name || '').trim().split(' ')[0] || 'there';
 
   const stores = await PharmacyStore.find({

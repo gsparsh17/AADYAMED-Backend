@@ -26,6 +26,9 @@ async function createNotification(input) {
         title: notification.title,
         body: notification.message,
         priority: notification.priority,
+        // Not stored on the notification: delivery hints for the push only.
+        androidChannel: input.androidChannel,
+        ttlSeconds: input.ttlSeconds,
         data: {
           notificationId: notification._id,
           type: notification.type,

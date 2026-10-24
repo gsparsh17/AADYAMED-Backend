@@ -22,6 +22,7 @@ router.get('/search', medicineController.searchMedicines);
 router.get('/low-stock', medicineController.getLowStockMedicines);
 router.get('/expiring', medicineController.getExpiringMedicines);
 router.get('/expired', medicineController.getExpiredMedicines);
+router.get('/barcode/:code', medicineController.getMedicineByBarcode);
 router.get('/:id', medicineController.getMedicineById);
 router.put('/:id', requireOrganizationRole('owner','admin','manager','inventory','pharmacist'), medicineController.updateMedicine);
 router.delete('/:id', requireOrganizationRole('owner','admin','manager','inventory'), medicineController.deleteMedicine);
