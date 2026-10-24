@@ -66,6 +66,20 @@ const schema = new mongoose.Schema({
     index: true
   },
   prescriptionReviewNotes: String,
+  // What the pharmacist verified before approving. The prescriber's
+  // registration and the prescription date also go into the Schedule H1/X
+  // register when the order is accepted.
+  prescriptionCheck: {
+    prescriberName: String,
+    prescriberRegistration: String,
+    prescriptionDate: Date,
+    signaturePresent: Boolean,
+    patientMatches: Boolean,
+    medicinesMatch: Boolean,
+    withinValidity: Boolean,
+    checkedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    checkedAt: Date
+  },
   couponId: { type: mongoose.Schema.Types.ObjectId, ref: 'EPharmacyCoupon' },
   couponCode: String,
   subtotal: { type: Number, default: 0 },
@@ -110,7 +124,8 @@ const schema = new mongoose.Schema({
   // so acceptance/rejection rates can be aggregated.
   rejectionReason: {
     type: String,
-    enum: ['out_of_stock', 'store_closed', 'cannot_fulfil', 'prescription_invalid', 'address_not_serviceable', 'other'],
+    // no_response: set by the acceptance-timeout job, never by a pharmacist.
+    enum: ['out_of_stock', 'store_closed', 'cannot_fulfil', 'prescription_invalid', 'address_not_serviceable', 'other', 'no_response'],
     index: true
   },
   cancelledAt: Date,

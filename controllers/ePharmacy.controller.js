@@ -14,7 +14,9 @@ const { settlePharmacyOrder, storeSettlementSummary, previewOrderSettlement } = 
 const EPharmacyCoupon = require('../models/EPharmacyCoupon');
 const EPharmacyOrder = require('../models/EPharmacyOrder');
 const PharmacySale = require('../models/PharmacySale');
-const { consumeFefo, addToBatch } = require('../services/inventory.service');
+const ScheduledDrugRegister = require('../models/ScheduledDrugRegister');
+const { generateOrderInvoicePdf, generatePackingSlipPdf } = require('../utils/pharmacyOrderPdf');
+const { consumeFefo, addToBatch, aggregateAvailable } = require('../services/inventory.service');
 
 const money = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const norm = value => String(value || '').trim().toLowerCase();
@@ -612,6 +614,29 @@ exports.reviewPrescription = async (req, res) => {
       const refund = await finalizeCancellation(order, req.body.notes || 'Prescription rejected', req.user.id);
       return res.json({ success: true, order, refund });
     }
+    // Approving needs the checks a pharmacist is legally answerable for. Old
+    // app builds send no checklist; they are still accepted so a store isn't
+    // locked out mid-update, but anything sent must be complete.
+    const check = req.body.checklist;
+    if (check && typeof check === 'object') {
+      const required = ['signaturePresent', 'patientMatches', 'medicinesMatch', 'withinValidity'];
+      const missing = required.filter((k) => check[k] !== true);
+      if (missing.length || !String(check.prescriberRegistration || '').trim()) {
+        return res.status(400).json({ success: false, message: 'Complete every check and enter the doctor\'s registration number before approving' });
+      }
+      const date = check.prescriptionDate ? new Date(check.prescriptionDate) : null;
+      order.prescriptionCheck = {
+        prescriberName: String(check.prescriberName || '').trim() || undefined,
+        prescriberRegistration: String(check.prescriberRegistration).trim(),
+        prescriptionDate: date && !Number.isNaN(date.getTime()) ? date : undefined,
+        signaturePresent: true,
+        patientMatches: true,
+        medicinesMatch: true,
+        withinValidity: true,
+        checkedBy: req.user.id,
+        checkedAt: new Date()
+      };
+    }
     if (order.orderStatus === 'prescription_review') order.orderStatus = 'placed';
     order.statusHistory.push({ status: order.orderStatus, note: `Prescription approved${req.body.notes ? `: ${req.body.notes}` : ''}`, actorId: req.user.id }); await order.save(); res.json({ success: true, order });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -881,6 +906,10 @@ exports.confirmMerchantOrder = async (req, res) => {
       }
 
       await order.save();
+      // After the save: a register failure must not undo an accepted order,
+      // but it is logged loudly because the entry is a legal record.
+      await recordScheduledDispensing(order, sale, completed, req.user.id)
+        .catch((err) => console.error(`Schedule register entry failed for ${order.orderNumber}:`, err));
       res.json({ success: true, order, sale, reduction: reduction || null, refund });
     } catch (error) {
       for (const done of completed.reverse()) for (const allocation of done.allocations) await addToBatch({ scope, medicineId: done.item.medicineId, batchId: allocation.batchId, quantity: allocation.quantity, actorId: req.user.id, adjustmentType: 'addition', reason: `Rollback online order ${order.orderNumber}`, referenceType: 'online_order', referenceId: order._id }).catch(err => console.error('Online order rollback failed', err));
@@ -888,6 +917,151 @@ exports.confirmMerchantOrder = async (req, res) => {
     }
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, message: e.message }); }
 };
+
+/** Writes one register line per scheduled medicine in an accepted order. */
+async function recordScheduledDispensing(order, sale, completed, actorId) {
+  const ids = order.items.filter((i) => i.quantity > 0).map((i) => i.medicineId);
+  if (!ids.length) return;
+  const scheduled = await Medicine.find({ _id: { $in: ids }, schedule: { $in: ['Schedule H', 'Schedule H1', 'Schedule X'] } })
+    .select('schedule strength');
+  if (!scheduled.length) return;
+  const byId = new Map(scheduled.map((m) => [String(m._id), m]));
+
+  const full = await EPharmacyOrder.findById(order._id)
+    .populate('patientId', 'name phone')
+    .populate({ path: 'prescriptionId', populate: [{ path: 'doctorId', select: 'name licenseNumber' }, { path: 'physioId', select: 'name licenseNumber' }] })
+    .lean();
+  const rx = full?.prescriptionId;
+  const prescriber = rx?.doctorId || rx?.physioId;
+  const check = order.prescriptionCheck || {};
+  const a = order.deliveryAddress || {};
+
+  const entries = completed
+    .filter(({ item }) => byId.has(String(item.medicineId)))
+    .map(({ item, allocations }) => {
+      const med = byId.get(String(item.medicineId));
+      return {
+        organizationId: order.organizationId,
+        storeId: order.storeId,
+        schedule: med.schedule,
+        source: 'online_order',
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        saleId: sale?._id,
+        medicineId: item.medicineId,
+        medicineName: item.medicineName,
+        genericName: item.genericName,
+        strength: med.strength,
+        quantity: item.quantity,
+        batches: (allocations || []).map((x) => ({ batchNumber: x.batchNumber, expiryDate: x.expiryDate, quantity: x.quantity })),
+        patientName: full?.patientId?.name || a.contactName,
+        patientPhone: full?.patientId?.phone || a.phone,
+        patientAddress: [a.line1, a.line2, a.city, a.state, a.pincode].filter(Boolean).join(', '),
+        prescriberName: check.prescriberName || prescriber?.name,
+        prescriberRegistration: check.prescriberRegistration || prescriber?.licenseNumber,
+        prescriptionDate: check.prescriptionDate || rx?.createdAt,
+        prescriptionRef: rx?.prescriptionNumber || (order.prescriptionUploadId ? `Upload ${order.prescriptionUploadId}` : undefined),
+        dispensedBy: actorId,
+        dispensedAt: new Date()
+      };
+    });
+  if (entries.length) await ScheduledDrugRegister.insertMany(entries);
+}
+
+/** GET /merchant/schedule-register?schedule=&from=&to=&page= */
+exports.scheduleRegister = async (req, res) => {
+  try {
+    const filter = { organizationId: req.tenant.organizationId, storeId: req.tenant.storeId };
+    if (['Schedule H', 'Schedule H1', 'Schedule X'].includes(req.query.schedule)) filter.schedule = req.query.schedule;
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
+    if ((from && !Number.isNaN(from.getTime())) || (to && !Number.isNaN(to.getTime()))) {
+      filter.dispensedAt = {};
+      if (from && !Number.isNaN(from.getTime())) filter.dispensedAt.$gte = from;
+      if (to && !Number.isNaN(to.getTime())) filter.dispensedAt.$lte = to;
+    }
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const [entries, total] = await Promise.all([
+      ScheduledDrugRegister.find(filter).sort({ dispensedAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      ScheduledDrugRegister.countDocuments(filter)
+    ]);
+    res.json({ success: true, entries, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+/**
+ * In-stock medicines at this store with the same generic (salt) as an order
+ * line — what the pharmacist can offer when that brand is short. Same
+ * strength sorts first; a different strength is still shown, flagged, since
+ * the pharmacist may adjust the quantity with the customer.
+ */
+exports.orderSubstitutes = async (req, res) => {
+  try {
+    const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }).select('items').lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const scope = { organizationId: req.tenant.organizationId, storeId: req.tenant.storeId };
+    const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const wanted = req.query.medicineId ? order.items.filter((i) => String(i.medicineId) === String(req.query.medicineId)) : order.items;
+
+    const results = [];
+    for (const item of wanted) {
+      const original = await Medicine.findOne({ ...scope, _id: item.medicineId }).select('genericName composition strength dosageForm sellingPrice').lean();
+      const generic = String(original?.genericName || item.genericName || original?.composition || '').trim();
+      let alternatives = [];
+      if (generic) {
+        const candidates = await Medicine.find({
+          ...scope,
+          _id: { $ne: item.medicineId },
+          isActive: true,
+          $or: [{ genericName: new RegExp(`^${escape(generic)}$`, 'i') }, { composition: new RegExp(`^${escape(generic)}$`, 'i') }]
+        }).select('medicineName genericName strength dosageForm sellingPrice prescriptionRequired schedule manufacturer').limit(20).lean();
+        for (const c of candidates) {
+          const available = await aggregateAvailable(scope, c._id);
+          if (available <= 0) continue;
+          const sameStrength = !original?.strength || !c.strength
+            || String(original.strength).replace(/\s/g, '').toLowerCase() === String(c.strength).replace(/\s/g, '').toLowerCase();
+          const sameForm = !original?.dosageForm || !c.dosageForm || original.dosageForm === c.dosageForm;
+          alternatives.push({ ...c, available, sameStrength, sameForm });
+        }
+        alternatives.sort((x, y) => (y.sameStrength - x.sameStrength) || (y.sameForm - x.sameForm) || (y.available >= item.quantity) - (x.available >= item.quantity) || (x.sellingPrice || 0) - (y.sellingPrice || 0));
+        alternatives = alternatives.slice(0, 6);
+      }
+      results.push({
+        medicineId: item.medicineId,
+        medicineName: item.medicineName,
+        genericName: generic || null,
+        strength: original?.strength || null,
+        quantity: item.quantity,
+        available: await aggregateAvailable(scope, item.medicineId),
+        alternatives
+      });
+    }
+    res.json({ success: true, items: results });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+/** GET /merchant/orders/:id/invoice.pdf and /packing-slip.pdf */
+async function sendOrderPdf(req, res, kind) {
+  try {
+    const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId })
+      .populate('patientId', 'name phone email');
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    // A bill for stock not yet allocated would carry quantities and prices
+    // that can still change at acceptance.
+    if (kind === 'invoice' && !order.fulfillmentSaleId) {
+      return res.status(409).json({ success: false, message: 'The bill is available once the order is accepted' });
+    }
+    const store = req.tenant.store || await PharmacyStore.findById(order.storeId).lean();
+    const pdf = kind === 'invoice' ? await generateOrderInvoicePdf(order, store) : await generatePackingSlipPdf(order, store);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${order.orderNumber}-${kind === 'invoice' ? 'bill' : 'packing-slip'}.pdf"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.send(pdf);
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+}
+exports.orderInvoicePdf = (req, res) => sendOrderPdf(req, res, 'invoice');
+exports.orderPackingSlipPdf = (req, res) => sendOrderPdf(req, res, 'packing');
 
 const nextStatuses = { confirmed: ['packing', 'cancelled'], packing: ['ready_to_ship', 'cancelled'], ready_to_ship: ['shipped', 'cancelled'], shipped: ['out_for_delivery'], out_for_delivery: ['delivered'] };
 exports.updateMerchantStatus = async (req, res) => {
