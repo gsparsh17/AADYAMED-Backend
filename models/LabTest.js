@@ -107,6 +107,8 @@ const labTestSchema = new mongoose.Schema({
   sample: sampleSchema,
   results: [testResultSchema],
   resultNotes: String,
+  resultsEnteredAt: Date,
+  resultsEnteredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   reviewedByDoctor: { type: Boolean, default: false },
   reviewedAt: Date,
 

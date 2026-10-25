@@ -16,6 +16,42 @@ const {
   reserveSlot,
   releaseSlot,
 } = require('../services/diagnostics.service');
+const { createNotification } = require('../services/notification.service');
+const { resultSummary } = require('../services/labResults.service');
+const { notifyReportReady } = require('./labOps.controller');
+
+const escapeRx = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** When the report is due: sample collection + the slowest test's TAT. */
+function reportDueAt(order) {
+  const hours = Math.max(0, ...(order.tests || []).filter((t) => t.status !== 'cancelled').map((t) => Number(t.reportTime || 0)));
+  if (!hours) return null;
+  const from = order.collectedAt || order.sample?.collectionTime;
+  if (!from) return null;
+  return new Date(new Date(from).getTime() + hours * 3600000);
+}
+
+const OPEN_STATUSES = ['requested', 'scheduled', 'sample_collected', 'processing', 'ready_for_review'];
+const BUCKETS = {
+  collect: { status: { $in: ['requested', 'scheduled'] } },
+  processing: { status: { $in: ['sample_collected', 'processing'] } },
+  reports: { status: 'ready_for_review' },
+  completed: { status: 'completed' },
+  cancelled: { status: 'cancelled' },
+  home: { type: 'home_collection', status: { $in: ['requested', 'scheduled'] } },
+};
+
+/** Adds the fields the app shows on every card: due time, overdue, result counts. */
+function decorate(order) {
+  const o = order.toObject ? order.toObject() : order;
+  const due = reportDueAt(o);
+  return {
+    ...o,
+    reportDueAt: due,
+    overdue: !!due && OPEN_STATUSES.includes(o.status) && due.getTime() < Date.now(),
+    resultSummary: resultSummary(o),
+  };
+}
 
 const clean = value => String(value || '').trim();
 const money = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
@@ -260,11 +296,29 @@ exports.createOrder = async (req, res) => {
       }], { session }))[0];
     });
     await PatientProfile.findByIdAndUpdate(patient._id, { $inc: { totalLabTests: 1 } });
+    notifyLabOfBooking(lab._id, labTest, patient).catch((e) => console.error('Lab booking alert failed:', e.message));
     res.status(201).json({ success: true, order: labTest, payable: { entityType: 'labtest', entityId: labTest._id, amount: totalAmount } });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   } finally { await session.endSession(); }
 };
+
+/** Tells the lab about a booking (high priority — collections are time-bound). */
+async function notifyLabOfBooking(labId, order, patient) {
+  const lab = await PathologyProfile.findById(labId).select('userId');
+  if (!lab?.userId) return;
+  const tests = (order.tests || []).map((t) => t.testName).filter(Boolean);
+  const what = tests.length > 2 ? `${tests.slice(0, 2).join(', ')} +${tests.length - 2}` : tests.join(', ');
+  const when = `${new Date(order.scheduledDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} ${order.startTime || ''}`.trim();
+  await createNotification({
+    userId: lab.userId, userRole: 'pathology',
+    title: order.type === 'home_collection' ? 'New home collection' : 'New lab booking',
+    message: `${patient.name} · ${what} · ${when}`,
+    type: 'lab_order', priority: 'high', channels: ['in_app', 'push'],
+    relatedEntity: 'labtest', relatedEntityId: order._id,
+    data: { entityType: 'labtest', labTestId: String(order._id) },
+  });
+}
 
 exports.listPatientOrders = async (req, res) => {
   try {
@@ -360,34 +414,78 @@ exports.downloadReport = async (req, res) => {
 exports.merchantDashboard = async (req, res) => {
   try {
     const lab = await labForUser(req.user); if (!lab) return res.status(404).json({ success: false, message: 'Pathology profile not found' });
-    const today = startOfDay(new Date()), month = new Date(today.getFullYear(), today.getMonth(), 1);
-    const [todayOrders, pending, completedMonth, revenue, homeCollections, recent] = await Promise.all([
-      LabTest.countDocuments({ pathologyId: lab._id, scheduledDate: today }),
-      LabTest.countDocuments({ pathologyId: lab._id, status: { $in: ['requested', 'scheduled', 'sample_collected', 'processing', 'ready_for_review'] } }),
-      LabTest.countDocuments({ pathologyId: lab._id, status: 'completed', createdAt: { $gte: month } }),
-      LabTest.aggregate([{ $match: { pathologyId: lab._id, paymentStatus: 'paid', paymentDate: { $gte: month } } }, { $group: { _id: null, amount: { $sum: '$totalAmount' } } }]),
-      LabTest.countDocuments({ pathologyId: lab._id, type: 'home_collection', scheduledDate: { $gte: today } }),
-      LabTest.find({ pathologyId: lab._id }).populate('patientId', 'name phone').sort({ createdAt: -1 }).limit(8),
+    const today = startOfDay(new Date());
+    const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+    const month = new Date(today.getFullYear(), today.getMonth(), 1);
+    const week = new Date(today); week.setDate(today.getDate() + 7);
+    const base = { pathologyId: lab._id };
+    const [counts, todayList, open, revenueToday, revenueMonth, completedToday, staffCount] = await Promise.all([
+      LabTest.aggregate([{ $match: { ...base, status: { $in: OPEN_STATUSES } } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
+      LabTest.find({ ...base, scheduledDate: { $gte: today, $lt: tomorrow }, status: { $ne: 'cancelled' } })
+        .populate('patientId', 'name phone age gender').populate('assignedPhlebotomistId', 'name phone').sort({ startTime: 1 }).limit(60),
+      LabTest.find({ ...base, status: { $in: OPEN_STATUSES } })
+        .select('tests status collectedAt sample type collectionStatus scheduledDate startTime labTestNumber patientId assignedPhlebotomistId totalAmount paymentStatus')
+        .populate('patientId', 'name phone').limit(300),
+      LabTest.aggregate([{ $match: { ...base, paymentStatus: 'paid', paymentDate: { $gte: today } } }, { $group: { _id: null, amount: { $sum: '$totalAmount' } } }]),
+      LabTest.aggregate([{ $match: { ...base, paymentStatus: 'paid', paymentDate: { $gte: month } } }, { $group: { _id: null, amount: { $sum: '$totalAmount' } } }]),
+      LabTest.countDocuments({ ...base, status: 'completed', reportGeneratedAt: { $gte: today } }),
+      PathologyStaff.countDocuments({ pathologyId: lab._id, isActive: true, role: 'phlebotomist' }),
     ]);
-    res.json({ success: true, lab: { labName: lab.labName, averageRating: lab.averageRating, homeCollectionAvailable: lab.homeCollectionAvailable }, stats: { todayOrders, pending, completedMonth, monthlyPaidRevenue: revenue[0]?.amount || 0, upcomingHomeCollections: homeCollections }, recent });
+    const by = Object.fromEntries(counts.map((c) => [c._id, c.n]));
+    const decorated = open.map(decorate);
+    const overdue = decorated.filter((o) => o.overdue);
+    const unassigned = decorated.filter((o) => o.type === 'home_collection' && o.collectionStatus === 'unassigned' && new Date(o.scheduledDate) < week);
+    const slotDays = (lab.testSlots || []).filter((d) => new Date(d.date) >= today && new Date(d.date) < week && (d.timeSlots || []).length).length;
+    res.json({
+      success: true,
+      lab: {
+        labName: lab.labName, averageRating: lab.averageRating, verificationStatus: lab.verificationStatus,
+        homeCollectionAvailable: lab.homeCollectionAvailable, commissionRate: lab.commissionRate,
+        catalogCount: (lab.services || []).filter((t) => t.isActive !== false).length,
+        packageCount: (lab.packages || []).filter((t) => t.isActive !== false).length,
+        staffCount, slotDaysThisWeek: slotDays, hasTemplate: !!lab.slotTemplate?.days?.length,
+      },
+      stats: {
+        toCollect: (by.requested || 0) + (by.scheduled || 0),
+        inProcess: (by.sample_collected || 0) + (by.processing || 0),
+        reportsDue: by.ready_for_review || 0,
+        overdue: overdue.length,
+        unassignedCollections: unassigned.length,
+        todayOrders: todayList.length,
+        completedToday,
+        revenueToday: revenueToday[0]?.amount || 0,
+        monthlyPaidRevenue: revenueMonth[0]?.amount || 0,
+        // Older app builds read these.
+        pending: OPEN_STATUSES.reduce((n, k) => n + (by[k] || 0), 0),
+        upcomingHomeCollections: decorated.filter((o) => o.type === 'home_collection' && ['requested', 'scheduled'].includes(o.status)).length,
+      },
+      today: todayList.map(decorate),
+      attention: [...overdue, ...unassigned].slice(0, 10),
+    });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
 exports.merchantOrders = async (req, res) => {
   try {
     const lab = await labForUser(req.user); if (!lab) return res.status(404).json({ success: false, message: 'Pathology profile not found' });
-    const { status, type, collectionStatus, date, page = 1, limit = 25 } = req.query;
+    const { status, type, collectionStatus, date, bucket, q, page = 1, limit = 25 } = req.query;
     const filter = { pathologyId: lab._id };
+    if (bucket && BUCKETS[bucket]) Object.assign(filter, BUCKETS[bucket]);
     if (status) filter.status = { $in: clean(status).split(',').filter(Boolean) };
+    if (clean(q)) {
+      const rx = new RegExp(escapeRx(clean(q)), 'i');
+      const patients = await PatientProfile.find({ $or: [{ name: rx }, { phone: rx }] }).select('_id').limit(50);
+      filter.$or = [{ labTestNumber: rx }, { 'sample.barcode': rx }, { patientId: { $in: patients.map((p) => p._id) } }];
+    }
     if (type) filter.type = type;
     if (collectionStatus) filter.collectionStatus = collectionStatus;
     if (date) { const d = startOfDay(date); const e = new Date(d); e.setHours(23, 59, 59, 999); filter.scheduledDate = { $gte: d, $lte: e }; }
     const pageNumber = Math.max(1, parseInt(page, 10) || 1), pageSize = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
     const [orders, total] = await Promise.all([
-      LabTest.find(filter).populate('patientId', 'name phone age gender address').populate('assignedPhlebotomistId', 'name phone employeeCode role').sort({ scheduledDate: 1, startTime: 1 }).skip((pageNumber - 1) * pageSize).limit(pageSize),
+      LabTest.find(filter).populate('patientId', 'name phone age gender address').populate('assignedPhlebotomistId', 'name phone employeeCode role').sort({ scheduledDate: -1, startTime: 1 }).skip((pageNumber - 1) * pageSize).limit(pageSize),
       LabTest.countDocuments(filter),
     ]);
-    res.json({ success: true, orders, pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
+    res.json({ success: true, orders: orders.map(decorate), pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
@@ -396,7 +494,12 @@ exports.merchantOrder = async (req, res) => {
     const lab = await labForUser(req.user);
     const order = lab && await LabTest.findOne({ _id: req.params.id, pathologyId: lab._id }).populate('patientId', 'name phone email age gender bloodGroup address').populate('prescriptionId').populate('assignedPhlebotomistId');
     if (!order) return res.status(404).json({ success: false, message: 'Diagnostic order not found' });
-    res.json({ success: true, order });
+    // Each test's parameters, so result entry knows what to ask for.
+    const codes = new Set((order.tests || []).map((t) => String(t.testCode).toUpperCase()));
+    const catalog = Object.fromEntries((lab.services || [])
+      .filter((t) => codes.has(String(t.testCode).toUpperCase()))
+      .map((t) => [String(t.testCode).toUpperCase(), { parameters: t.parameters || [], sampleType: t.sampleType, reportTime: t.reportTime }]));
+    res.json({ success: true, order: decorate(order), catalog });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
@@ -449,17 +552,29 @@ exports.updateOrderStatus = async (req, res) => {
       }
       await releaseSlot({ pathologyId: order.pathologyId, date: order.scheduledDate, startTime: order.startTime || order.scheduledTime, endTime: order.endTime });
       order.cancelledBy = 'pathology';
-      order.cancellationReason = clean(req.body?.note) || 'Cancelled by pathology';
+      order.cancellationReason = clean(req.body?.note || req.body?.reason) || 'Cancelled by pathology';
       order.cancelledAt = new Date();
     }
     order.status = status;
-    if (status === 'sample_collected' && !order.collectedAt) order.collectedAt = new Date();
+    if (status === 'sample_collected') {
+      if (!['requested', 'scheduled'].includes(previousStatus)) return res.status(409).json({ success: false, message: 'Sample is already collected' });
+      order.collectedAt = order.collectedAt || new Date();
+      order.sample = {
+        ...(order.sample?.toObject?.() || order.sample || {}),
+        collectionTime: order.collectedAt,
+        collectedBy: clean(req.body?.collectedBy) || 'Lab',
+        sampleType: clean(req.body?.sampleType) || order.tests?.[0]?.sampleType,
+        barcode: clean(req.body?.barcode) || order.sample?.barcode,
+        receivedAtLab: new Date(),
+      };
+      order.tests.forEach((t) => { if (t.status === 'pending') t.status = 'sample_collected'; });
+    }
     if (status === 'completed') {
       order.tests.forEach(t => { if (t.status !== 'cancelled') { t.status = 'completed'; t.completedAt = t.completedAt || new Date(); } });
       if (!wasCompleted) await PathologyProfile.findByIdAndUpdate(lab._id, { $inc: { totalTestsConducted: 1 } });
       if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'completed', actualEndTime: new Date() } });
     }
-    pushHistory(order, status, clean(req.body?.note) || `Status changed to ${status}`, req.user.id); await order.save();
+    pushHistory(order, status, clean(req.body?.note || req.body?.reason) || `Status changed to ${status}`, req.user.id); await order.save();
     if (status === 'cancelled' && previousStatus !== 'cancelled') {
       if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'cancelled', cancelledBy: 'professional', cancellationReason: order.cancellationReason, cancelledAt: new Date() } });
       if (order.appointmentId) await voidPendingCommissionsForAppointment(order.appointmentId, 'Commission voided: appointment cancelled').catch((e) => console.error('Commission void failed:', e.message));
@@ -483,6 +598,7 @@ exports.uploadReport = async (req, res) => {
     pushHistory(order, 'completed', 'Lab report uploaded and released', req.user.id); await order.save();
     if (!wasCompleted) await PathologyProfile.findByIdAndUpdate(lab._id, { $inc: { totalTestsConducted: 1 } });
     if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'completed', actualEndTime: new Date() } });
+    await notifyReportReady(order);
     res.json({ success: true, order, message: 'Report uploaded successfully' });
   } catch (error) { if (req.file?.path) fs.unlink(req.file.path, () => {}); res.status(400).json({ success: false, message: error.message }); }
 };
@@ -506,7 +622,15 @@ exports.recordOfflinePayment = async (req, res) => {
 };
 
 exports.listStaff = async (req, res) => {
-  try { const lab = await labForUser(req.user); if (!lab) return res.status(404).json({ success: false, message: 'Pathology profile not found' }); const staff = await PathologyStaff.find({ pathologyId: lab._id }).sort({ isActive: -1, name: 1 }); res.json({ success: true, staff }); }
+  try { const lab = await labForUser(req.user); if (!lab) return res.status(404).json({ success: false, message: 'Pathology profile not found' }); const staff = await PathologyStaff.find({ pathologyId: lab._id }).sort({ isActive: -1, name: 1 }).lean();
+    // Today's collections per phlebotomist, for assigning fairly.
+    const today = startOfDay(new Date()); const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+    const load = await LabTest.aggregate([
+      { $match: { pathologyId: lab._id, assignedPhlebotomistId: { $ne: null }, scheduledDate: { $gte: today, $lt: tomorrow }, status: { $ne: 'cancelled' } } },
+      { $group: { _id: '$assignedPhlebotomistId', total: { $sum: 1 }, done: { $sum: { $cond: [{ $in: ['$collectionStatus', ['collected', 'delivered_to_lab']] }, 1, 0] } } } },
+    ]);
+    const byId = new Map(load.map((l) => [String(l._id), l]));
+    res.json({ success: true, staff: staff.map((m) => ({ ...m, todayAssigned: byId.get(String(m._id))?.total || 0, todayCollected: byId.get(String(m._id))?.done || 0 })) }); }
   catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 exports.createStaff = async (req, res) => {
@@ -529,7 +653,12 @@ exports.getMerchantCatalog = async (req, res) => {
 
 function normalizeTestPayload(body) {
   const price = Number(body?.price); if (!clean(body?.testCode) || !clean(body?.testName) || !Number.isFinite(price) || price < 0) throw new Error('testCode, testName and a valid price are required');
-  return { testCode: clean(body.testCode).toUpperCase(), testName: clean(body.testName), category: clean(body.category), description: clean(body.description), price, mrp: Number.isFinite(Number(body.mrp)) ? Number(body.mrp) : price, fastingRequired: body.fastingRequired === true, fastingHours: Number(body.fastingHours || 0), reportTime: Number(body.reportTime || 0), sampleType: clean(body.sampleType), preparation: clean(body.preparation), methodology: clean(body.methodology), homeCollectionEligible: body.homeCollectionEligible !== false, isActive: body.isActive !== false };
+  return { testCode: clean(body.testCode).toUpperCase(), testName: clean(body.testName), category: clean(body.category), description: clean(body.description), price, mrp: Number.isFinite(Number(body.mrp)) ? Number(body.mrp) : price, fastingRequired: body.fastingRequired === true, fastingHours: Number(body.fastingHours || 0), reportTime: Number(body.reportTime || 0), sampleType: clean(body.sampleType), preparation: clean(body.preparation), methodology: clean(body.methodology), homeCollectionEligible: body.homeCollectionEligible !== false, isActive: body.isActive !== false, parameters: normalizeParameters(body.parameters) };
+}
+function normalizeParameters(list) {
+  if (!Array.isArray(list)) return [];
+  const n = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? undefined : Number(v));
+  return list.filter((p) => clean(p?.name)).map((p) => ({ name: clean(p.name), unit: clean(p.unit), low: n(p.low), high: n(p.high), critLow: n(p.critLow), critHigh: n(p.critHigh), text: clean(p.text) || undefined }));
 }
 exports.createCatalogTest = async (req, res) => {
   try { const lab = await labForUser(req.user); const item = normalizeTestPayload(req.body); if ((lab.services || []).some(s => String(s.testCode).toLowerCase() === item.testCode.toLowerCase())) return res.status(409).json({ success: false, message: 'Test code already exists' }); lab.services.push(item); await lab.save(); res.status(201).json({ success: true, test: lab.services[lab.services.length - 1] }); }

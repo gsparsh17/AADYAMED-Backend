@@ -11,6 +11,32 @@ const testSlotSchema = new mongoose.Schema({
   }],
 });
 
+// What a test reports, with its reference range: drives result entry and
+// the automatic H/L/critical flags (services/labResults.service.js).
+const testParameterSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  unit: { type: String, trim: true, default: '' },
+  low: Number,
+  high: Number,
+  critLow: Number,
+  critHigh: Number,
+  text: { type: String, trim: true }, // expected result for qualitative tests
+}, { _id: false });
+
+// A weekly collection timetable; the lab's dated testSlots are generated
+// from it (services/labSchedule.service.js) and rolled forward daily.
+const templateSlotSchema = new mongoose.Schema({
+  startTime: { type: String, required: true },
+  endTime: { type: String, required: true },
+  maxCapacity: { type: Number, default: 10, min: 1 },
+}, { _id: false });
+
+const templateDaySchema = new mongoose.Schema({
+  weekday: { type: Number, min: 0, max: 6, required: true }, // 0 = Sunday
+  enabled: { type: Boolean, default: true },
+  slots: [templateSlotSchema],
+}, { _id: false });
+
 const testServiceSchema = new mongoose.Schema({
   testCode: { type: String, trim: true },
   testName: { type: String, trim: true },
@@ -26,6 +52,7 @@ const testServiceSchema = new mongoose.Schema({
   methodology: String,
   homeCollectionEligible: { type: Boolean, default: true },
   isActive: { type: Boolean, default: true },
+  parameters: [testParameterSchema],
 });
 
 const packageSchema = new mongoose.Schema({
@@ -77,6 +104,10 @@ const pathologyProfileSchema = new mongoose.Schema({
     holidays: [Date],
   },
   testSlots: [testSlotSchema],
+  slotTemplate: {
+    days: [templateDaySchema],
+    updatedAt: Date,
+  },
   verificationStatus: {
     type: String,
     enum: ['pending', 'approved', 'rejected', 'suspended'],

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/diagnostics.controller');
+const labOps = require('../controllers/labOps.controller');
 const { protect, authorize } = require('../middlewares/auth');
 const reportUpload = require('../middlewares/labReportUpload');
 
@@ -29,6 +30,15 @@ router.post('/merchant/orders/:id/collection-status', protect, authorize('pathol
 router.post('/merchant/orders/:id/status', protect, authorize('pathology'), controller.updateOrderStatus);
 router.post('/merchant/orders/:id/payment', protect, authorize('pathology'), controller.recordOfflinePayment);
 router.post('/merchant/orders/:id/report', protect, authorize('pathology'), reportUpload.single('report'), controller.uploadReport);
+
+router.post('/merchant/orders/:id/results', protect, authorize('pathology'), labOps.saveResults);
+router.post('/merchant/orders/:id/release', protect, authorize('pathology'), labOps.releaseReport);
+router.get('/merchant/earnings', protect, authorize('pathology'), labOps.earnings);
+router.get('/merchant/schedule', protect, authorize('pathology'), labOps.getSchedule);
+router.put('/merchant/schedule', protect, authorize('pathology'), labOps.putSchedule);
+router.post('/merchant/schedule/holidays', protect, authorize('pathology'), labOps.setHoliday);
+router.get('/merchant/catalog/library', protect, authorize('pathology'), labOps.getLibrary);
+router.post('/merchant/catalog/import', protect, authorize('pathology'), labOps.importLibrary);
 
 router.get('/merchant/staff', protect, authorize('pathology'), controller.listStaff);
 router.post('/merchant/staff', protect, authorize('pathology'), controller.createStaff);
