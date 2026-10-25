@@ -88,7 +88,11 @@ exports.getCommissions = async (req, res) => {
     }
 
     // ---- additional filters ----
+    // Voided commissions (cancelled/rejected/no_show bookings) are hidden and
+    // excluded from totals unless explicitly requested via payoutStatus=cancelled
+    // or includeCancelled=true.
     if (payoutStatus) filter.payoutStatus = payoutStatus;
+    else if (String(req.query.includeCancelled) !== 'true') filter.payoutStatus = { $ne: 'cancelled' };
     if (cycle) filter['commissionCycle.cycleNumber'] = cycle;
 
     if (startDate && endDate) {
@@ -219,6 +223,12 @@ exports.getCommissionReport = async (req, res) => {
       });
     }
     
+    // Voided commissions are not earnings; keep them only in the payoutStatus
+    // breakdown so admins can still see them.
+    if (groupBy !== 'payoutStatus') {
+      matchStage.payoutStatus = { $ne: 'cancelled' };
+    }
+
     let groupStage;
     let sortStage;
     

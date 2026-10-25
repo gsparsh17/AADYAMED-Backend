@@ -209,6 +209,12 @@ const appointmentSchema = new mongoose.Schema(
       min: 0,
     },
 
+    // Set when the professional marks the appointment 'no_show' (after the
+    // start time). No refund is issued for a no-show.
+    noShowAt: Date,
+    noShowReason: String,
+    noShowMarkedBy: String,
+
     rescheduleCount: {
       type: Number,
       default: 0,

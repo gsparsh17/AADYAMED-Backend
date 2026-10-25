@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const Calendar = require('../models/Calendar');
 const Appointment = require('../models/Appointment');
+const { voidCommissionsIfTerminal } = require('../services/appointmentCommission.service');
 const PathologyProfile = require('../models/PathologyProfile');
 const LabTest = require('../models/LabTest');
 const User = require('../models/User');
@@ -1277,6 +1278,8 @@ exports.updateAppointmentStatusForPathology = async (req, res) => {
     }
 
     await appointment.save();
+    // Cancelled/rejected/no_show bookings must not count towards earnings.
+    await voidCommissionsIfTerminal(appointment);
 
     return res.json({
       success: true,

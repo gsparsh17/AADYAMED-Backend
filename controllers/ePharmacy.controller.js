@@ -1063,13 +1063,89 @@ async function sendOrderPdf(req, res, kind) {
 exports.orderInvoicePdf = (req, res) => sendOrderPdf(req, res, 'invoice');
 exports.orderPackingSlipPdf = (req, res) => sendOrderPdf(req, res, 'packing');
 
-const nextStatuses = { confirmed: ['packing', 'cancelled'], packing: ['ready_to_ship', 'cancelled'], ready_to_ship: ['shipped', 'cancelled'], shipped: ['out_for_delivery'], out_for_delivery: ['delivered'] };
+// Local delivery: packed → handed to the store's driver (out_for_delivery)
+// → delivered. A failed attempt brings the parcel back to ready_to_ship.
+// `shipped` stays valid for orders already sent the old courier way.
+const nextStatuses = {
+  confirmed: ['packing', 'cancelled'],
+  packing: ['ready_to_ship', 'cancelled'],
+  ready_to_ship: ['out_for_delivery', 'shipped', 'cancelled'],
+  shipped: ['out_for_delivery'],
+  out_for_delivery: ['delivered', 'ready_to_ship']
+};
+
+const PHONE = /^[6-9]\d{9}$/;
+
+/** Tells the customer where their order is. Never blocks the status change. */
+async function notifyCustomer(order, title, message) {
+  try {
+    const profile = await PatientProfile.findById(order.patientId).select('userId').lean();
+    if (!profile?.userId) return;
+    const { createNotification } = require('../services/notification.service');
+    await createNotification({
+      userId: profile.userId,
+      title,
+      message,
+      type: 'order',
+      channels: ['in_app', 'push'],
+      relatedEntity: 'pharmacy_order',
+      relatedEntityId: order._id,
+      data: { entityType: 'pharmacy_order', orderId: String(order._id), orderStatus: order.orderStatus }
+    });
+  } catch (error) {
+    console.error(`Customer notification failed for ${order.orderNumber}:`, error.message);
+  }
+}
+
+/** GET /merchant/drivers — drivers this store handed orders to recently. */
+exports.recentDrivers = async (req, res) => {
+  try {
+    const rows = await EPharmacyOrder.aggregate([
+      { $match: { organizationId: req.tenant.organizationId, storeId: req.tenant.storeId, 'delivery.driverPhone': { $exists: true, $ne: '' } } },
+      { $sort: { 'delivery.handedOverAt': -1 } },
+      { $group: { _id: '$delivery.driverPhone', name: { $first: '$delivery.driverName' }, vehicleNumber: { $first: '$delivery.vehicleNumber' }, lastAt: { $first: '$delivery.handedOverAt' }, deliveries: { $sum: 1 } } },
+      { $sort: { lastAt: -1 } },
+      { $limit: 8 }
+    ]);
+    res.json({ success: true, drivers: rows.map((r) => ({ name: r.name, phone: r._id, vehicleNumber: r.vehicleNumber, lastAt: r.lastAt, deliveries: r.deliveries })) });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
 exports.updateMerchantStatus = async (req, res) => {
   try {
     const order = await EPharmacyOrder.findOne({ _id: req.params.id, organizationId: req.tenant.organizationId, storeId: req.tenant.storeId }); if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     const target = req.body.status; if (!(nextStatuses[order.orderStatus] || []).includes(target)) return res.status(409).json({ success: false, message: `Cannot move order from ${order.orderStatus} to ${target}` });
     if (target === 'cancelled') return exports.cancelMerchantOrder(req, res);
-    order.orderStatus = target; order.statusHistory.push({ status: target, note: req.body.note, actorId: req.user.id });
+
+    let note = req.body.note;
+    // Handing over: who took it, so the store and customer can reach them.
+    if (target === 'out_for_delivery' && order.orderStatus === 'ready_to_ship') {
+      const driver = req.body.driver || {};
+      const name = String(driver.name || '').trim();
+      const phone = String(driver.phone || '').replace(/\D/g, '').slice(-10);
+      if (!name || !PHONE.test(phone)) {
+        return res.status(400).json({ success: false, message: "Enter the driver's name and a 10-digit mobile number" });
+      }
+      order.delivery = {
+        ...(order.delivery?.toObject?.() || order.delivery || {}),
+        driverName: name,
+        driverPhone: phone,
+        vehicleNumber: String(driver.vehicleNumber || '').trim().toUpperCase() || undefined,
+        handedOverAt: new Date(),
+        handedOverBy: req.user.id,
+        attempts: Number(order.delivery?.attempts || 0) + 1
+      };
+      note = note || `Handed to ${name} (${phone})`;
+    }
+    // A failed attempt: the parcel comes back and can be handed over again.
+    if (target === 'ready_to_ship' && order.orderStatus === 'out_for_delivery') {
+      const reason = String(req.body.reason || '').trim();
+      if (!reason) return res.status(400).json({ success: false, message: 'Say why the delivery failed' });
+      order.delivery = { ...(order.delivery?.toObject?.() || order.delivery || {}), lastFailureReason: reason, lastFailedAt: new Date() };
+      note = `Delivery failed: ${reason}`;
+    }
+
+    const from = order.orderStatus;
+    order.orderStatus = target; order.statusHistory.push({ status: target, note, actorId: req.user.id });
     if (req.body.tracking) order.tracking = { ...order.tracking.toObject?.() || order.tracking, ...req.body.tracking };
     if (target === 'shipped') order.tracking.shippedAt = new Date(); if (target === 'out_for_delivery') order.tracking.outForDeliveryAt = new Date();
     if (target === 'delivered') { order.tracking.deliveredAt = new Date(); if (order.paymentMethod === 'cod') { order.paymentStatus = 'paid'; order.paymentDate = new Date(); if (order.fulfillmentSaleId) await PharmacySale.updateOne({ _id: order.fulfillmentSaleId }, { $set: { paymentStatus: 'paid', paidAmount: order.totalAmount, balanceAmount: 0 } }); } }
@@ -1078,6 +1154,18 @@ exports.updateMerchantStatus = async (req, res) => {
     // platform records what it owes them.
     if (target === 'delivered') await settlePharmacyOrder(order, req.user.id);
     res.json({ success: true, order });
+
+    // After responding: the store shouldn't wait on the customer's push.
+    const d = order.delivery || {};
+    if (target === 'out_for_delivery') {
+      notifyCustomer(order, 'Your order is on the way', d.driverName
+        ? `${order.orderNumber} is out for delivery with ${d.driverName} (${d.driverPhone}).`
+        : `${order.orderNumber} is out for delivery.`);
+    } else if (target === 'delivered') {
+      notifyCustomer(order, 'Order delivered', `${order.orderNumber} has been delivered. Get well soon!`);
+    } else if (target === 'ready_to_ship' && from === 'out_for_delivery') {
+      notifyCustomer(order, "We couldn't deliver your order", `${order.orderNumber}: ${d.lastFailureReason}. The pharmacy will contact you to try again.`);
+    }
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 

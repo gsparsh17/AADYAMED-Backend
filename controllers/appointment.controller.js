@@ -16,6 +16,20 @@ const {
   attachAppointment,
   releaseSlotLockForAppointment,
 } = require('../services/appointmentSlotLock.service');
+const { voidCommissionsIfTerminal } = require('../services/appointmentCommission.service');
+
+// Statuses from which an appointment may be completed (via POST /:id/complete
+// or PUT /:id/status). 'completed' itself is handled idempotently.
+const COMPLETABLE_STATUSES = ['confirmed', 'accepted', 'in_progress'];
+
+// Build the appointment start instant the same way cancel/fee logic does
+// (appointmentDate day + 'HH:mm' startTime, server-local time).
+function getAppointmentStartInstant(appointment) {
+  const instant = new Date(appointment.appointmentDate);
+  const [h, m] = String(appointment.startTime || '00:00').split(':');
+  instant.setHours(parseInt(h, 10) || 0, parseInt(m, 10) || 0, 0, 0);
+  return instant;
+}
 
 // ========== HELPER FUNCTIONS ==========
 // ========== HELPER FUNCTIONS ==========
@@ -708,7 +722,7 @@ exports.getAppointmentById = async (req, res) => {
 exports.updateAppointmentStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, cancellationReason, notes } = req.body;
+    const { status, cancellationReason, notes, reason } = req.body;
 
     if (!status) {
       return res.status(400).json({ success: false, error: 'Status is required' });
@@ -731,8 +745,43 @@ exports.updateAppointmentStatus = async (req, res) => {
       });
     }
 
+    // No-show can only be recorded once the scheduled start time has passed.
+    if (status === 'no_show' && getAppointmentStartInstant(appointment) > new Date()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot mark as no-show before the appointment start time',
+        code: 'NO_SHOW_TOO_EARLY'
+      });
+    }
+
+    // Completion goes through the shared idempotent finalizer for doctor/physio
+    // (correct paid/unpaid invoice, single stats increment). Pathology keeps the
+    // legacy path below.
+    if (status === 'completed' && ['doctor', 'physio'].includes(appointment.professionalType)) {
+      const result = await finalizeAppointment(appointment, {
+        consultationNotes: notes
+          ? [appointment.consultationNotes, notes].filter(Boolean).join('\n')
+          : undefined
+      });
+      return res.json({
+        success: true,
+        message: `Appointment ${result.appointment.status} successfully`,
+        appointment: result.appointment,
+        invoice: result.invoice,
+        alreadyCompleted: !result.newlyCompleted
+      });
+    }
+
     const oldStatus = appointment.status;
     appointment.status = status;
+
+    if (status === 'no_show') {
+      // No refund: the patient missed the slot, so any prepaid amount is kept.
+      // Earnings are excluded by voiding the pending commission below.
+      appointment.noShowAt = new Date();
+      appointment.noShowReason = reason || notes || undefined;
+      appointment.noShowMarkedBy = req.user.role;
+    }
 
     if (status === 'cancelled') {
       appointment.cancellationReason = cancellationReason;
@@ -764,6 +813,7 @@ exports.updateAppointmentStatus = async (req, res) => {
     await appointment.save();
     if (['cancelled', 'rejected', 'no_show'].includes(appointment.status)) {
       await releaseSlotLockForAppointment(appointment).catch((error) => console.error('Slot lock release failed:', error));
+      await voidCommissionsIfTerminal(appointment);
     }
     await sendStatusUpdateNotification(appointment, oldStatus, appointment.status);
 
@@ -848,6 +898,7 @@ exports.cancelAppointment = async (req, res) => {
 
     await appointment.save();
     await releaseSlotLockForAppointment(appointment).catch((error) => console.error('Slot lock release failed:', error));
+    await voidCommissionsIfTerminal(appointment);
     await updateCalendarForCancellation(appointment);
     await sendCancellationNotification(appointment);
 
@@ -1006,8 +1057,15 @@ exports.completeAppointment = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Appointment not found' });
     }
 
-    if (appointment.status === 'cancelled') {
-      return res.status(400).json({ success: false, error: 'Cannot complete cancelled appointment' });
+    // Only live appointments may be completed; pending/rejected/cancelled/
+    // no_show/rescheduled must not generate earnings. Already-completed falls
+    // through to the idempotent paths below.
+    if (appointment.status !== 'completed' && !COMPLETABLE_STATUSES.includes(appointment.status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot complete ${appointment.status} appointment`,
+        code: 'INVALID_STATUS_FOR_COMPLETION'
+      });
     }
 
     let canComplete = false;
@@ -1161,7 +1219,8 @@ async function canUpdateStatus(user, appointment, newStatus) {
     if (!doctorProfile || (appointment.doctorId?._id || appointment.doctorId)?.toString() !== doctorProfile._id.toString()) {
       return false;
     }
-    return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
+    // 'no_show' is time-gated in updateAppointmentStatus.
+    return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress', 'no_show'].includes(newStatus);
   }
 
   if (user.role === 'physio') {
@@ -1169,7 +1228,7 @@ async function canUpdateStatus(user, appointment, newStatus) {
     if (!physioProfile || (appointment.physioId?._id || appointment.physioId)?.toString() !== physioProfile._id.toString()) {
       return false;
     }
-    return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress'].includes(newStatus);
+    return ['accepted', 'rejected', 'completed', 'cancelled', 'in_progress', 'no_show'].includes(newStatus);
   }
 
   // ✅ NEW
@@ -1187,13 +1246,14 @@ async function canUpdateStatus(user, appointment, newStatus) {
 function isValidStatusTransition(oldStatus, newStatus) {
   const validTransitions = {
     'pending': ['accepted', 'rejected', 'cancelled'],
-    'accepted': ['confirmed', 'cancelled'],
-    'confirmed': ['in_progress', 'completed', 'cancelled'],
+    'accepted': ['confirmed', 'cancelled', 'no_show'],
+    'confirmed': ['in_progress', 'completed', 'cancelled', 'no_show'],
     'in_progress': ['completed', 'cancelled'],
     'completed': [],
     'cancelled': [],
     'rejected': [],
-    'rescheduled': ['confirmed', 'cancelled']
+    'rescheduled': ['confirmed', 'cancelled', 'no_show'],
+    'no_show': []
   };
 
   return validTransitions[oldStatus]?.includes(newStatus) || false;
@@ -1488,7 +1548,8 @@ async function sendStatusUpdateNotification(appointment, oldStatus, newStatus) {
       'in_progress': 'has started',
       'completed': 'has been completed',
       'cancelled': 'has been cancelled',
-      'rescheduled': 'has been rescheduled'
+      'rescheduled': 'has been rescheduled',
+      'no_show': 'was marked as missed (no-show). Please book a new appointment if needed.'
     };
 
     const message = statusMessages[newStatus];

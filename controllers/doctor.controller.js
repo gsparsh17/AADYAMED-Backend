@@ -8,6 +8,7 @@ const Feedback = require('../models/Feedback');
 const {
   VALID_TYPES,
   getConsultationTypes,
+  getDoctorTypeEnabled,
   getDoctorDailySlots,
   getNextAvailableSlot,
 } = require('../services/doctorAvailability.service');
@@ -440,6 +441,9 @@ exports.getWeeklyAvailability = async (req, res) => {
       consultationFee: doctor.consultationFee,
       homeVisitFee: doctor.homeVisitFee,
       videoCallFee: doctor.videoCallFee,
+      clinicConsultationEnabled: getDoctorTypeEnabled(doctor, 'clinic'),
+      homeVisitEnabled: getDoctorTypeEnabled(doctor, 'home'),
+      teleconsultationEnabled: getDoctorTypeEnabled(doctor, 'video'),
       consultationTypes: getConsultationTypes(doctor),
       slotDurationMinutes: doctor.slotDurationMinutes || 30,
       bookingWindowDays: doctor.bookingWindowDays || 60,
@@ -550,7 +554,13 @@ exports.getProfile = async (req, res) => {
       });
     }
 
-    return res.json({ success: true, doctor });
+    // Send the flags as the booking side resolves them, so the doctor's
+    // settings screen shows the same visit types patients can book.
+    const out = doctor.toObject();
+    out.clinicConsultationEnabled = getDoctorTypeEnabled(doctor, 'clinic');
+    out.homeVisitEnabled = getDoctorTypeEnabled(doctor, 'home');
+    out.teleconsultationEnabled = getDoctorTypeEnabled(doctor, 'video');
+    return res.json({ success: true, doctor: out });
   } catch (err) {
     console.error('Error fetching doctor profile:', err.message);
     return res.status(500).json({
@@ -823,6 +833,8 @@ exports.getEarnings = async (req, res) => {
         $match: {
           professionalId: doctor._id,
           professionalType: 'doctor',
+          // Voided commissions (cancelled/rejected/no_show bookings) are not earnings.
+          payoutStatus: { $ne: 'cancelled' },
           createdAt: { $gte: startOfMonth }
         }
       },
@@ -872,7 +884,9 @@ exports.getDoctorEarnings = async (req, res) => {
 
     const matchStage = {
       professionalId: doctor._id,
-      professionalType: 'doctor'
+      professionalType: 'doctor',
+      // Voided commissions (cancelled/rejected/no_show bookings) are not earnings.
+      payoutStatus: { $ne: 'cancelled' }
     };
 
     if (startDate && endDate) {
@@ -958,10 +972,13 @@ exports.getDoctorDashboard = async (req, res) => {
 
     // Get today's appointments
     const Appointment = require('../models/Appointment');
+    // Bound to the current day only (previously counted every future day too).
+    const endOfToday = new Date(today);
+    endOfToday.setHours(23, 59, 59, 999);
     const todaysAppointments = await Appointment.countDocuments({
       doctorId: doctor._id,
       professionalType: 'doctor',
-      appointmentDate: { $gte: today },
+      appointmentDate: { $gte: today, $lte: endOfToday },
       status: { $in: ['confirmed', 'accepted'] }
     });
 
@@ -980,6 +997,8 @@ exports.getDoctorDashboard = async (req, res) => {
         $match: {
           professionalId: doctor._id,
           professionalType: 'doctor',
+          // Voided commissions (cancelled/rejected/no_show bookings) are not earnings.
+          payoutStatus: { $ne: 'cancelled' },
           createdAt: { $gte: startOfMonth }
         }
       },
@@ -1373,6 +1392,26 @@ async function removeDoctorFromCalendar(doctorId) {
 exports.getPatientById = async (req, res) => {
   try {
     const PatientProfile = require('../models/PatientProfile');
+    const Prescription = require('../models/Prescription');
+    const mongoose = require('mongoose');
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ success: false, error: 'Patient not found' });
+    }
+
+    // Privacy: a doctor may only open patients they have a care relationship
+    // with — at least one non-rejected appointment or a prescription issued
+    // by this doctor.
+    const doctor = await DoctorProfile.findOne({ userId: req.user.id }).select('_id');
+    if (!doctor) return res.status(404).json({ success: false, error: 'Doctor profile not found' });
+
+    const [hasAppointment, hasPrescription] = await Promise.all([
+      Appointment.exists({ doctorId: doctor._id, patientId: req.params.id, status: { $ne: 'rejected' } }),
+      Prescription.exists({ doctorId: doctor._id, patientId: req.params.id })
+    ]);
+    if (!hasAppointment && !hasPrescription) {
+      return res.status(403).json({ success: false, error: 'You can only view patients who have an appointment or prescription with you' });
+    }
+
     const profile = await PatientProfile.findById(req.params.id);
     if (!profile) return res.status(404).json({ success: false, error: 'Patient not found' });
     return res.json(profile);

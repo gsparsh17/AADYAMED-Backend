@@ -12,6 +12,13 @@ router.get('/:id/availability', doctorController.getDoctorAvailability);
 router.get('/', doctorController.getAllDoctors);
 router.get('/:id', doctorController.getDoctorById);
 
+// ========== ADMIN ROUTES ==========
+// Declared before the doctor-only router.use() below; previously they sat after
+// it and required a user to be both doctor AND admin, so they were unreachable.
+router.post('/bulk', protect, authorize('admin'), doctorController.bulkCreateDoctors);
+router.put('/:id', protect, authorize('admin'), doctorController.updateDoctor);
+router.delete('/:id', protect, authorize('admin'), doctorController.deleteDoctor);
+
 // ========== DOCTOR ROUTES ==========
 router.use(protect, authorize('doctor'));
 
@@ -24,12 +31,5 @@ router.get('/me/earnings', doctorController.getEarnings);
 router.get('/me/dashboard', doctorController.getDoctorDashboard);
 router.post('/me/profile', doctorController.createDoctor);
 router.get('/patients/:id', doctorController.getPatientById);
-
-// ========== ADMIN ROUTES ==========
-router.use(protect, authorize('admin'));
-
-router.post('/bulk', doctorController.bulkCreateDoctors);
-router.put('/:id', doctorController.updateDoctor);
-router.delete('/:id', doctorController.deleteDoctor);
 
 module.exports = router;

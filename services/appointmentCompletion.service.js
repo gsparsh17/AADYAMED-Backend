@@ -95,6 +95,16 @@ async function finalizeAppointment(appointmentOrId, options = {}) {
   }
 
   const wasCompleted = appointment.status === 'completed';
+
+  // Guard for every caller: only live appointments can be completed, so a
+  // pending/rejected/cancelled/no_show booking never generates earnings.
+  // Already-completed stays idempotent.
+  if (!wasCompleted && !['confirmed', 'accepted', 'in_progress'].includes(appointment.status)) {
+    const error = new Error(`Cannot complete ${appointment.status} appointment`);
+    error.statusCode = 400;
+    throw error;
+  }
+
   const now = new Date();
 
   appointment.status = 'completed';

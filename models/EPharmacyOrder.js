@@ -114,6 +114,18 @@ const schema = new mongoose.Schema({
     outForDeliveryAt: Date,
     deliveredAt: Date
   },
+  // The store's own driver who took the parcel. Local delivery doesn't use a
+  // courier, so this — not `tracking` — is who the customer and store call.
+  delivery: {
+    driverName: String,
+    driverPhone: String,
+    vehicleNumber: String,
+    handedOverAt: Date,
+    handedOverBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    attempts: { type: Number, default: 0 },
+    lastFailureReason: String,
+    lastFailedAt: Date
+  },
   fulfillmentSaleId: { type: mongoose.Schema.Types.ObjectId, ref: 'PharmacySale' },
   // Set when the pharmacy accepted the order for less than was asked for.
   partiallyFulfilled: { type: Boolean, default: false },

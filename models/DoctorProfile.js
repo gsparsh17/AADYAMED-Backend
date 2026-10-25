@@ -67,8 +67,12 @@ const doctorProfileSchema = new mongoose.Schema({
   videoCallFee: { type: Number, default: 0 },
 
   clinicConsultationEnabled: { type: Boolean, default: true },
-  homeVisitEnabled: { type: Boolean, default: false },
-  teleconsultationEnabled: { type: Boolean, default: false },
+  // No default on purpose: a missing flag means "decide from the fee" (see
+  // getDoctorTypeEnabled). A `default: false` here was applied whenever an
+  // older record was loaded, which switched off video/home visits for
+  // doctors who had set those fees before these flags existed.
+  homeVisitEnabled: { type: Boolean },
+  teleconsultationEnabled: { type: Boolean },
   slotDurationMinutes: { type: Number, default: 30, min: 5, max: 180 },
   bookingWindowDays: { type: Number, default: 60, min: 1, max: 365 },
   minimumNoticeMinutes: { type: Number, default: 60, min: 0, max: 10080 },

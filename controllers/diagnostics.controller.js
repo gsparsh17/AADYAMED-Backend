@@ -8,6 +8,7 @@ const PatientProfile = require('../models/PatientProfile');
 const Prescription = require('../models/Prescription');
 const LabTest = require('../models/LabTest');
 const Appointment = require('../models/Appointment');
+const { voidPendingCommissionsForAppointment } = require('../services/appointmentCommission.service');
 const {
   startOfDay,
   mapAvailableSlots,
@@ -333,6 +334,8 @@ exports.cancelOrder = async (req, res) => {
       await order.save({ session });
       if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'cancelled', cancelledBy: 'patient', cancellationReason: order.cancellationReason, cancelledAt: new Date() } }, { session });
     });
+    // Linked appointment is now cancelled: stop its pending commission counting as earnings.
+    if (order.appointmentId) await voidPendingCommissionsForAppointment(order.appointmentId, 'Commission voided: appointment cancelled').catch((e) => console.error('Commission void failed:', e.message));
     const refund = await attemptRefund(order); await order.save();
     res.json({ success: true, order, refund });
   } catch (error) { res.status(400).json({ success: false, message: error.message }); }
@@ -459,6 +462,7 @@ exports.updateOrderStatus = async (req, res) => {
     pushHistory(order, status, clean(req.body?.note) || `Status changed to ${status}`, req.user.id); await order.save();
     if (status === 'cancelled' && previousStatus !== 'cancelled') {
       if (order.appointmentId) await Appointment.findByIdAndUpdate(order.appointmentId, { $set: { status: 'cancelled', cancelledBy: 'professional', cancellationReason: order.cancellationReason, cancelledAt: new Date() } });
+      if (order.appointmentId) await voidPendingCommissionsForAppointment(order.appointmentId, 'Commission voided: appointment cancelled').catch((e) => console.error('Commission void failed:', e.message));
       await attemptRefund(order);
       await order.save();
     }

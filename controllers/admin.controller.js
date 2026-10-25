@@ -15,6 +15,7 @@ const Medicine = require('../models/Medicine');
 const PharmacySale = require('../models/PharmacySale');
 const PharmacyStore = require('../models/PharmacyStore');
 const Payout = require('../models/Payout');
+const { voidCommissionsIfTerminal } = require('../services/appointmentCommission.service');
 
 // ========== DASHBOARD FUNCTIONS ==========
 
@@ -1276,6 +1277,8 @@ exports.updateAppointmentStatus = async (req, res) => {
     }
     
     await appointment.save();
+    // Cancelled/rejected/no_show bookings must not count towards earnings.
+    await voidCommissionsIfTerminal(appointment);
     
     // Log the action
     await AuditLog.create({

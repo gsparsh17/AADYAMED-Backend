@@ -43,6 +43,7 @@ router.get('/merchant/orders/:id/invoice.pdf', c.orderInvoicePdf);
 router.get('/merchant/orders/:id/packing-slip.pdf', c.orderPackingSlipPdf);
 router.get('/merchant/orders/:id/substitutes', c.orderSubstitutes);
 router.get('/merchant/schedule-register', c.scheduleRegister);
+router.get('/merchant/drivers', c.recentDrivers);
 router.post('/merchant/orders/:id/prescription', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.reviewPrescription);
 router.post('/merchant/orders/:id/confirm', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.confirmMerchantOrder);
 router.post('/merchant/orders/:id/status', requireOrganizationRole('owner', 'admin', 'manager', 'pharmacist'), c.updateMerchantStatus);
