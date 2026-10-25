@@ -134,7 +134,7 @@ async function syncCalendarWithAppointments(calendar) {
     const appointments = await Appointment.find({
       appointmentDate: { $gte: startDate, $lte: endDate },
       status: { $in: ['pending', 'confirmed', 'accepted'] }
-    }).select('_id patientId appointmentDate startTime endTime createdAt status professionalType doctorId physiotherapistId pathologyId');
+    }).select('_id patientId appointmentDate startTime endTime createdAt status professionalType doctorId physioId pathologyId'); // physioId (was the non-existent 'physiotherapistId'), read below as a[`${professionalType}Id`]
 
     const apptsByDay = new Map();
     for (const a of appointments) {

@@ -4,6 +4,21 @@ const Calendar = require('../models/Calendar');
 const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'accepted', 'rescheduled', 'in_progress'];
 const VALID_TYPES = ['clinic', 'home', 'video'];
 
+// This service is shared by doctors and physiotherapists: both profiles carry
+// the same availability/fee/flag fields. Callers pass
+// `options.professionalType: 'physio'` for a PhysiotherapistProfile; anything
+// else is treated as a doctor (the original behaviour).
+const PROFESSIONAL_SETTINGS = {
+  doctor: { idField: 'doctorId', slotDurationMinutes: 30, bookingWindowDays: 60 },
+  // Physio sessions are longer and booked over a shorter horizon; these match
+  // the PhysiotherapistProfile schema defaults.
+  physio: { idField: 'physioId', slotDurationMinutes: 45, bookingWindowDays: 30 },
+};
+
+function resolveProfessionalType(options = {}) {
+  return options.professionalType === 'physio' ? 'physio' : 'doctor';
+}
+
 function parseLocalDate(value) {
   if (!value) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
@@ -81,9 +96,9 @@ function getConsultationTypes(doctor) {
   }));
 }
 
-function normalizeSlotDuration(doctor, requestedDuration) {
+function normalizeSlotDuration(doctor, requestedDuration, professionalType = 'doctor') {
   const requested = Number(requestedDuration);
-  const configured = Number(doctor.slotDurationMinutes || 30);
+  const configured = Number(doctor.slotDurationMinutes || PROFESSIONAL_SETTINGS[professionalType].slotDurationMinutes);
   const value = Number.isFinite(requested) && requested >= 5 && requested <= 180 ? requested : configured;
   return Math.max(5, Math.min(180, value));
 }
@@ -108,7 +123,7 @@ function getDaySchedule(doctor, date, type) {
   return { dayName, blocks };
 }
 
-async function getCalendarBreaks(doctorId, date) {
+async function getCalendarBreaks(doctorId, date, professionalType = 'doctor') {
   const year = date.getFullYear();
   const month = date.getMonth() + 1;
   const calendar = await Calendar.findOne({ year, month }).select('days').lean();
@@ -117,7 +132,7 @@ async function getCalendarBreaks(doctorId, date) {
   const key = localDateKey(date);
   const day = calendar.days.find((item) => localDateKey(item.date) === key);
   const schedule = day?.professionals?.find(
-    (item) => String(item.professionalId) === String(doctorId) && item.professionalType === 'doctor'
+    (item) => String(item.professionalId) === String(doctorId) && item.professionalType === professionalType
   );
   return Array.isArray(schedule?.breaks) ? schedule.breaks : [];
 }
@@ -131,13 +146,15 @@ async function getDoctorDailySlots(doctor, dateInput, options = {}) {
   }
 
   const type = VALID_TYPES.includes(options.type) ? options.type : 'clinic';
+  const professionalType = resolveProfessionalType(options);
+  const settings = PROFESSIONAL_SETTINGS[professionalType];
   if (!getDoctorTypeEnabled(doctor, type)) {
     return {
       date: localDateKey(date),
       dayName: date.toLocaleDateString('en-US', { weekday: 'long' }),
       type,
       fee: getDoctorFee(doctor, type),
-      slotDuration: normalizeSlotDuration(doctor, options.duration),
+      slotDuration: normalizeSlotDuration(doctor, options.duration, professionalType),
       isAvailable: false,
       slots: [],
       reason: 'consultation_type_disabled',
@@ -152,7 +169,7 @@ async function getDoctorDailySlots(doctor, dateInput, options = {}) {
     throw error;
   }
 
-  const bookingWindowDays = Math.max(1, Math.min(365, Number(doctor.bookingWindowDays || 60)));
+  const bookingWindowDays = Math.max(1, Math.min(365, Number(doctor.bookingWindowDays || settings.bookingWindowDays)));
   const latest = new Date(today);
   latest.setDate(latest.getDate() + bookingWindowDays);
   if (target > latest) {
@@ -161,14 +178,14 @@ async function getDoctorDailySlots(doctor, dateInput, options = {}) {
       dayName: date.toLocaleDateString('en-US', { weekday: 'long' }),
       type,
       fee: getDoctorFee(doctor, type),
-      slotDuration: normalizeSlotDuration(doctor, options.duration),
+      slotDuration: normalizeSlotDuration(doctor, options.duration, professionalType),
       isAvailable: false,
       slots: [],
       reason: 'outside_booking_window',
     };
   }
 
-  const slotDuration = normalizeSlotDuration(doctor, options.duration);
+  const slotDuration = normalizeSlotDuration(doctor, options.duration, professionalType);
   const { dayName, blocks } = getDaySchedule(doctor, target, type);
   if (!blocks.length) {
     return {
@@ -185,12 +202,12 @@ async function getDoctorDailySlots(doctor, dateInput, options = {}) {
 
   const [appointments, breaks] = await Promise.all([
     Appointment.find({
-      doctorId: doctor._id,
-      professionalType: 'doctor',
+      [settings.idField]: doctor._id,
+      professionalType,
       appointmentDate: { $gte: startOfDay(target), $lte: endOfDay(target) },
       status: { $in: ACTIVE_APPOINTMENT_STATUSES },
     }).select('startTime endTime duration type status').lean(),
-    getCalendarBreaks(doctor._id, target),
+    getCalendarBreaks(doctor._id, target, professionalType),
   ]);
 
   const now = new Date();
@@ -260,13 +277,18 @@ async function getDoctorDailySlots(doctor, dateInput, options = {}) {
 
 async function getNextAvailableSlot(doctor, options = {}) {
   const type = VALID_TYPES.includes(options.type) ? options.type : 'clinic';
-  const daysToScan = Math.max(1, Math.min(Number(options.daysToScan || 14), Number(doctor.bookingWindowDays || 60)));
+  const settings = PROFESSIONAL_SETTINGS[resolveProfessionalType(options)];
+  const daysToScan = Math.max(1, Math.min(Number(options.daysToScan || 14), Number(doctor.bookingWindowDays || settings.bookingWindowDays)));
   const start = startOfDay(options.fromDate ? parseLocalDate(options.fromDate) || new Date() : new Date());
 
   for (let offset = 0; offset <= daysToScan; offset += 1) {
     const date = new Date(start);
     date.setDate(start.getDate() + offset);
-    const daily = await getDoctorDailySlots(doctor, date, { type, duration: options.duration });
+    const daily = await getDoctorDailySlots(doctor, date, {
+      type,
+      duration: options.duration,
+      professionalType: options.professionalType,
+    });
     if (daily.slots.length) {
       return {
         date: daily.date,
@@ -291,4 +313,5 @@ module.exports = {
   getConsultationTypes,
   getDoctorDailySlots,
   getNextAvailableSlot,
+  PROFESSIONAL_SETTINGS,
 };

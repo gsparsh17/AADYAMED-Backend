@@ -23,6 +23,12 @@ const appointmentSchema = new mongoose.Schema(
       ref: 'PhysiotherapistProfile',
     },
 
+    // Optional physiotherapy treatment course (package) this session belongs to.
+    treatmentCourseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PhysioTreatmentCourse',
+    },
+
     // ✅ NEW
     pathologyId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -288,6 +294,8 @@ const appointmentSchema = new mongoose.Schema(
 appointmentSchema.index({ patientId: 1, status: 1 });
 appointmentSchema.index({ doctorId: 1, status: 1 });
 appointmentSchema.index({ physioId: 1, status: 1 });
+appointmentSchema.index({ physioId: 1, appointmentDate: 1 });
+appointmentSchema.index({ treatmentCourseId: 1 }, { sparse: true });
 // ✅ NEW
 appointmentSchema.index({ pathologyId: 1, status: 1 });
 

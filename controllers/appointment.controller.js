@@ -118,7 +118,10 @@ exports.createAppointment = async (req, res) => {
       duration = requestedSlot.duration || duration;
     } else if (professionalType === 'physio') {
       professional = await PhysiotherapistProfile.findById(professionalId).populate('userId', 'isVerified isActive');
-      if (!professional) return res.status(404).json({ success: false, error: 'Physiotherapist not found' });
+      // Same marketplace gate as doctors: patients can only book approved physios.
+      if (!professional || professional.verificationStatus !== 'approved') {
+        return res.status(404).json({ success: false, error: 'Physiotherapist is not available for booking' });
+      }
       if (!professional.userId?.isVerified || professional.userId?.isActive === false) {
         return res.status(400).json({ success: false, error: 'Physiotherapist is not available for appointments' });
       }
@@ -127,10 +130,21 @@ exports.createAppointment = async (req, res) => {
         : type === 'video'
           ? Number(professional.videoCallFee || professional.consultationFee || 0)
           : Number(professional.consultationFee || 0);
-      duration = 60;
-      if (!await checkAvailability(professionalId, professionalType, appointmentDate, startTime)) {
-        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
+      duration = Number(professional.slotDurationMinutes || 45);
+
+      // Use the shared slot generator (as for doctors) instead of the old
+      // exact-startTime check: the slot must exist in the physio's weekly
+      // availability for this visit type and must not overlap a booking.
+      const daily = await getDoctorDailySlots(professional, appointmentDate, { type, duration, professionalType: 'physio' });
+      const requestedSlot = daily.slots.find((slot) => slot.startTime === startTime && slot.isAvailable !== false);
+      if (!requestedSlot) {
+        return res.status(409).json({
+          success: false,
+          error: 'Selected time slot is no longer available. Please refresh availability and choose another slot.',
+          code: 'SLOT_UNAVAILABLE',
+        });
       }
+      duration = requestedSlot.duration || duration;
     } else {
       professional = await PathologyProfile.findById(professionalId).populate('userId', 'isVerified isActive');
       if (!professional) return res.status(404).json({ success: false, error: 'Pathology provider not found' });
@@ -377,10 +391,20 @@ exports.createAppointmentByProfessional = async (req, res) => {
         : type === 'video'
           ? Number(professional.videoCallFee || professional.consultationFee || 0)
           : Number(professional.consultationFee || 0);
-      duration = 60;
-      if (!await checkAvailability(professionalId, professionalType, appointmentDate, startTime)) {
-        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
+      duration = Number(professional.slotDurationMinutes || 45);
+
+      // Physio: same slot generator as doctors (no approval gate here — see
+      // the note above this function).
+      const daily = await getDoctorDailySlots(professional, appointmentDate, { type, duration, professionalType: 'physio' });
+      const requestedSlot = daily.slots.find((slot) => slot.startTime === startTime && slot.isAvailable !== false);
+      if (!requestedSlot) {
+        return res.status(409).json({
+          success: false,
+          error: 'Selected time slot is no longer available. Please refresh availability and choose another slot.',
+          code: 'SLOT_UNAVAILABLE',
+        });
       }
+      duration = requestedSlot.duration || duration;
     }
 
     const appointmentDay = new Date(appointmentDate);
@@ -976,6 +1000,21 @@ exports.rescheduleAppointment = async (req, res) => {
         return res.status(400).json({ success: false, error: 'Doctor is not available for rescheduling' });
       }
       const daily = await getDoctorDailySlots(doctor, newDate, { type: appointment.type, duration: appointment.duration });
+      if (!daily.slots.some((slot) => slot.startTime === newTime && slot.isAvailable !== false)) {
+        return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
+      }
+    } else if (appointment.professionalType === 'physio') {
+      // Physio reschedules use the shared slot generator too (overlap- and
+      // type-aware), with the same approval gate as patient bookings.
+      const physio = await PhysiotherapistProfile.findById(professionalId);
+      if (!physio || physio.verificationStatus !== 'approved') {
+        return res.status(400).json({ success: false, error: 'Physiotherapist is not available for rescheduling' });
+      }
+      const daily = await getDoctorDailySlots(physio, newDate, {
+        type: appointment.type,
+        duration: appointment.duration,
+        professionalType: 'physio',
+      });
       if (!daily.slots.some((slot) => slot.startTime === newTime && slot.isAvailable !== false)) {
         return res.status(409).json({ success: false, error: 'Selected time slot is not available', code: 'SLOT_UNAVAILABLE' });
       }

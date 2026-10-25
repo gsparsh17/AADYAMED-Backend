@@ -9,7 +9,15 @@ const exercisePlanItemSchema = new mongoose.Schema({
   sets: { type: Number, min: 0, max: 100, default: 0 },
   reps: { type: Number, min: 0, max: 1000, default: 0 },
   durationSec: { type: Number, min: 0, max: 86400, default: 0 },
+  // Free-text frequency kept for backward compatibility; structured dosing
+  // fields below drive adherence calculations when present.
   frequency: { type: String, trim: true, maxlength: 120 },
+  holdSec: { type: Number, min: 0, max: 3600 },
+  restSec: { type: Number, min: 0, max: 3600 },
+  side: { type: String, enum: ['left', 'right', 'both', 'na'] },
+  load: { type: String, trim: true, maxlength: 120 },
+  timesPerDay: { type: Number, min: 1, max: 6 },
+  daysPerWeek: { type: Number, min: 1, max: 7 },
   notes: { type: String, trim: true, maxlength: 1000 },
   sortOrder: { type: Number, min: 0, default: 0 },
 }, { _id: true });

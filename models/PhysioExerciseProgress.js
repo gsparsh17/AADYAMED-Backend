@@ -42,6 +42,11 @@ const physioExerciseProgressSchema = new mongoose.Schema({
   },
   completed: { type: Boolean, default: true, index: true },
   notes: { type: String, trim: true, maxlength: 1000 },
+  loggedBy: {
+    type: String,
+    enum: ['patient', 'physio'],
+    default: 'patient',
+  },
   loggedByUserId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

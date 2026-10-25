@@ -45,6 +45,18 @@ const physiotherapistProfileSchema = new mongoose.Schema({
   homeVisitFee: { type: Number, required: true, min: 0 },
   videoCallFee: { type: Number, default: 0 },
 
+  clinicConsultationEnabled: { type: Boolean, default: true },
+  // No default on purpose (same as DoctorProfile): a missing flag means
+  // "decide from the fee" (see getDoctorTypeEnabled). A `default: false`
+  // would switch off home/video for physios who set those fees before these
+  // flags existed.
+  homeVisitEnabled: { type: Boolean },
+  teleconsultationEnabled: { type: Boolean },
+  // Physio sessions run longer than a doctor consult, hence 45 not 30.
+  slotDurationMinutes: { type: Number, default: 45, min: 5, max: 180 },
+  bookingWindowDays: { type: Number, default: 30, min: 1, max: 365 },
+  minimumNoticeMinutes: { type: Number, default: 60, min: 0, max: 10080 },
+
   availability: [availabilitySlotSchema], // ✅ Shared schema
 
   services: [{

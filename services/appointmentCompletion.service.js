@@ -3,6 +3,7 @@ const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
 const PatientProfile = require('../models/PatientProfile');
 const Invoice = require('../models/Invoice');
+const PhysioTreatmentCourse = require('../models/PhysioTreatmentCourse');
 const { createNotification } = require('./notification.service');
 
 async function updateProfessionalStatsOnce(appointment) {
@@ -84,6 +85,33 @@ async function sendCompletionNotification(appointment) {
   }
 }
 
+// Counts a completed appointment against its physiotherapy treatment course.
+// Idempotent: the appointment id is recorded in countedAppointmentIds in the
+// same atomic update that increments sessionsUsed, so retries/double
+// completion never double count.
+async function applyTreatmentCourseSession(appointment) {
+  if (!appointment?.treatmentCourseId || appointment.status !== 'completed') return null;
+  const course = await PhysioTreatmentCourse.findOneAndUpdate(
+    {
+      _id: appointment.treatmentCourseId,
+      status: 'active',
+      countedAppointmentIds: { $ne: appointment._id },
+    },
+    {
+      $inc: { sessionsUsed: 1 },
+      $addToSet: { countedAppointmentIds: appointment._id, appointmentIds: appointment._id },
+    },
+    { new: true }
+  );
+  if (!course) return null;
+  if (course.status === 'active' && Number(course.sessionsUsed) >= Number(course.totalSessions)) {
+    course.status = 'completed';
+    course.completedAt = new Date();
+    await course.save();
+  }
+  return course;
+}
+
 async function finalizeAppointment(appointmentOrId, options = {}) {
   const appointment = typeof appointmentOrId === 'string' || appointmentOrId?._bsontype
     ? await Appointment.findById(appointmentOrId)
@@ -131,7 +159,11 @@ async function finalizeAppointment(appointmentOrId, options = {}) {
     invoice = await ensureAppointmentInvoice(appointment).catch(() => null);
   }
 
+  if (appointment.treatmentCourseId) {
+    await applyTreatmentCourseSession(appointment).catch((error) => console.error('Treatment course session count failed:', error.message));
+  }
+
   return { appointment, invoice, newlyCompleted: !wasCompleted };
 }
 
-module.exports = { finalizeAppointment, ensureAppointmentInvoice };
+module.exports = { finalizeAppointment, ensureAppointmentInvoice, applyTreatmentCourseSession };
