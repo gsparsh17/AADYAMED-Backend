@@ -139,6 +139,7 @@ const startServer = async () => {
       logIntegrationStatus();
       // Once the DB is up and the server is listening.
       require('./jobs/pharmacyOrderTimeoutJob').start();
+      require('./jobs/appointmentRequestTimeoutJob').start();
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

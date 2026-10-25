@@ -498,7 +498,7 @@ exports.createAppointmentByProfessional = async (req, res) => {
     }
 
     try { await updateCalendarForAppointment(appointment); } catch (error) { console.error('Calendar update failed:', error); }
-    try { await sendAppointmentNotifications(appointment, professional, patientProfile); } catch (error) { console.error('Appointment notification failed:', error); }
+    try { await sendAppointmentNotifications(appointment, professional, patientProfile, { byProfessional: true }); } catch (error) { console.error('Appointment notification failed:', error); }
 
     return res.status(201).json({
       success: true,
@@ -1547,36 +1547,148 @@ async function updateCalendarForReschedule(appointment, oldDate, oldTime) {
   }
 }
 
-async function sendAppointmentNotifications(appointment, professional, patientProfile) {
+/**
+ * Tells the patient about a new booking and — when the PATIENT booked —
+ * alerts the professional loudly: a request they have to answer goes out
+ * high-priority on the app's "New appointments" channel, like a pharmacy's
+ * new order. A booking the professional made themselves needs no request
+ * alert (it used to send one).
+ */
+async function sendAppointmentNotifications(appointment, professional, patientProfile, { byProfessional = false } = {}) {
   try {
     const professionalUserId = professional?.userId?._id || professional?.userId;
 
     await createNotification({
       userId: patientProfile.userId,
       userRole: 'patient',
-      title: 'Appointment Created',
-      message: `Your appointment with ${professional.name} is scheduled for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
+      title: byProfessional ? 'Appointment booked' : 'Appointment Created',
+      message: byProfessional
+        ? `${professional.name} booked an appointment for you on ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`
+        : `Your appointment with ${professional.name} is scheduled for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
       type: 'appointment',
       channels: ['in_app', 'push', 'email'],
       relatedEntity: 'Appointment',
       relatedEntityId: appointment._id
     });
 
+    if (byProfessional) return;
+
+    const visit = appointment.type === 'video' ? 'video' : appointment.type === 'home' ? 'home visit' : 'clinic';
     await createNotification({
       userId: professionalUserId,
       userRole: appointment.professionalType, // doctor | physio | pathology
-      title: 'New Appointment Request',
-      message: `New appointment request from ${patientProfile.name} for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime}`,
+      title: 'New appointment request',
+      message: `${patientProfile.name} · ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime} · ${visit}. Tap to accept or decline.`,
       type: 'appointment',
+      priority: 'high',
       channels: ['in_app', 'push'],
-      relatedEntity: 'Appointment',
-      relatedEntityId: appointment._id
+      relatedEntity: 'appointment',
+      relatedEntityId: appointment._id,
+      // Delivery hints for the push only (see notification.service).
+      androidChannel: 'appointment_requests',
+      ttlSeconds: 3600,
+      data: { entityType: 'appointment', kind: 'request', appointmentId: String(appointment._id), professionalType: appointment.professionalType }
     });
 
   } catch (error) {
     console.error('Error sending notifications:', error);
   }
 }
+
+// ── Unanswered requests ────────────────────────────────────────────────────
+// A request nobody answers would otherwise sit as "pending" while the patient
+// waits and the slot stays blocked. Declined automatically when:
+//   * unpaid and unanswered for APPOINTMENT_RESPONSE_HOURS (default 2), or
+//   * (paid or not) the slot starts within APPOINTMENT_RESPONSE_CUTOFF_MINUTES
+//     (default 30) — too late to accept.
+function requestResponseHours() {
+  const v = Number(process.env.APPOINTMENT_RESPONSE_HOURS);
+  return Number.isFinite(v) && v > 0 ? v : 2;
+}
+function requestCutoffMinutes() {
+  const v = Number(process.env.APPOINTMENT_RESPONSE_CUTOFF_MINUTES);
+  return Number.isFinite(v) && v >= 0 ? v : 30;
+}
+
+/** Why [appointment] should be auto-declined at [now], or null. */
+function staleRequestReason(appointment, now = new Date()) {
+  if (appointment.status !== 'pending') return null;
+  const start = getAppointmentStartInstant(appointment);
+  if (start.getTime() - now.getTime() <= requestCutoffMinutes() * 60000) return 'too_close';
+  const paid = appointment.paymentStatus === 'paid';
+  const created = new Date(appointment.createdAt || now);
+  if (!paid && now.getTime() - created.getTime() >= requestResponseHours() * 3600000) return 'no_response';
+  return null;
+}
+
+/**
+ * Declines stale doctor/physio requests. Run by
+ * jobs/appointmentRequestTimeoutJob every few minutes; returns the count.
+ */
+async function autoDeclineStaleRequests(now = new Date()) {
+  const candidates = await Appointment.find({
+    status: 'pending',
+    professionalType: { $in: ['doctor', 'physio'] },
+  }).limit(300);
+
+  let declined = 0;
+  for (const appointment of candidates) {
+    const why = staleRequestReason(appointment, now);
+    if (!why) continue;
+    try {
+      appointment.status = 'rejected';
+      appointment.respondedAt = now;
+      appointment.cancellationReason = why === 'too_close'
+        ? 'Not confirmed before the appointment time'
+        : 'The professional did not respond in time';
+      await appointment.save();
+      await releaseSlotLockForAppointment(appointment).catch((error) => console.error('Slot lock release failed:', error));
+      await voidCommissionsIfTerminal(appointment, 'Request expired');
+      await notifyRequestExpired(appointment);
+      declined += 1;
+    } catch (error) {
+      console.error(`Auto-decline failed for appointment ${appointment._id}:`, error.message);
+    }
+  }
+  return declined;
+}
+
+async function notifyRequestExpired(appointment) {
+  try {
+    const patientProfile = await PatientProfile.findById(appointment.patientId);
+    const paid = appointment.paymentStatus === 'paid';
+    if (patientProfile?.userId) {
+      await createNotification({
+        userId: patientProfile.userId,
+        title: 'Appointment request expired',
+        message: `Your request for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime} wasn't confirmed in time. Please book another slot.${paid ? ' Your payment will be refunded.' : ''}`,
+        type: 'appointment',
+        channels: ['in_app', 'push'],
+        relatedEntity: 'Appointment',
+        relatedEntityId: appointment._id
+      });
+    }
+    const Profile = appointment.professionalType === 'physio' ? PhysiotherapistProfile : DoctorProfile;
+    const profile = await Profile.findById(appointment.professionalType === 'physio' ? appointment.physioId : appointment.doctorId).select('userId').lean();
+    if (profile?.userId) {
+      await createNotification({
+        userId: profile.userId,
+        title: 'Request expired',
+        message: `A request for ${appointment.appointmentDate.toLocaleDateString()} at ${appointment.startTime} wasn't answered in time and was declined.`,
+        type: 'appointment',
+        channels: ['in_app', 'push'],
+        relatedEntity: 'appointment',
+        relatedEntityId: appointment._id,
+        data: { entityType: 'appointment', appointmentId: String(appointment._id) }
+      });
+    }
+  } catch (error) {
+    console.error('Request-expired notification failed:', error.message);
+  }
+}
+
+exports.autoDeclineStaleRequests = autoDeclineStaleRequests;
+exports._staleRequestReason = staleRequestReason;
 
 async function sendStatusUpdateNotification(appointment, oldStatus, newStatus) {
   try {
