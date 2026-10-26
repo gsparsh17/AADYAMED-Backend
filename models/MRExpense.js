@@ -7,11 +7,23 @@ const mrExpenseSchema = new mongoose.Schema({
   amount: { type: Number, min: 0, required: true },
   description: { type: String, trim: true },
   receiptUrl: { type: String, trim: true },
+  // Uploaded through POST /mr/expenses/:id/receipt and served only through
+  // the authenticated GET of the same path; the disk path never leaves the server.
+  receipt: {
+    path: { type: String, select: false },
+    mimeType: String,
+    originalName: String,
+    size: Number,
+    uploadedAt: Date,
+  },
   status: { type: String, enum: ['draft', 'submitted', 'approved', 'rejected', 'paid'], default: 'draft' },
   submittedAt: Date,
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'MRProfile', default: null },
   approvedAt: Date,
   managerComment: String,
+  paidAt: Date,
+  paidBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  paymentReference: { type: String, trim: true },
 }, { timestamps: true });
 
 mrExpenseSchema.index({ profileId: 1, expenseDate: -1 });

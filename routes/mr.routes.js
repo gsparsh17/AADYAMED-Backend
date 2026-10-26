@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/mr.controller');
 const { protect, authorize } = require('../middlewares/auth');
+const receiptUpload = require('../middlewares/mrReceiptUpload');
 
 router.use(protect);
 
@@ -26,6 +27,7 @@ router.patch('/territories/:id', controller.updateTerritory);
 router.get('/accounts', controller.listAccounts);
 router.post('/accounts', controller.createAccount);
 router.patch('/accounts/:id', controller.updateAccount);
+router.get('/directory', controller.searchDirectory);
 
 router.get('/visits', controller.listVisits);
 router.get('/dcr', controller.listVisits);
@@ -39,6 +41,11 @@ router.get('/attendance', controller.getAttendance);
 router.post('/attendance/punch-in', controller.punchIn);
 router.post('/attendance/punch-out', controller.punchOut);
 
+router.get('/leaves', controller.listLeaves);
+router.post('/leaves', controller.applyLeave);
+router.post('/leaves/:id/review', controller.reviewLeave);
+router.post('/leaves/:id/cancel', controller.cancelLeave);
+
 router.get('/tour-plans', controller.listTourPlans);
 router.put('/tour-plans', controller.saveTourPlan);
 router.post('/tour-plans/:id/submit', controller.submitTourPlan);
@@ -48,6 +55,9 @@ router.get('/expenses', controller.listExpenses);
 router.post('/expenses', controller.createExpense);
 router.post('/expenses/:id/submit', controller.submitExpense);
 router.post('/expenses/:id/review', controller.approveExpense);
+router.post('/expenses/:id/pay', controller.payExpense);
+router.post('/expenses/:id/receipt', receiptUpload.single('receipt'), controller.uploadExpenseReceipt);
+router.get('/expenses/:id/receipt', controller.downloadExpenseReceipt);
 
 router.get('/targets', controller.getTargets);
 router.put('/targets', controller.setTarget);

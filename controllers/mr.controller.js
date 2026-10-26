@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const MRProfile = require('../models/MRProfile');
 const MRTerritory = require('../models/MRTerritory');
@@ -10,6 +11,11 @@ const MRTarget = require('../models/MRTarget');
 const MRPOB = require('../models/MRPOB');
 const MRSampleLedger = require('../models/MRSampleLedger');
 const MRDetailingContent = require('../models/MRDetailingContent');
+const MRLeave = require('../models/MRLeave');
+const DoctorProfile = require('../models/DoctorProfile');
+const PharmacyStore = require('../models/PharmacyStore');
+const fs = require('fs');
+const path = require('path');
 
 // ============================================
 // Constants
@@ -28,7 +34,7 @@ const ACCOUNT_FIELDS = [
   'address', 'location', 'territoryId', 'classification', 'visitFrequencyPerMonth',
   'potentialValue', 'isActive',
 ];
-const EXPENSE_FIELDS = ['expenseDate', 'category', 'amount', 'description', 'receiptUrl'];
+const EXPENSE_FIELDS = ['expenseDate', 'category', 'amount', 'description'];
 // A DCR may be logged up to this many days after the call.
 const DCR_BACKDATE_DAYS = Number(process.env.MR_DCR_BACKDATE_DAYS || 3);
 
@@ -860,8 +866,10 @@ exports.createAccount = asyncHandler(async (req, res) => {
     }
   }
 
+  const linkedEntity = await resolveLinkedEntity(req.body.linkedEntity);
   const account = await MRAccount.create({
     ...pick(req.body, ACCOUNT_FIELDS),
+    ...(linkedEntity ? { linkedEntity } : {}),
     assignedProfileIds,
     createdBy: actor?._id || null
   });
@@ -905,6 +913,11 @@ exports.updateAccount = asyncHandler(async (req, res) => {
   }
 
   Object.assign(account, pick(req.body, ACCOUNT_FIELDS));
+  if (req.body.linkedEntity === null) {
+    account.linkedEntity = undefined;
+  } else if (req.body.linkedEntity) {
+    account.linkedEntity = await resolveLinkedEntity(req.body.linkedEntity);
+  }
   await account.save();
 
   res.json({
@@ -1332,9 +1345,18 @@ exports.punchIn = asyncHandler(async (req, res) => {
     row = new MRAttendance({ profileId: actor._id, dateKey });
   }
 
+  if (req.body.workType === 'leave') {
+    return res.status(400).json({
+      success: false,
+      error: 'Apply for leave instead of starting the day'
+    });
+  }
+
+  // An approved half-day leave keeps the day at half.
+  const halfDay = row.status === 'half_day' && row.workType === 'leave';
   row.punchIn = { ...geo, at: new Date() };
-  row.workType = req.body.workType || row.workType || 'field';
-  row.status = row.workType === 'leave' ? 'leave' : 'present';
+  row.workType = ['field', 'office', 'meeting', 'training'].includes(req.body.workType) ? req.body.workType : 'field';
+  row.status = halfDay ? 'half_day' : 'present';
   row.notes = req.body.notes || row.notes;
 
   await row.save();
@@ -2310,6 +2332,7 @@ exports.getDashboard = asyncHandler(async (req, res) => {
     pendingVisits,
     pendingExpenses,
     pendingPlans,
+    pendingLeaves,
     performance
   ] = await Promise.all([
     MRVisit
@@ -2356,6 +2379,10 @@ exports.getDashboard = asyncHandler(async (req, res) => {
       profileId: { $in: teamIds },
       status: 'submitted'
     }),
+    MRLeave.countDocuments({
+      profileId: { $in: teamIds },
+      status: 'pending'
+    }),
     performanceForProfiles(allowed, month)
   ]);
 
@@ -2377,7 +2404,8 @@ exports.getDashboard = asyncHandler(async (req, res) => {
       .reduce((sum, row) => sum + (row.status === 'half_day' ? 0.5 : 1), 0),
     accounts,
     teamSize: teamIds.length,
-    pendingApprovals: pendingVisits + pendingExpenses + pendingPlans
+    pendingLeaves,
+    pendingApprovals: pendingVisits + pendingExpenses + pendingPlans + pendingLeaves
   };
 
   const selfPerformance = ownId
@@ -2506,6 +2534,375 @@ exports.getAnalytics = asyncHandler(async (req, res) => {
 // Error Handler
 // ============================================
 
+// ============================================
+// Expense receipts & payouts
+// ============================================
+
+function publicExpense(expense) {
+  const out = expense.toObject ? expense.toObject() : { ...expense };
+  if (out.receipt) delete out.receipt.path;
+  return out;
+}
+
+function removeFile(filePath) {
+  if (!filePath) return;
+  fs.promises.unlink(filePath).catch(() => {});
+}
+
+exports.uploadExpenseReceipt = asyncHandler(async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'Attach the receipt as a photo or PDF' });
+  }
+
+  const actor = req.user.role === 'admin' ? null : await actorProfile(req);
+  const expense = actor
+    ? await MRExpense.findOne({ _id: req.params.id, profileId: actor._id }).select('+receipt.path')
+    : null;
+
+  if (!expense) {
+    removeFile(req.file.path);
+    return res.status(404).json({ success: false, error: 'Expense not found' });
+  }
+
+  if (!['draft', 'rejected'].includes(expense.status)) {
+    removeFile(req.file.path);
+    return res.status(409).json({ success: false, error: 'Receipts can only change before the claim is sent' });
+  }
+
+  const previous = expense.receipt?.path;
+  expense.receipt = {
+    path: req.file.path,
+    mimeType: req.file.mimetype,
+    originalName: req.file.originalname,
+    size: req.file.size,
+    uploadedAt: new Date()
+  };
+  await expense.save();
+  if (previous && previous !== req.file.path) removeFile(previous);
+
+  res.json({ success: true, expense: publicExpense(expense) });
+});
+
+exports.downloadExpenseReceipt = asyncHandler(async (req, res) => {
+  const expense = await MRExpense.findById(req.params.id).select('+receipt.path');
+
+  if (!expense?.receipt?.path) {
+    return res.status(404).json({ success: false, error: 'No receipt on this expense' });
+  }
+
+  if (req.user.role !== 'admin') {
+    const actor = await actorProfile(req);
+    if (String(actor._id) !== String(expense.profileId)) {
+      await ensureCanManage(req, expense.profileId);
+    }
+  }
+
+  const resolved = path.resolve(expense.receipt.path);
+  if (!fs.existsSync(resolved)) {
+    return res.status(404).json({ success: false, error: 'Receipt file is missing from storage' });
+  }
+
+  res.type(expense.receipt.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${String(expense.receipt.originalName || 'receipt').replace(/"/g, '')}"`);
+  res.sendFile(resolved);
+});
+
+exports.payExpense = asyncHandler(async (req, res) => {
+  const expense = await MRExpense.findById(req.params.id);
+
+  if (!expense) {
+    return res.status(404).json({ success: false, error: 'Expense not found' });
+  }
+
+  await ensureCanManage(req, expense.profileId);
+
+  if (expense.status !== 'approved') {
+    return res.status(409).json({ success: false, error: 'Only approved expenses can be marked paid' });
+  }
+
+  expense.status = 'paid';
+  expense.paidAt = new Date();
+  expense.paidBy = req.user._id;
+  expense.paymentReference = String(req.body.reference || '').trim().slice(0, 80) || undefined;
+  await expense.save();
+
+  res.json({ success: true, expense: publicExpense(expense) });
+});
+
+// ============================================
+// Leave
+// ============================================
+
+const LEAVE_BACKDATE_DAYS = Number(process.env.MR_LEAVE_BACKDATE_DAYS || 7);
+const LEAVE_MAX_DAYS = 30;
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
+function dayKeysBetween(fromKey, toKey) {
+  const out = [];
+  const cursor = new Date(`${fromKey}T00:00:00.000Z`);
+  const end = new Date(`${toKey}T00:00:00.000Z`);
+  while (cursor <= end && out.length <= LEAVE_MAX_DAYS * 2) {
+    out.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return out;
+}
+
+// Sundays are off anyway, so they are neither counted nor marked.
+function workingDayKeys(fromKey, toKey) {
+  return dayKeysBetween(fromKey, toKey)
+    .filter((key) => new Date(`${key}T00:00:00.000Z`).getUTCDay() !== 0);
+}
+
+async function markLeaveAttendance(leave) {
+  const status = leave.halfDay ? 'half_day' : 'leave';
+  for (const dateKey of workingDayKeys(leave.fromDate, leave.toDate)) {
+    const row = await MRAttendance.findOne({ profileId: leave.profileId, dateKey });
+    if (row?.punchIn?.at) {
+      // Worked that day after all; a half-day leave still halves it.
+      if (leave.halfDay && row.status === 'present') {
+        row.status = 'half_day';
+        await row.save();
+      }
+      continue;
+    }
+    await MRAttendance.updateOne(
+      { profileId: leave.profileId, dateKey },
+      { $set: { status, workType: 'leave', notes: `${leave.leaveType} leave` } },
+      { upsert: true }
+    );
+  }
+}
+
+async function clearLeaveAttendance(leave) {
+  await MRAttendance.deleteMany({
+    profileId: leave.profileId,
+    dateKey: { $gte: leave.fromDate, $lte: leave.toDate },
+    workType: 'leave',
+    'punchIn.at': { $exists: false }
+  });
+}
+
+const leavePopulate = { path: 'profileId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name' } };
+
+exports.listLeaves = asyncHandler(async (req, res) => {
+  const allowed = await accessibleProfileIds(req);
+  const filter = { profileId: { $in: allowed } };
+
+  if (req.query.profileId) {
+    if (!allowed.includes(String(req.query.profileId))) {
+      return res.status(403).json({ success: false, error: 'Field user is outside your hierarchy' });
+    }
+    filter.profileId = req.query.profileId;
+  }
+
+  if (req.query.status) filter.status = req.query.status;
+
+  if (req.query.month) {
+    const month = monthKey(req.query.month);
+    filter.fromDate = { $lte: `${month}-31` };
+    filter.toDate = { $gte: `${month}-01` };
+  }
+
+  const leaves = await MRLeave.find(filter).populate(leavePopulate).sort({ fromDate: -1 }).limit(500);
+  res.json({ success: true, leaves });
+});
+
+exports.applyLeave = asyncHandler(async (req, res) => {
+  if (req.user.role === 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin does not apply for field leave' });
+  }
+
+  const actor = await actorProfile(req);
+  const fromDate = String(req.body.fromDate || '').slice(0, 10);
+  const toDate = String(req.body.toDate || fromDate).slice(0, 10);
+
+  if (!DAY_KEY.test(fromDate) || !DAY_KEY.test(toDate) || toDate < fromDate) {
+    return res.status(400).json({ success: false, error: 'Choose a valid from and to date' });
+  }
+
+  const earliest = dateKeyInAppTimezone(new Date(Date.now() - LEAVE_BACKDATE_DAYS * 24 * 60 * 60 * 1000));
+  if (fromDate < earliest) {
+    return res.status(400).json({ success: false, error: `Leave can be applied at most ${LEAVE_BACKDATE_DAYS} days back` });
+  }
+
+  const halfDay = req.body.halfDay === true && fromDate === toDate;
+  const working = workingDayKeys(fromDate, toDate);
+  if (!working.length) {
+    return res.status(400).json({ success: false, error: 'Those dates fall on Sundays' });
+  }
+  if (working.length > LEAVE_MAX_DAYS) {
+    return res.status(400).json({ success: false, error: `A single request can cover up to ${LEAVE_MAX_DAYS} days` });
+  }
+
+  const overlap = await MRLeave.exists({
+    profileId: actor._id,
+    status: { $in: ['pending', 'approved'] },
+    fromDate: { $lte: toDate },
+    toDate: { $gte: fromDate }
+  });
+  if (overlap) {
+    return res.status(409).json({ success: false, error: 'You already have leave on some of these days' });
+  }
+
+  const leaveType = ['casual', 'sick', 'earned', 'other'].includes(req.body.leaveType) ? req.body.leaveType : 'casual';
+  const leave = await MRLeave.create({
+    profileId: actor._id,
+    fromDate,
+    toDate,
+    halfDay,
+    days: halfDay ? 0.5 : working.length,
+    leaveType,
+    reason: String(req.body.reason || '').trim().slice(0, 500)
+  });
+
+  res.status(201).json({ success: true, leave });
+});
+
+exports.reviewLeave = asyncHandler(async (req, res) => {
+  const leave = await MRLeave.findById(req.params.id);
+
+  if (!leave) {
+    return res.status(404).json({ success: false, error: 'Leave request not found' });
+  }
+
+  await ensureCanManage(req, leave.profileId);
+
+  if (leave.status !== 'pending') {
+    return res.status(409).json({ success: false, error: 'Only pending leave can be reviewed' });
+  }
+
+  const decision = req.body.decision;
+  if (!['approve', 'reject'].includes(decision)) {
+    return res.status(400).json({ success: false, error: 'decision must be approve or reject' });
+  }
+
+  const actor = req.user.role === 'admin' ? null : await actorProfile(req);
+  leave.status = decision === 'approve' ? 'approved' : 'rejected';
+  leave.managerComment = String(req.body.comment || '').trim();
+  leave.reviewedBy = actor?._id || null;
+  leave.reviewedAt = new Date();
+  await leave.save();
+
+  if (leave.status === 'approved') await markLeaveAttendance(leave);
+
+  res.json({ success: true, leave: await leave.populate(leavePopulate) });
+});
+
+exports.cancelLeave = asyncHandler(async (req, res) => {
+  const actor = req.user.role === 'admin' ? null : await actorProfile(req);
+  const leave = actor ? await MRLeave.findOne({ _id: req.params.id, profileId: actor._id }) : null;
+
+  if (!leave) {
+    return res.status(404).json({ success: false, error: 'Leave request not found' });
+  }
+
+  const today = dateKeyInAppTimezone();
+  if (leave.status === 'approved' && leave.fromDate <= today) {
+    return res.status(409).json({ success: false, error: 'Leave that has started cannot be cancelled; ask your manager' });
+  }
+  if (!['pending', 'approved'].includes(leave.status)) {
+    return res.status(409).json({ success: false, error: 'This leave is already closed' });
+  }
+
+  const wasApproved = leave.status === 'approved';
+  leave.status = 'cancelled';
+  await leave.save();
+  if (wasApproved) await clearLeaveAttendance(leave);
+
+  res.json({ success: true, leave });
+});
+
+// ============================================
+// Aadya Plus directory (link customers to their own accounts)
+// ============================================
+
+function coordinates(point) {
+  const [lng, lat] = point?.coordinates || [];
+  return Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0) ? { lat, lng } : null;
+}
+
+function directoryDoctor(doctor) {
+  const a = doctor.clinicAddress || {};
+  return {
+    kind: 'doctor',
+    refId: String(doctor._id),
+    name: doctor.name,
+    specialty: (doctor.specialization || []).join(', '),
+    organizationName: doctor.clinicName || '',
+    registrationNumber: doctor.licenseNumber || '',
+    profileImage: doctor.profileImage || null,
+    address: { line1: a.address || '', locality: a.locality || '', city: a.city || '', state: a.state || '', pincode: a.pincode || '' },
+    location: coordinates(a.location)
+  };
+}
+
+function directoryPharmacy(store) {
+  const a = store.address || {};
+  return {
+    kind: 'pharmacy',
+    refId: String(store._id),
+    name: store.name,
+    specialty: '',
+    organizationName: '',
+    registrationNumber: store.drugLicenseNumber || store.licenseNumber || '',
+    phone: store.phone || '',
+    address: { line1: a.street || '', locality: '', city: a.city || '', state: a.state || '', pincode: a.pincode || '' },
+    location: coordinates(a.location)
+  };
+}
+
+async function resolveLinkedEntity(input) {
+  if (!input || !input.refId) return null;
+  const kind = input.kind === 'pharmacy' ? 'pharmacy' : input.kind === 'doctor' ? 'doctor' : null;
+  if (!kind || !mongoose.isValidObjectId(input.refId)) {
+    const error = new Error('Choose a doctor or pharmacy from Aadya Plus to link');
+    error.statusCode = 400;
+    throw error;
+  }
+  const found = kind === 'doctor'
+    ? await DoctorProfile.findOne({ _id: input.refId, verificationStatus: 'approved' }).select('name').lean()
+    : await PharmacyStore.findOne({ _id: input.refId, status: 'active' }).select('name').lean();
+  if (!found) {
+    const error = new Error('That Aadya Plus account is not available to link');
+    error.statusCode = 404;
+    throw error;
+  }
+  return { kind, refId: found._id, name: found.name, linkedAt: new Date() };
+}
+
+exports.searchDirectory = asyncHandler(async (req, res) => {
+  const kind = req.query.kind === 'pharmacy' ? 'pharmacy' : 'doctor';
+  const q = String(req.query.q || '').trim();
+  if (q.length < 2) return res.json({ success: true, results: [] });
+
+  const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const results = kind === 'doctor'
+    ? (await DoctorProfile
+        .find({ verificationStatus: 'approved', $or: [{ name: rx }, { clinicName: rx }, { specialization: rx }, { 'clinicAddress.city': rx }] })
+        .select('name specialization clinicName licenseNumber profileImage clinicAddress')
+        .limit(20)
+        .lean()).map(directoryDoctor)
+    : (await PharmacyStore
+        .find({ status: 'active', $or: [{ name: rx }, { 'address.city': rx }] })
+        .select('name phone licenseNumber drugLicenseNumber address')
+        .limit(20)
+        .lean()).map(directoryPharmacy);
+
+  // Flag the ones already on the caller's customer list.
+  const allowed = await accessibleProfileIds(req);
+  const linked = await MRAccount.find({
+    ...(req.user.role === 'admin' ? {} : { assignedProfileIds: { $in: allowed } }),
+    'linkedEntity.refId': { $in: results.map((r) => r.refId) }
+  }).select('_id linkedEntity.refId').lean();
+  const byRef = new Map(linked.map((a) => [String(a.linkedEntity.refId), String(a._id)]));
+
+  res.json({
+    success: true,
+    results: results.map((r) => ({ ...r, accountId: byRef.get(r.refId) || null }))
+  });
+});
+
 exports.errorHandler = (err, req, res, next) => {
   console.error('MR module error:', err);
 
@@ -2514,7 +2911,7 @@ exports.errorHandler = (err, req, res, next) => {
   }
 
   const status = err.statusCode ||
-    (err.name === 'ValidationError' ? 400 : err.code === 11000 ? 409 : 500);
+    (err.name === 'ValidationError' || err.name === 'MulterError' ? 400 : err.code === 11000 ? 409 : 500);
 
   const message = err.code === 11000
     ? `Duplicate value for ${Object.keys(err.keyPattern || {})[0] || 'unique field'}`

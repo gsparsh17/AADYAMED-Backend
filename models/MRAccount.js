@@ -27,6 +27,13 @@ const mrAccountSchema = new mongoose.Schema({
   visitFrequencyPerMonth: { type: Number, min: 0, default: 1 },
   potentialValue: { type: Number, min: 0, default: 0 },
   isActive: { type: Boolean, default: true },
+  // The same doctor or pharmacy's own Aadya Plus account, when they have one.
+  linkedEntity: {
+    kind: { type: String, enum: ['doctor', 'pharmacy'] },
+    refId: { type: mongoose.Schema.Types.ObjectId },
+    name: String,
+    linkedAt: Date,
+  },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'MRProfile', default: null },
 }, { timestamps: true });
 
