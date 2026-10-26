@@ -393,6 +393,22 @@ exports.listStores = async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
 };
 
+/** Literal text for a RegExp — patients' search text is not a pattern. */
+const escapeRegex = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Store-internal fields a patient must never receive (costs, stock levels, staff). */
+const INTERNAL_MEDICINE_FIELDS = ['purchasePrice', 'reorderLevel', 'expiryAlertDays', 'createdBy', 'updatedBy', 'organizationId'];
+
+function patientMedicine(m) {
+  const out = { ...m };
+  for (const k of INTERNAL_MEDICINE_FIELDS) delete out[k];
+  out.finalUnitPrice = linePrice(m, 1).totalAmount;
+  // Availability, not the store's exact stock count.
+  out.inStock = Number(m.quantity || 0) > 0;
+  out.quantity = Math.min(Number(m.quantity || 0), 20);
+  return out;
+}
+
 exports.catalog = async (req, res) => {
   try {
     requirePatient(req);
@@ -403,18 +419,16 @@ exports.catalog = async (req, res) => {
     if (category && category !== 'all') filter.category = category;
     if (rx === 'required') filter.prescriptionRequired = true;
     if (rx === 'otc') filter.prescriptionRequired = false;
-    if (q) filter.$or = [
-      { medicineName: new RegExp(String(q), 'i') },
-      { genericName: new RegExp(String(q), 'i') },
-      { brandName: new RegExp(String(q), 'i') },
-      { composition: new RegExp(String(q), 'i') }
-    ];
+    if (q) {
+      const rx = new RegExp(escapeRegex(q), 'i');
+      filter.$or = [{ medicineName: rx }, { genericName: rx }, { brandName: rx }, { composition: rx }];
+    }
     const pageNum = Math.max(1, Number(page) || 1); const pageSize = Math.min(100, Math.max(1, Number(limit) || 24));
     const [rows, total] = await Promise.all([
       Medicine.find(filter).sort({ medicineName: 1 }).skip((pageNum - 1) * pageSize).limit(pageSize).lean(),
       Medicine.countDocuments(filter)
     ]);
-    res.json({ success: true, store, products: rows.map(m => ({ ...m, finalUnitPrice: linePrice(m, 1).totalAmount })), pagination: { page: pageNum, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
+    res.json({ success: true, store, products: rows.map(patientMedicine), pagination: { page: pageNum, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
 };
 
@@ -708,7 +722,39 @@ function withDeadline(order) {
  * Rejects every waiting order whose deadline has passed. Run by
  * jobs/pharmacyOrderTimeoutJob every minute. Returns how many were rejected.
  */
+/** Minutes an online order may wait for its payment before it's cancelled. */
+function paymentWindowMinutes() {
+  const v = Number(process.env.PHARMACY_PAYMENT_MINUTES);
+  return Number.isFinite(v) && v > 0 ? v : 30;
+}
+
+/**
+ * Cancels online orders whose payment never completed. They held the
+ * patient's (already cleared) cart and any coupon forever. A payment that
+ * clears afterwards is refunded by the payment controller, not revived.
+ */
+async function expireUnpaidOrders(now = new Date()) {
+  const cutoff = new Date(now.getTime() - paymentWindowMinutes() * 60000);
+  const stale = await EPharmacyOrder.find({
+    orderStatus: 'payment_pending',
+    paymentStatus: { $ne: 'paid' },
+    createdAt: { $lte: cutoff },
+  }).limit(200);
+  let expired = 0;
+  for (const order of stale) {
+    try {
+      await finalizeCancellation(order, 'Payment not completed in time', null);
+      expired += 1;
+    } catch (error) {
+      console.error(`Unpaid-order expiry failed for ${order._id}:`, error.message);
+    }
+  }
+  return expired;
+}
+
 async function autoRejectStaleOrders(now = new Date()) {
+  // Unpaid online orders first: they never reached the store.
+  await expireUnpaidOrders(now).catch((e) => console.error('Unpaid order expiry failed:', e.message));
   // Nothing can be overdue that has waited less than the shortest window.
   const shortest = Math.min(acceptWindowMinutes('placed'), acceptWindowMinutes('prescription_review'));
   const candidates = await EPharmacyOrder.find({
@@ -802,6 +848,10 @@ function applyAvailability(order, availability) {
 
   let changed = false;
   const shortfalls = [];
+  // What the basket was worth before anything was trimmed, priced exactly
+  // as checkout prices it: each line's total is after its own discount and
+  // includes tax.
+  const originalMerchandise = order.items.reduce((sum, i) => sum + Number(i.totalAmount || 0), 0);
 
   for (const item of order.items) {
     const key = String(item._id);
@@ -831,12 +881,18 @@ function applyAvailability(order, availability) {
   if (kept.length === 0) return { empty: true, shortfalls };
 
   const previousTotal = money(order.totalAmount);
-  const merchandise = kept.reduce((sum, i) => sum + Number(i.listedAmount || 0), 0);
-  const originalMerchandise = Number(order.subtotal || 0) || merchandise;
-  const couponRatio = originalMerchandise > 0 ? merchandise / originalMerchandise : 0;
+  // Rebuilt the same way checkout builds it (see priceCart):
+  //   subtotal = Σ taxable (after discount, before tax), tax = Σ tax,
+  //   merchandise = Σ line totals (after discount, incl. tax),
+  //   total = merchandise − coupon + delivery.
+  // It used to rebuild from the pre-discount listed price and then add tax
+  // and subtract the discount again, which counted tax twice and charged
+  // the patient more after a partial fill than for the full order.
+  const merchandise = kept.reduce((sum, i) => sum + Number(i.totalAmount || 0), 0);
+  const couponRatio = originalMerchandise > 0 ? Math.min(1, merchandise / originalMerchandise) : 0;
 
   order.items = kept;
-  order.subtotal = money(merchandise);
+  order.subtotal = money(kept.reduce((sum, i) => sum + Number(i.taxableAmount || 0), 0));
   order.medicineDiscount = money(kept.reduce((sum, i) => sum + Number(i.medicineDiscount || 0), 0));
   order.tax = money(kept.reduce((sum, i) => sum + Number(i.taxAmount || 0), 0));
   // The coupon shrinks with the basket it was applied to. The delivery fee
@@ -844,7 +900,7 @@ function applyAvailability(order, availability) {
   // qualified for free delivery would be worse than absorbing it.
   order.couponDiscount = money(Number(order.couponDiscount || 0) * couponRatio);
   order.totalAmount = money(
-    order.subtotal - order.medicineDiscount - order.couponDiscount + order.tax + Number(order.deliveryFee || 0)
+    Math.max(0, merchandise - order.couponDiscount + Number(order.deliveryFee || 0))
   );
   order.partiallyFulfilled = true;
   order.fulfilmentNote = shortfalls.join('; ');
@@ -1237,3 +1293,7 @@ exports.setStorePause = async (req, res) => {
 
 module.exports._helpers = { linePrice, ecommerceSettings, acceptDeadline, acceptWindowMinutes };
 module.exports.autoRejectStaleOrders = autoRejectStaleOrders;
+
+// For tests.
+exports._applyAvailability = applyAvailability;
+exports._linePrice = linePrice;

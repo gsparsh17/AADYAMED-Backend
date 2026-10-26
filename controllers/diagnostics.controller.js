@@ -320,6 +320,21 @@ async function notifyLabOfBooking(labId, order, patient) {
   });
 }
 
+/**
+ * The patient's view of an order: results stay with the lab until it
+ * releases the report (status 'completed'). They used to be visible while
+ * still being entered or reviewed.
+ */
+function forPatient(order) {
+  const o = order.toObject ? order.toObject() : order;
+  if (o.status !== 'completed') {
+    delete o.results;
+    delete o.resultNotes;
+    o.tests = (o.tests || []).map(({ results, ...t }) => t);
+  }
+  return o;
+}
+
 exports.listPatientOrders = async (req, res) => {
   try {
     const patient = await patientForUser(req.user);
@@ -333,7 +348,7 @@ exports.listPatientOrders = async (req, res) => {
         .sort({ createdAt: -1 }).skip((pageNumber - 1) * pageSize).limit(pageSize),
       LabTest.countDocuments(filter),
     ]);
-    res.json({ success: true, orders, pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
+    res.json({ success: true, orders: orders.map(forPatient), pagination: { page: pageNumber, limit: pageSize, total, pages: Math.ceil(total / pageSize) } });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
@@ -343,7 +358,7 @@ exports.getPatientOrder = async (req, res) => {
     const order = patient && await LabTest.findOne({ _id: req.params.id, patientId: patient._id })
       .populate('pathologyId', 'labName phone email address').populate('assignedPhlebotomistId', 'name phone employeeCode');
     if (!order) return res.status(404).json({ success: false, message: 'Diagnostic order not found' });
-    res.json({ success: true, order });
+    res.json({ success: true, order: forPatient(order) });
   } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 

@@ -28,6 +28,65 @@ function ownsEntity(user, entity) {
   return user.role === 'patient' && user.profileId && String(entity.patientId) === String(user.profileId);
 }
 
+/**
+ * Whether [entity] is finished in a way that can't take money any more:
+ * a cancelled / declined / expired / no-show appointment, a cancelled lab
+ * order, a cancelled or returned pharmacy order.
+ */
+function isClosedForPayment(entityType, entity) {
+  if (entityType === 'appointment') return ['cancelled', 'rejected', 'no_show'].includes(entity.status);
+  if (entityType === 'labtest') return entity.status === 'cancelled';
+  if (entityType === 'pharmacy_order') return ['cancelled', 'returned'].includes(entity.orderStatus);
+  return false;
+}
+
+/**
+ * Refunds a payment that cleared for something already closed (the patient
+ * was mid-checkout when it was cancelled or expired). The payment is kept on
+ * record; the money goes straight back. If the refund can't be made now it
+ * is flagged so support can retry it — the order is never revived.
+ */
+async function refundLatePayment(entityType, entity, paymentId) {
+  const amount = Math.round(Number(entity.totalAmount ?? entity.consultationFee ?? 0) * 100);
+  const razorpay = getRazorpay();
+  const note = 'Payment received after cancellation';
+  try {
+    if (!razorpay || !paymentId || amount <= 0) throw new Error(razorpay ? 'Nothing to refund' : 'Razorpay is not configured');
+    const refund = await razorpay.payments.refund(paymentId, {
+      amount,
+      notes: { entityType, entityId: String(entity._id), reason: note },
+    });
+    entity.paymentStatus = 'refunded';
+    entity.refundId = refund.id;
+    entity.refundedAt = new Date();
+    if (entityType === 'pharmacy_order') {
+      entity.refundAmount = Math.round(Number(refund.amount || 0)) / 100;
+      entity.refundFailure = undefined;
+    }
+    if (entityType === 'labtest') {
+      entity.refundPending = false;
+      entity.refundFailureReason = undefined;
+    }
+    return { refunded: true };
+  } catch (error) {
+    const reason = error?.error?.description || error.message;
+    // Keep it visibly owed: pharmacy and labs have a pending state; an
+    // appointment keeps 'paid' with the reason recorded.
+    if (entityType === 'pharmacy_order') {
+      entity.paymentStatus = 'refund_pending';
+      entity.refundFailure = reason;
+    } else if (entityType === 'labtest') {
+      entity.refundPending = true;
+      entity.refundRequestedAt = new Date();
+      entity.refundFailureReason = reason;
+    } else {
+      entity.cancellationReason = `${entity.cancellationReason || 'Cancelled'} — refund pending (${reason})`;
+    }
+    console.error(`Late-payment refund failed for ${entityType} ${entity._id}:`, reason);
+    return { refunded: false, error: reason };
+  }
+}
+
 async function loadPayableEntity(user, entityType, entityId) {
   const Model = ENTITY_MODELS[entityType];
   if (!Model) return { error: 'Unsupported payment entity type', status: 400 };
@@ -40,7 +99,11 @@ async function loadPayableEntity(user, entityType, entityId) {
   const amount = Number(entity.totalAmount ?? entity.consultationFee ?? 0);
   if (!Number.isFinite(amount) || amount <= 0) return { error: 'Entity has no valid payable amount', status: 400 };
   if (entity.paymentStatus === 'paid') return { error: 'This entity is already paid', status: 409, entity, amount };
-  if (entityType === 'labtest' && entity.status === 'cancelled') return { error: 'Cancelled diagnostic orders cannot be paid', status: 409 };
+  // Nothing closed can be paid for: it used to be possible to pay for a
+  // declined or cancelled appointment or pharmacy order.
+  if (isClosedForPayment(entityType, entity)) {
+    return { error: 'This booking is no longer active, so it can’t be paid for', status: 409 };
+  }
 
   return { entity, amount };
 }
@@ -66,6 +129,22 @@ async function markEntityPaid(attempt, paymentId) {
   entity.paymentId = paymentId;
   entity.razorpayPaymentId = paymentId;
   entity.paymentDate = new Date();
+
+  // Cancelled while the patient was paying: record the payment, refund it,
+  // and leave the order cancelled. Setting orderStatus below used to bring
+  // a cancelled pharmacy order back to 'placed' and keep the money.
+  if (isClosedForPayment(attempt.entityType, entity)) {
+    await refundLatePayment(attempt.entityType, entity, paymentId);
+    if (Array.isArray(entity.statusHistory)) {
+      entity.statusHistory.push({
+        status: entity.orderStatus || entity.status,
+        note: 'Payment arrived after cancellation — refunded',
+        at: new Date(),
+      });
+    }
+    await entity.save();
+    return entity;
+  }
 
   if (attempt.entityType === 'pharmacy_order') {
     entity.orderStatus = entity.prescriptionRequired && entity.prescriptionStatus === 'pending_review'
@@ -135,6 +214,7 @@ exports.createPaymentOrder = async (req, res) => {
             currency: existing.currency,
           },
           payable: { entityType, entityId, amount: loaded.amount, currency: existing.currency },
+          keyId: process.env.RAZORPAY_KEY_ID?.trim(),
         });
       }
     }
@@ -168,6 +248,9 @@ exports.createPaymentOrder = async (req, res) => {
       order,
       paymentAttemptId: attempt._id,
       payable: { entityType, entityId, amount: loaded.amount, currency },
+      // The publishable key id (it's in every Checkout page anyway), so the
+      // app doesn't need it baked in at build time.
+      keyId: process.env.RAZORPAY_KEY_ID?.trim(),
     });
   } catch (error) {
     console.error('Razorpay create order error:', error);
@@ -402,3 +485,7 @@ exports.getPaymentHistory = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// For tests.
+exports._markEntityPaid = markEntityPaid;
+exports._loadPayableEntity = loadPayableEntity;
