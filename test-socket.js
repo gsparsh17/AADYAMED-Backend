@@ -1,11 +1,11 @@
 const io = require('socket.io-client');
-const socket = io('http://13.48.49.45', { transports: ['websocket'] });
+const socket = io('http://16.176.130.55', { transports: ['websocket'] });
 
 socket.on('connect', () => {
     console.log('Test Socket Connected. Joining room...');
     // We need a dummy session id that resembles a mongo id
     const dummySessionId = '6620ca123456789012345678';
-    
+
     socket.emit('join_chat', { sessionId: dummySessionId });
 
     socket.on('receive_message', (data) => {
