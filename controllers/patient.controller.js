@@ -187,6 +187,18 @@ exports.updateProfile = async (req, res) => {
       });
     }
 
+    // Only what a patient may edit about themselves. Identity (email,
+    // phone) belongs to the account, and medical history has its own
+    // endpoint that records who added each entry.
+    const PATIENT_EDITABLE = [
+      'salutation', 'firstName', 'middleName', 'lastName', 'gender', 'dateOfBirth',
+      'alternatePhone', 'address', 'bloodGroup', 'height', 'weight', 'emergencyContact',
+      'insuranceProvider', 'insurancePolicyNumber', 'insuranceValidity', 'preferences', 'profileImage',
+    ];
+    for (const key of Object.keys(updates)) {
+      if (!PATIENT_EDITABLE.includes(key)) delete updates[key];
+    }
+
     // Do not allow changes to these
     delete updates.patientId;
     delete updates.totalAppointments;

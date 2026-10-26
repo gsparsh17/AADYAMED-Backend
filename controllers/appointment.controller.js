@@ -641,8 +641,8 @@ exports.getAppointments = async (req, res) => {
 
     if (req.user.role === 'patient') {
       query = query
-        .populate('doctorId', 'name specialization consultationFee homeVisitFee videoCallFee clinicAddress')
-        .populate('physioId', 'name services consultationFee homeVisitFee videoCallFee clinicAddress')
+        .populate('doctorId', 'name profileImage specialization clinicName consultationFee homeVisitFee videoCallFee clinicAddress')
+        .populate('physioId', 'name profileImage specialization services consultationFee homeVisitFee videoCallFee clinicAddress')
         .populate('pathologyId', 'labName email phone address'); // adjust fields if needed
     } else if (['doctor', 'physio', 'pathology', 'admin'].includes(req.user.role)) {
       query = query.populate('patientId', 'name phone age gender');

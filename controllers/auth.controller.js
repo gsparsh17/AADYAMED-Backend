@@ -897,13 +897,24 @@ exports.updateProfile = async (req, res) => {
           { new: true, runValidators: true }
         );
         break;
-      case 'PatientProfile':
+      case 'PatientProfile': {
+        // A patient edits their name here; the phone is the sign-in identity
+        // (changed only with a fresh OTP) and health details go through
+        // /patient/profile. The account's name is kept in step so the next
+        // sign-in shows the new one.
+        const name = typeof updates.name === 'string' ? updates.name.trim() : '';
+        if (name.length < 2) {
+          return res.status(400).json({ success: false, error: 'Name must be at least 2 characters' });
+        }
+        const parts = name.split(/\s+/);
         profile = await PatientProfile.findOneAndUpdate(
           { userId },
-          { $set: updates },
+          { $set: { name, firstName: parts[0], lastName: parts.slice(1).join(' ') } },
           { new: true, runValidators: true }
         );
+        await User.updateOne({ _id: userId }, { $set: { name } });
         break;
+      }
       case 'PathologyProfile':
         profile = await PathologyProfile.findOneAndUpdate(
           { userId },
@@ -1102,6 +1113,29 @@ exports.resetPassword = async (req, res) => {
  * @route   PUT /api/auth/change-password
  * @access  Private
  */
+/**
+ * @desc    Save the signed-in user's app preferences (notification channels,
+ *          language).
+ * @route   PUT /api/auth/preferences
+ * @access  Private
+ */
+exports.updatePreferences = async (req, res) => {
+  try {
+    const set = {};
+    const n = req.body?.notifications || {};
+    for (const channel of ['email', 'sms', 'push']) {
+      if (typeof n[channel] === 'boolean') set[`preferences.notifications.${channel}`] = n[channel];
+    }
+    if (typeof req.body?.language === 'string' && /^[a-z]{2}$/.test(req.body.language)) {
+      set['preferences.language'] = req.body.language;
+    }
+    const user = await User.findByIdAndUpdate(req.user.id, { $set: set }, { new: true }).select('preferences');
+    res.json({ success: true, preferences: user?.preferences || {} });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Couldn’t save your preferences' });
+  }
+};
+
 exports.changePassword = async (req, res) => {
   try {
     const userId = req.user.id;

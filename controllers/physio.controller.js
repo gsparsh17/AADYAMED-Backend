@@ -243,9 +243,10 @@ exports.getAllPhysios = async (req, res) => {
 
     const physios = await PhysiotherapistProfile.find(filter)
       .select(
-        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee videoCallFee languages about services verificationStatus averageRating totalReviews totalConsultations servesAreas availability'
+        'name profileImage gender specialization qualifications experienceYears clinicAddress consultationFee homeVisitFee videoCallFee clinicConsultationEnabled homeVisitEnabled teleconsultationEnabled languages about services verificationStatus averageRating totalReviews totalConsultations servesAreas availability'
       )
-      .populate('userId', 'email isVerified')
+      // Public listing: never the account's email.
+      .populate('userId', 'isVerified')
       .sort({ averageRating: -1, createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit, 10));
@@ -283,7 +284,7 @@ exports.getPhysioById = async (req, res) => {
 
     const physio = await PhysiotherapistProfile.findById(id)
       .select('-bankDetails -licenseDocument -adminNotes -commissionRate -pendingCommission -paidCommission')
-      .populate('userId', 'email isVerified');
+      .populate('userId', 'isVerified');
 
     if (!physio) {
       return res.status(404).json({ success: false, error: 'Physiotherapist not found' });

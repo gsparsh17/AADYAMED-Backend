@@ -34,6 +34,7 @@ router.put('/profile', authController.updateProfile);
 
 // Password Management (authenticated)
 router.put('/change-password', authController.changePassword);
+router.put('/preferences', authController.updatePreferences);
 
 // Session Management
 router.post('/logout', authController.logout);

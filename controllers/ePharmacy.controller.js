@@ -375,7 +375,8 @@ async function hydratedCart(patientId) {
     if (!medicine) return null;
     const price = linePrice(medicine, i.quantity);
     merchandiseTotal = money(merchandiseTotal + price.totalAmount);
-    return { ...i, medicine, ...price, available: Number(medicine.quantity || 0) >= Number(i.quantity || 0) };
+    // Only what a patient may see of the medicine — never cost or exact stock.
+    return { ...i, medicine: patientMedicine(medicine), ...price, available: Number(medicine.quantity || 0) >= Number(i.quantity || 0) };
   }).filter(Boolean);
   return { cart, store, items, totals: { itemCount: items.reduce((s, i) => s + Number(i.quantity || 0), 0), merchandiseTotal } };
 }
@@ -516,7 +517,7 @@ exports.checkoutQuote = async (req, res) => {
     const patientId = requirePatient(req); const cart = await EPharmacyCart.findOne({ patientId }); if (!cart) return res.status(400).json({ success: false, message: 'Cart is empty' });
     const priced = await priceCart({ patientId, storeId: cart.storeId, rawItems: cart.items, couponCode: req.body.couponCode, addressId: req.body.addressId, paymentMethod: req.body.paymentMethod || 'cod' });
     const rx = await validateRx({ patientId, medicines: priced.lines.map(l => l.medicine), prescriptionId: req.body.prescriptionId || cart.prescriptionId, prescriptionUploadId: req.body.prescriptionUploadId || cart.prescriptionUploadId });
-    res.json({ success: true, quote: { store: priced.store, items: priced.lines.map(l => l.snapshot), subtotal: priced.subtotal, medicineDiscount: priced.medicineDiscount, tax: priced.tax, couponDiscount: priced.couponDiscount, deliveryFee: priced.deliveryFee, totalAmount: priced.totalAmount, prescriptionStatus: rx.status, prescriptionRequired: rx.required } });
+    res.json({ success: true, quote: { store: priced.store, items: priced.lines.map(l => l.snapshot), subtotal: priced.subtotal, merchandiseTotal: priced.merchandiseTotal, medicineDiscount: priced.medicineDiscount, tax: priced.tax, couponDiscount: priced.couponDiscount, deliveryFee: priced.deliveryFee, totalAmount: priced.totalAmount, prescriptionStatus: rx.status, prescriptionRequired: rx.required } });
   } catch (e) { res.status(e.statusCode || 400).json({ success: false, message: e.message }); }
 };
 
