@@ -20,6 +20,26 @@ const DIRECT_REPORT = { ZSM: 'RBM', RBM: 'ABM', ABM: 'MR' };
 const REQUIRED_MANAGER = { MR: 'ABM', ABM: 'RBM', RBM: 'ZSM', ZSM: null };
 const GEOFENCE_METERS = Number(process.env.MR_GEOFENCE_METERS || 250);
 
+// What a field user may set on each record. Everything else (owners,
+// approvals, timestamps) is the server's to decide.
+const TERRITORY_FIELDS = ['code', 'name', 'headquarters', 'city', 'state', 'pincodes', 'isActive'];
+const ACCOUNT_FIELDS = [
+  'type', 'name', 'specialty', 'registrationNumber', 'phone', 'email', 'organizationName',
+  'address', 'location', 'territoryId', 'classification', 'visitFrequencyPerMonth',
+  'potentialValue', 'isActive',
+];
+const EXPENSE_FIELDS = ['expenseDate', 'category', 'amount', 'description', 'receiptUrl'];
+// A DCR may be logged up to this many days after the call.
+const DCR_BACKDATE_DAYS = Number(process.env.MR_DCR_BACKDATE_DAYS || 3);
+
+function pick(body = {}, fields) {
+  const out = {};
+  for (const key of fields) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) out[key] = body[key];
+  }
+  return out;
+}
+
 // ============================================
 // Helper Functions
 // ============================================
@@ -266,30 +286,35 @@ function descendantIdsFromProfiles(rootId, profiles) {
     childrenByManager.get(manager).push(String(profile._id));
   });
 
-  const result = [];
+  const seen = new Set();
   const queue = [...(childrenByManager.get(root) || [])];
 
   while (queue.length) {
     const current = queue.shift();
 
-    if (result.includes(current)) continue;
+    if (seen.has(current)) continue;
 
-    result.push(current);
+    seen.add(current);
     queue.push(...(childrenByManager.get(current) || []));
   }
 
-  return result;
+  return [...seen];
 }
 
-async function accessibleProfileIds(req, { includeSelf = true } = {}) {
+async function accessibleProfileIds(req, { includeSelf = true, includeInactive = false } = {}) {
   if (req.user.role === 'admin') {
     return (await MRProfile.find({ isActive: true }).select('_id').lean())
       .map((profile) => String(profile._id));
   }
 
   const actor = await actorProfile(req);
-  const profiles = await MRProfile.find({ isActive: true }).select('_id managerId').lean();
-  const descendants = descendantIdsFromProfiles(actor._id, profiles);
+  // Walk the whole tree — a deactivated manager must not hide the active
+  // team below them — then keep the people who are active, unless the
+  // caller is managing the team (and may need to reactivate someone).
+  const profiles = await MRProfile.find({}).select('_id managerId isActive').lean();
+  const active = new Set(profiles.filter((p) => p.isActive).map((p) => String(p._id)));
+  const descendants = descendantIdsFromProfiles(actor._id, profiles)
+    .filter((profileId) => includeInactive || active.has(profileId));
 
   return includeSelf ? [String(actor._id), ...descendants] : descendants;
 }
@@ -305,7 +330,7 @@ async function ensureCanManage(req, targetProfileId, { allowSelf = false } = {})
     return actor;
   }
 
-  const allowed = await accessibleProfileIds(req, { includeSelf: false });
+  const allowed = await accessibleProfileIds(req, { includeSelf: false, includeInactive: true });
 
   if (!allowed.includes(String(targetProfileId))) {
     const error = new Error('This field user is outside your reporting hierarchy');
@@ -703,7 +728,7 @@ exports.createTerritory = asyncHandler(async (req, res) => {
   const actor = req.user.role === 'admin' ? null : await actorProfile(req);
 
   const territory = await MRTerritory.create({
-    ...req.body,
+    ...pick(req.body, TERRITORY_FIELDS),
     managerProfileId: req.user.role === 'admin'
       ? (req.body.managerProfileId || null)
       : actor._id
@@ -733,10 +758,25 @@ exports.updateTerritory = asyncHandler(async (req, res) => {
     }
   }
 
-  const territoryUpdates = { ...req.body };
-  delete territoryUpdates._id;
-  delete territoryUpdates.createdBy;
-  delete territoryUpdates.createdAt;
+  const territoryUpdates = pick(req.body, TERRITORY_FIELDS);
+  if (req.user.role === 'admin' && req.body.managerProfileId !== undefined) {
+    territoryUpdates.managerProfileId = req.body.managerProfileId || null;
+  }
+
+  if (req.user.role !== 'admin') {
+    const actor = await actorProfile(req);
+    const existing = await MRTerritory.findById(req.params.id).select('managerProfileId');
+    const owns = existing && (
+      String(existing.managerProfileId) === String(actor._id) ||
+      actor.territoryIds.some((id) => String(id) === String(existing._id))
+    );
+    if (existing && !owns) {
+      return res.status(403).json({
+        success: false,
+        error: 'You can only edit territories you manage'
+      });
+    }
+  }
 
   const territory = await MRTerritory.findByIdAndUpdate(
     req.params.id,
@@ -821,7 +861,7 @@ exports.createAccount = asyncHandler(async (req, res) => {
   }
 
   const account = await MRAccount.create({
-    ...req.body,
+    ...pick(req.body, ACCOUNT_FIELDS),
     assignedProfileIds,
     createdBy: actor?._id || null
   });
@@ -853,14 +893,18 @@ exports.updateAccount = asyncHandler(async (req, res) => {
       });
     }
 
-    if (req.body.assignedProfileIds) {
-      req.body.assignedProfileIds = req.body.assignedProfileIds.filter(
-        (profileId) => allowed.has(String(profileId))
-      );
+    if (Array.isArray(req.body.assignedProfileIds)) {
+      // The editor decides assignments within their own team only; reps
+      // from other teams on a shared account stay assigned.
+      const mine = req.body.assignedProfileIds.filter((profileId) => allowed.has(String(profileId)));
+      const others = account.assignedProfileIds.filter((profileId) => !allowed.has(String(profileId)));
+      account.assignedProfileIds = [...others, ...mine];
     }
+  } else if (Array.isArray(req.body.assignedProfileIds)) {
+    account.assignedProfileIds = req.body.assignedProfileIds;
   }
 
-  Object.assign(account, req.body);
+  Object.assign(account, pick(req.body, ACCOUNT_FIELDS));
   await account.save();
 
   res.json({
@@ -904,7 +948,7 @@ exports.listVisits = asyncHandler(async (req, res) => {
 
   const visits = await MRVisit
     .find(filter)
-    .populate('profileId', 'employeeCode designation headquarters')
+    .populate({ path: 'profileId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name' } })
     .populate('accountId', 'name type specialty organizationName address location classification')
     .populate('approvedBy', 'employeeCode designation')
     .sort({ visitDate: -1, createdAt: -1 })
@@ -945,12 +989,34 @@ exports.createVisit = asyncHandler(async (req, res) => {
     });
   }
 
+  const visitDate = req.body.visitDate ? new Date(req.body.visitDate) : new Date();
+  if (Number.isNaN(visitDate.getTime())) {
+    return res.status(400).json({ success: false, error: 'Invalid visit date' });
+  }
+  const earliest = new Date(Date.now() - DCR_BACKDATE_DAYS * 24 * 60 * 60 * 1000);
+  earliest.setHours(0, 0, 0, 0);
+  if (visitDate < earliest) {
+    return res.status(400).json({
+      success: false,
+      error: `Calls can be logged up to ${DCR_BACKDATE_DAYS} days back`
+    });
+  }
+
+  let jointWithProfileIds = [];
+  if (Array.isArray(req.body.jointWithProfileIds) && req.body.jointWithProfileIds.length) {
+    const partners = await MRProfile.find({
+      _id: { $in: req.body.jointWithProfileIds },
+      isActive: true
+    }).select('_id');
+    jointWithProfileIds = partners.map((p) => p._id);
+  }
+
   const visit = await MRVisit.create({
     profileId: actor._id,
     accountId: account._id,
-    visitDate: req.body.visitDate || new Date(),
-    callType: req.body.callType || 'solo',
-    jointWithProfileIds: req.body.jointWithProfileIds || [],
+    visitDate,
+    callType: jointWithProfileIds.length ? 'joint' : (req.body.callType === 'joint' ? 'joint' : 'solo'),
+    jointWithProfileIds,
     productsDiscussed: req.body.productsDiscussed || [],
     samples: req.body.samples || [],
     gifts: req.body.gifts || [],
@@ -1220,7 +1286,7 @@ exports.getAttendance = asyncHandler(async (req, res) => {
 
   const rows = await MRAttendance
     .find(filter)
-    .populate('profileId', 'employeeCode designation headquarters')
+    .populate({ path: 'profileId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name' } })
     .sort({ dateKey: -1 })
     .limit(1000);
 
@@ -1248,7 +1314,9 @@ exports.punchIn = asyncHandler(async (req, res) => {
     });
   }
 
-  const dateKey = req.body.dateKey || dateKeyInAppTimezone();
+  // Always today on the server's clock — a client-chosen day would let
+  // attendance be backdated.
+  const dateKey = dateKeyInAppTimezone();
 
   let row = await MRAttendance.findOne({ profileId: actor._id, dateKey });
 
@@ -1295,8 +1363,13 @@ exports.punchOut = asyncHandler(async (req, res) => {
     });
   }
 
-  const dateKey = req.body.dateKey || dateKeyInAppTimezone();
-  const row = await MRAttendance.findOne({ profileId: actor._id, dateKey });
+  const today = dateKeyInAppTimezone();
+  const yesterday = dateKeyInAppTimezone(new Date(Date.now() - 24 * 60 * 60 * 1000));
+  let row = await MRAttendance.findOne({ profileId: actor._id, dateKey: today });
+  if (!row?.punchIn?.at) {
+    const open = await MRAttendance.findOne({ profileId: actor._id, dateKey: yesterday });
+    if (open?.punchIn?.at && !open.punchOut?.at) row = open;
+  }
 
   if (!row?.punchIn?.at) {
     return res.status(409).json({
@@ -1348,7 +1421,7 @@ exports.listTourPlans = asyncHandler(async (req, res) => {
 
   const plans = await MRTourPlan
     .find(filter)
-    .populate('profileId', 'employeeCode designation headquarters')
+    .populate({ path: 'profileId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name' } })
     .populate('days.accountIds', 'name type address')
     .sort({ month: -1 });
 
@@ -1447,6 +1520,13 @@ exports.approveTourPlan = asyncHandler(async (req, res) => {
 
   await ensureCanManage(req, plan.profileId);
 
+  if (plan.status !== 'submitted') {
+    return res.status(409).json({
+      success: false,
+      error: `This plan is ${plan.status}, not waiting for review`
+    });
+  }
+
   const decision = req.body.decision;
 
   if (!['approve', 'reject'].includes(decision)) {
@@ -1501,7 +1581,7 @@ exports.listExpenses = asyncHandler(async (req, res) => {
 
   const expenses = await MRExpense
     .find(filter)
-    .populate('profileId', 'employeeCode designation headquarters')
+    .populate({ path: 'profileId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name' } })
     .sort({ expenseDate: -1 });
 
   res.json({
@@ -1520,8 +1600,13 @@ exports.createExpense = asyncHandler(async (req, res) => {
 
   const actor = await actorProfile(req);
 
+  const fields = pick(req.body, EXPENSE_FIELDS);
+  if (fields.expenseDate && new Date(fields.expenseDate) > new Date()) {
+    return res.status(400).json({ success: false, error: 'Expense date cannot be in the future' });
+  }
+
   const expense = await MRExpense.create({
-    ...req.body,
+    ...fields,
     profileId: actor._id,
     status: 'draft'
   });
@@ -1626,7 +1711,7 @@ exports.getTargets = asyncHandler(async (req, res) => {
 
   const targets = await MRTarget
     .find({ profileId: { $in: allowed }, month })
-    .populate('profileId', 'employeeCode designation headquarters')
+    .populate({ path: 'profileId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name' } })
     .lean();
 
   const range = monthRange(month);
@@ -1762,7 +1847,7 @@ exports.listPOB = asyncHandler(async (req, res) => {
 
   const orders = await MRPOB
     .find(filter)
-    .populate('profileId', 'employeeCode designation')
+    .populate({ path: 'profileId', select: 'employeeCode designation userId', populate: { path: 'userId', select: 'name' } })
     .populate('accountId', 'name type organizationName address')
     .sort({ orderDate: -1 });
 
@@ -1787,6 +1872,15 @@ exports.createPOB = asyncHandler(async (req, res) => {
     return res.status(400).json({
       success: false,
       error: 'POB must be placed against a chemist/stockist/hospital account'
+    });
+  }
+
+  const allowedForPob = new Set(await accessibleProfileIds(req));
+  if (account.assignedProfileIds.length &&
+      !account.assignedProfileIds.some((profileId) => allowedForPob.has(String(profileId)))) {
+    return res.status(403).json({
+      success: false,
+      error: 'Account is outside your territory/hierarchy'
     });
   }
 
@@ -1854,10 +1948,11 @@ exports.updatePOBStatus = asyncHandler(async (req, res) => {
 
   await ensureCanManage(req, order.profileId);
 
-  if (!['accepted', 'fulfilled', 'cancelled'].includes(req.body.status)) {
-    return res.status(400).json({
+  const NEXT = { placed: ['accepted', 'cancelled'], accepted: ['fulfilled', 'cancelled'] };
+  if (!(NEXT[order.status] || []).includes(req.body.status)) {
+    return res.status(409).json({
       success: false,
-      error: 'Invalid POB status'
+      error: `A ${order.status} order cannot become ${req.body.status}`
     });
   }
 
@@ -1895,7 +1990,7 @@ exports.listSamples = asyncHandler(async (req, res) => {
 
   const transactions = await MRSampleLedger
     .find(filter)
-    .populate('profileId', 'employeeCode designation')
+    .populate({ path: 'profileId', select: 'employeeCode designation userId', populate: { path: 'userId', select: 'name' } })
     .populate('accountId', 'name type')
     .sort({ transactionDate: -1, createdAt: -1 })
     .limit(1500)
@@ -2295,7 +2390,7 @@ exports.getDashboard = asyncHandler(async (req, res) => {
 
   const recentVisits = await MRVisit
     .find({ profileId: { $in: allowed } })
-    .populate('profileId', 'employeeCode designation')
+    .populate({ path: 'profileId', select: 'employeeCode designation userId', populate: { path: 'userId', select: 'name' } })
     .populate('accountId', 'name type')
     .sort({ visitDate: -1 })
     .limit(8);
