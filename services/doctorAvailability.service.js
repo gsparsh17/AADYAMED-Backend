@@ -1,5 +1,6 @@
 const Appointment = require('../models/Appointment');
 const Calendar = require('../models/Calendar');
+const { CLINIC_OFFSET_MINUTES } = require('../utils/clinicTime');
 
 const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'accepted', 'rescheduled', 'in_progress'];
 const VALID_TYPES = ['clinic', 'home', 'video'];
@@ -210,10 +211,12 @@ async function getDoctorDailySlots(doctor, dateInput, options = {}) {
     getCalendarBreaks(doctor._id, target, professionalType),
   ]);
 
-  const now = new Date();
-  const isToday = localDateKey(now) === localDateKey(target);
+  // "Now" on the clinic's clock; the server may run in UTC.
+  const clinicNow = new Date(Date.now() + CLINIC_OFFSET_MINUTES * 60000);
+  const clinicToday = clinicNow.toISOString().slice(0, 10);
+  const isToday = clinicToday === localDateKey(target);
   const minimumNoticeMinutes = Math.max(0, Math.min(10080, Number(doctor.minimumNoticeMinutes || 60)));
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const nowMinutes = clinicNow.getUTCHours() * 60 + clinicNow.getUTCMinutes();
   const minimumStartMinutes = isToday ? nowMinutes + minimumNoticeMinutes : 0;
 
   const slots = [];

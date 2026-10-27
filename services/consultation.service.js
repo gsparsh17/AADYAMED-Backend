@@ -4,16 +4,14 @@ const ConsultationSession = require('../models/ConsultationSession');
 const PatientProfile = require('../models/PatientProfile');
 const DoctorProfile = require('../models/DoctorProfile');
 const PhysiotherapistProfile = require('../models/PhysiotherapistProfile');
+const { clinicInstant } = require('../utils/clinicTime');
 
 const DEFAULT_JOIN_BEFORE_MINUTES = Number(process.env.CONSULTATION_JOIN_BEFORE_MINUTES || 15);
 const DEFAULT_JOIN_AFTER_MINUTES = Number(process.env.CONSULTATION_JOIN_AFTER_MINUTES || 120);
 const JITSI_BASE_URL = String(process.env.JITSI_BASE_URL || 'https://meet.jit.si').replace(/\/+$/, '');
 
 function scheduledDateTime(appointment) {
-  const date = new Date(appointment.appointmentDate);
-  const [hours, minutes] = String(appointment.startTime || '00:00').split(':').map(Number);
-  date.setHours(hours || 0, minutes || 0, 0, 0);
-  return date;
+  return clinicInstant(appointment.appointmentDate, appointment.startTime);
 }
 
 function joinWindow(appointment) {

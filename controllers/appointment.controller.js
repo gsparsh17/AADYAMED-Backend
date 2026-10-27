@@ -17,18 +17,16 @@ const {
   releaseSlotLockForAppointment,
 } = require('../services/appointmentSlotLock.service');
 const { voidCommissionsIfTerminal } = require('../services/appointmentCommission.service');
+const { clinicInstant } = require('../utils/clinicTime');
 
 // Statuses from which an appointment may be completed (via POST /:id/complete
 // or PUT /:id/status). 'completed' itself is handled idempotently.
 const COMPLETABLE_STATUSES = ['confirmed', 'accepted', 'in_progress'];
 
 // Build the appointment start instant the same way cancel/fee logic does
-// (appointmentDate day + 'HH:mm' startTime, server-local time).
+// (appointmentDate day + 'HH:mm' startTime, clinic-local time).
 function getAppointmentStartInstant(appointment) {
-  const instant = new Date(appointment.appointmentDate);
-  const [h, m] = String(appointment.startTime || '00:00').split(':');
-  instant.setHours(parseInt(h, 10) || 0, parseInt(m, 10) || 0, 0, 0);
-  return instant;
+  return clinicInstant(appointment.appointmentDate, appointment.startTime);
 }
 
 // ========== HELPER FUNCTIONS ==========
@@ -171,9 +169,7 @@ exports.createAppointment = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid appointment date' });
     }
     appointmentDay.setHours(0, 0, 0, 0);
-    const appointmentInstant = new Date(appointmentDay);
-    const [hour, minute] = startTime.split(':').map(Number);
-    appointmentInstant.setHours(hour, minute, 0, 0);
+    const appointmentInstant = clinicInstant(appointmentDate, startTime);
     if (appointmentInstant <= new Date()) {
       return res.status(400).json({ success: false, error: 'Appointment time must be in the future' });
     }
@@ -412,9 +408,7 @@ exports.createAppointmentByProfessional = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid appointment date' });
     }
     appointmentDay.setHours(0, 0, 0, 0);
-    const appointmentInstant = new Date(appointmentDay);
-    const [hour, minute] = startTime.split(':').map(Number);
-    appointmentInstant.setHours(hour, minute, 0, 0);
+    const appointmentInstant = clinicInstant(appointmentDate, startTime);
     if (appointmentInstant <= new Date()) {
       return res.status(400).json({ success: false, error: 'Appointment time must be in the future' });
     }
@@ -903,9 +897,7 @@ exports.cancelAppointment = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Not authorized to cancel this appointment' });
     }
 
-    const appointmentTime = new Date(appointment.appointmentDate);
-    const startTimeParts = appointment.startTime.split(':');
-    appointmentTime.setHours(parseInt(startTimeParts[0]), parseInt(startTimeParts[1]), 0, 0);
+    const appointmentTime = getAppointmentStartInstant(appointment);
 
     const now = new Date();
     const hoursDiff = (appointmentTime - now) / (1000 * 60 * 60);
@@ -975,9 +967,7 @@ exports.rescheduleAppointment = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid new appointment date' });
     }
     newDateTime.setHours(0, 0, 0, 0);
-    const newInstant = new Date(newDateTime);
-    const [hours, minutes] = newTime.split(':').map(Number);
-    newInstant.setHours(hours, minutes, 0, 0);
+    const newInstant = clinicInstant(newDate, newTime);
     if (newInstant <= new Date()) {
       return res.status(400).json({ success: false, error: 'New appointment time must be in the future' });
     }
@@ -1302,9 +1292,7 @@ function calculateCancellationFee(appointment) {
   if (appointment.status === 'completed') return 0;
 
   const now = new Date();
-  const appointmentTime = new Date(appointment.appointmentDate);
-  const startTimeParts = appointment.startTime.split(':');
-  appointmentTime.setHours(parseInt(startTimeParts[0]), parseInt(startTimeParts[1]), 0, 0);
+  const appointmentTime = getAppointmentStartInstant(appointment);
 
   const hoursDiff = (appointmentTime - now) / (1000 * 60 * 60);
 

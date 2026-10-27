@@ -8,6 +8,7 @@ const PatientProfile = require('../models/PatientProfile');
 const Prescription = require('../models/Prescription');
 const LabTest = require('../models/LabTest');
 const Appointment = require('../models/Appointment');
+const { clinicInstant } = require('../utils/clinicTime');
 const { voidPendingCommissionsForAppointment } = require('../services/appointmentCommission.service');
 const {
   startOfDay,
@@ -393,7 +394,7 @@ exports.cancelOrder = async (req, res) => {
     if (order.status === 'cancelled') return res.json({ success: true, order, message: 'Order already cancelled' });
     if (!['requested', 'scheduled'].includes(order.status)) return res.status(409).json({ success: false, message: 'Sample processing has started; cancellation is no longer available' });
     const lab = await PathologyProfile.findById(order.pathologyId).select('bookingSettings');
-    const scheduledAt = new Date(order.scheduledDate); const [h, m] = String(order.startTime || order.scheduledTime || '00:00').split(':').map(Number); scheduledAt.setHours(h || 0, m || 0, 0, 0);
+    const scheduledAt = clinicInstant(order.scheduledDate, order.startTime || order.scheduledTime);
     const windowHours = Number(lab?.bookingSettings?.cancellationWindowHours || 0);
     if (scheduledAt.getTime() - Date.now() < windowHours * 3600000) return res.status(409).json({ success: false, message: `Cancellation closes ${windowHours} hours before the appointment` });
     await session.withTransaction(async () => {
