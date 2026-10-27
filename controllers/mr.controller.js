@@ -35,6 +35,7 @@ const ACCOUNT_FIELDS = [
   'potentialValue', 'isActive',
 ];
 const EXPENSE_FIELDS = ['expenseDate', 'category', 'amount', 'description'];
+const DETAILING_FIELDS = ['title', 'productName', 'contentType', 'url', 'description', 'tags', 'isActive'];
 // A DCR may be logged up to this many days after the call.
 const DCR_BACKDATE_DAYS = Number(process.env.MR_DCR_BACKDATE_DAYS || 3);
 
@@ -347,6 +348,39 @@ async function ensureCanManage(req, targetProfileId, { allowSelf = false } = {})
   return actor;
 }
 
+// Territories a manager may hand out: their own, plus (for RBM/ZSM) every
+// territory already held by someone in their team.
+async function assignableTerritoryIds(req) {
+  if (req.user.role === 'admin') return null;
+  const actor = await actorProfile(req);
+  if (LEVEL[actor.designation] >= LEVEL.RBM) {
+    const team = await MRProfile.find({ _id: { $in: await accessibleProfileIds(req) } }).select('territoryIds').lean();
+    return new Set(team.flatMap((p) => (p.territoryIds || []).map(String)));
+  }
+  return new Set((actor.territoryIds || []).map(String));
+}
+
+async function filterTerritories(req, ids) {
+  if (!Array.isArray(ids)) return [];
+  const allowed = await assignableTerritoryIds(req);
+  const wanted = ids.map(String).filter((tid) => mongoose.isValidObjectId(tid));
+  return allowed ? wanted.filter((tid) => allowed.has(tid)) : wanted;
+}
+
+// Who a field user may take on a joint call: their own team and the
+// managers above them.
+async function jointPartnerIds(actor, req) {
+  const ids = new Set(await accessibleProfileIds(req, { includeSelf: false }));
+  let cursor = actor.managerId;
+  for (let hops = 0; cursor && hops < 4; hops += 1) {
+    const manager = await MRProfile.findById(cursor).select('_id managerId isActive').lean();
+    if (!manager) break;
+    if (manager.isActive) ids.add(String(manager._id));
+    cursor = manager.managerId;
+  }
+  return ids;
+}
+
 function profileSummary(profile) {
   if (!profile) return null;
 
@@ -414,10 +448,27 @@ exports.getMe = asyncHandler(async (req, res) => {
   const profile = await MRProfile
     .findOne({ userId: req.user._id })
     .populate('userId', 'name email phone isActive')
-    .populate('managerId', 'employeeCode designation headquarters')
+    .populate({ path: 'managerId', select: 'employeeCode designation headquarters userId', populate: { path: 'userId', select: 'name phone email' } })
     .populate('territoryIds', 'code name headquarters city state pincodes');
 
   res.json({ success: true, profile });
+});
+
+// A field user fixes the spelling of their own name; everything else on the
+// profile (designation, HQ, territories, manager) is set by their manager.
+exports.updateMe = asyncHandler(async (req, res) => {
+  if (req.user.role === 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin has no field profile' });
+  }
+
+  await actorProfile(req);
+  const name = typeof req.body.name === 'string' ? req.body.name.trim().replace(/\s+/g, ' ') : '';
+  if (name.length < 2 || name.length > 80) {
+    return res.status(400).json({ success: false, error: 'Name must be 2 to 80 characters' });
+  }
+
+  await User.updateOne({ _id: req.user._id }, { $set: { name } });
+  res.json({ success: true, name });
 });
 
 exports.getHierarchy = asyncHandler(async (req, res) => {
@@ -445,8 +496,14 @@ exports.getHierarchy = asyncHandler(async (req, res) => {
 });
 
 exports.getTeam = asyncHandler(async (req, res) => {
-  const allowed = new Set(await accessibleProfileIds(req));
-  const profiles = (await allProfilesWithUsers())
+  // A manager also sees people they deactivated, so they can bring them back.
+  const includeInactive = req.query.includeInactive === 'true';
+  const allowed = new Set(await accessibleProfileIds(req, { includeInactive }));
+  const profiles = (await MRProfile
+    .find(includeInactive ? {} : { isActive: true })
+    .populate('userId', 'name email phone isActive')
+    .populate('territoryIds', 'code name city state')
+    .lean())
     .filter((profile) => allowed.has(String(profile._id)));
 
   res.json({
@@ -555,6 +612,14 @@ async function provisionFieldUser(req, res, managerMode = false) {
     });
   }
 
+  // OTP sign-in finds the account by phone, so a phone must be unique.
+  if (await User.exists({ phone: String(phone) })) {
+    return res.status(409).json({
+      success: false,
+      error: 'This phone number already has an account'
+    });
+  }
+
   if (await MRProfile.exists({ employeeCode: String(employeeCode).toUpperCase() })) {
     return res.status(409).json({
       success: false,
@@ -586,7 +651,7 @@ async function provisionFieldUser(req, res, managerMode = false) {
       division,
       state,
       zone,
-      territoryIds,
+      territoryIds: managerMode ? await filterTerritories(req, territoryIds) : territoryIds,
       productLine,
       dateOfJoining: dateOfJoining || undefined
     });
@@ -643,6 +708,10 @@ exports.updateTeamMember = asyncHandler(async (req, res) => {
       updates[key] = req.body[key];
     }
   });
+
+  if (updates.territoryIds !== undefined) {
+    updates.territoryIds = await filterTerritories(req, updates.territoryIds);
+  }
 
   const profile = await MRProfile
     .findByIdAndUpdate(req.params.id, { $set: updates }, {
@@ -1017,8 +1086,9 @@ exports.createVisit = asyncHandler(async (req, res) => {
 
   let jointWithProfileIds = [];
   if (Array.isArray(req.body.jointWithProfileIds) && req.body.jointWithProfileIds.length) {
+    const allowedPartners = await jointPartnerIds(actor, req);
     const partners = await MRProfile.find({
-      _id: { $in: req.body.jointWithProfileIds },
+      _id: { $in: req.body.jointWithProfileIds.filter((pid) => allowedPartners.has(String(pid))) },
       isActive: true
     }).select('_id');
     jointWithProfileIds = partners.map((p) => p._id);
@@ -2167,8 +2237,13 @@ exports.createDetailing = asyncHandler(async (req, res) => {
     }
   }
 
+  const fields = pick(req.body, DETAILING_FIELDS);
+  if (!/^https?:\/\//i.test(String(fields.url || ''))) {
+    return res.status(400).json({ success: false, error: 'Add a link that starts with http:// or https://' });
+  }
+
   const content = await MRDetailingContent.create({
-    ...req.body,
+    ...fields,
     createdByUserId: req.user._id
   });
 
@@ -2190,9 +2265,10 @@ exports.updateDetailing = asyncHandler(async (req, res) => {
     }
   }
 
-  const detailingUpdates = { ...req.body };
-  delete detailingUpdates._id;
-  delete detailingUpdates.createdByUserId;
+  const detailingUpdates = pick(req.body, DETAILING_FIELDS);
+  if (detailingUpdates.url !== undefined && !/^https?:\/\//i.test(String(detailingUpdates.url))) {
+    return res.status(400).json({ success: false, error: 'Add a link that starts with http:// or https://' });
+  }
 
   const content = await MRDetailingContent.findByIdAndUpdate(
     req.params.id,

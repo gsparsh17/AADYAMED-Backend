@@ -13,6 +13,7 @@ router.post('/admin/users', authorize('admin'), controller.adminCreateUser);
 router.use(authorize('mr', 'admin'));
 
 router.get('/me', controller.getMe);
+router.patch('/me', authorize('mr'), controller.updateMe);
 router.get('/dashboard', controller.getDashboard);
 router.get('/analytics', controller.getAnalytics);
 router.get('/hierarchy', controller.getHierarchy);
