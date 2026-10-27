@@ -8,7 +8,7 @@ const { clinicInstant } = require('../utils/clinicTime');
 
 const DEFAULT_JOIN_BEFORE_MINUTES = Number(process.env.CONSULTATION_JOIN_BEFORE_MINUTES || 15);
 const DEFAULT_JOIN_AFTER_MINUTES = Number(process.env.CONSULTATION_JOIN_AFTER_MINUTES || 120);
-const JITSI_BASE_URL = String(process.env.JITSI_BASE_URL || 'https://meet.jit.si').replace(/\/+$/, '');
+const { JITSI_BASE_URL } = require('./jitsi.service');
 
 function scheduledDateTime(appointment) {
   return clinicInstant(appointment.appointmentDate, appointment.startTime);

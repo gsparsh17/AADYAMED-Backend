@@ -1,6 +1,7 @@
 const ConsultationSession = require('../models/ConsultationSession');
 const Appointment = require('../models/Appointment');
 const { finalizeAppointment } = require('../services/appointmentCompletion.service');
+const { joinDetails } = require('../services/jitsi.service');
 const {
   joinWindow,
   loadAuthorizedAppointment,
@@ -160,7 +161,7 @@ exports.join = async (req, res) => {
     }
 
     const sessionWithRoom = await ConsultationSession.findById(session._id).select('+roomUrl +roomId');
-    if (!sessionWithRoom?.roomUrl) {
+    if (!sessionWithRoom?.roomId) {
       return res.status(500).json({ success: false, error: 'Video room is not configured' });
     }
 
@@ -168,9 +169,26 @@ exports.join = async (req, res) => {
     sessionWithRoom.lastActivityAt = new Date();
     await sessionWithRoom.save();
 
+    // Professionals moderate the room; the patient joins as a guest.
+    const moderator = actor.actorRole !== 'patient';
+    const baseName = String(req.user.name || '').trim() || (moderator ? 'Doctor' : 'Patient');
+    const displayName = actor.actorRole === 'doctor' && !/^dr\.?\s/i.test(baseName) ? `Dr. ${baseName}` : baseName;
+    const video = joinDetails(sessionWithRoom.roomId, {
+      id: req.user._id || req.user.id,
+      name: displayName,
+      email: req.user.email,
+      moderator
+    });
+
     return res.json({
       success: true,
-      joinUrl: sessionWithRoom.roomUrl,
+      joinUrl: video.joinUrl,
+      serverUrl: video.serverUrl,
+      room: video.room,
+      token: video.token,
+      displayName,
+      email: req.user.email || null,
+      isModerator: moderator,
       roomId: sessionWithRoom.roomId,
       provider: sessionWithRoom.provider,
       session: serializeSession(sessionWithRoom, appointment, actor)
